@@ -27,6 +27,7 @@ from .io.logging import open_log, log_generation, close_log, print_and_log, gen_
 from .io.status import write_status, read_status
 from .io.metrics import RunMetrics, stage_timer, read_metrics
 from .evolution.population import Population
+from .evolution.program import NotValidated
 from .evolution.island import (
     seed,
     spawn,
@@ -294,6 +295,39 @@ async def run(
                     split="validate",
                 )
             rank(population)
+
+            # Pre-render LaTeX equations for the final population so the
+            # dashboard's "LaTeX" tab is instant on first view. Best-effort —
+            # failures here don't fail the run (on-demand rendering still
+            # works as a fallback from the dashboard).
+            try:
+                from .dashboard.latex_cache import prerender_latex_for_run
+
+                final_progs = [
+                    (
+                        population[i].idx,
+                        population[i].name or f"P{i}",
+                        population[i].code.model or "",
+                    )
+                    for i in range(len(population))
+                    if not isinstance(
+                        population[i].program_losses.validate.final, NotValidated
+                    )
+                    and population[i].program_losses.validate.final is not None
+                ]
+                with stage_timer(metrics, "prerender_latex"):
+                    await prerender_latex_for_run(
+                        Path(spec.output_dir),
+                        final_progs,
+                        concurrency=8,
+                        log_fn=lambda m: print_and_log(log, m),
+                    )
+            except Exception as e:
+                print_and_log(
+                    log,
+                    f"[prerender_latex] non-fatal error: {type(e).__name__}: {e}",
+                )
+
             metrics.finish_generation()
 
             print_and_log(

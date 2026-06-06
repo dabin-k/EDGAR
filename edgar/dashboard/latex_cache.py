@@ -10,9 +10,11 @@ Reused with light edits from the pattern in tutorials/inspect_outputs.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -106,6 +108,112 @@ async def get_or_generate_latex(
     return {**payload, "cached": False}
 
 
+async def prerender_latex_for_run(
+    run_dir: Path,
+    programs: list[tuple[int, str, str]],
+    *,
+    concurrency: int = 8,
+    log_fn: Callable[[str], None] | None = None,
+) -> dict:
+    """Bulk-fill the LaTeX cache for a list of programs.
+
+    Skips programs that already have a cache file. Programs without model
+    source code are skipped silently. Individual failures are logged but do
+    not raise — the on-demand `get_or_generate_latex` path still works as a
+    fallback for anything that fails here.
+
+    Args:
+        run_dir: run directory containing task_spec.yaml.
+        programs: list of (idx, name, model_code) tuples. Empty model_code is
+            silently skipped.
+        concurrency: max simultaneous LLM calls. 8 is comfortable for
+            Anthropic/Google rate limits at default run settings.
+        log_fn: optional callback for progress messages (e.g. print_and_log).
+
+    Returns:
+        dict with counts: {"n_total", "n_already_cached", "n_generated",
+        "n_failed", "n_skipped"}.
+    """
+    run_dir = Path(run_dir)
+
+    def _log(msg: str) -> None:
+        if log_fn is not None:
+            log_fn(msg)
+
+    spec_path = run_dir / "task_spec.yaml"
+    llm_model = _llm_from_task_spec(spec_path)
+
+    to_render: list[tuple[int, str, str]] = []
+    n_already_cached = 0
+    n_skipped = 0
+    for idx, name, model_code in programs:
+        if not model_code:
+            n_skipped += 1
+            continue
+        if read_cached_latex(run_dir, idx) is not None:
+            n_already_cached += 1
+            continue
+        to_render.append((idx, name, model_code))
+
+    counts = {
+        "n_total": len(programs),
+        "n_already_cached": n_already_cached,
+        "n_generated": 0,
+        "n_failed": 0,
+        "n_skipped": n_skipped,
+    }
+
+    if not to_render:
+        _log(
+            f"[prerender_latex] nothing to do "
+            f"(total={counts['n_total']} cached={n_already_cached} skipped={n_skipped})"
+        )
+        return counts
+
+    if not llm_model:
+        _log(
+            "[prerender_latex] skipped: no model_llm in task_spec.yaml; "
+            "LaTeX will be rendered on-demand from the dashboard instead."
+        )
+        counts["n_failed"] = len(to_render)
+        return counts
+
+    _log(
+        f"[prerender_latex] rendering {len(to_render)} programs "
+        f"({n_already_cached} already cached, {n_skipped} skipped) "
+        f"using {llm_model}, concurrency={concurrency}..."
+    )
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(
+        idx: int, name: str, model_code: str
+    ) -> tuple[int, bool, str | None]:
+        async with sem:
+            detail = {"name": name, "code": {"model": model_code}}
+            try:
+                await get_or_generate_latex(run_dir, idx, detail)
+                return (idx, True, None)
+            except Exception as e:  # noqa: BLE001 — best-effort, never raise
+                return (idx, False, f"{type(e).__name__}: {e}")
+
+    results = await asyncio.gather(
+        *[_one(idx, name, code) for idx, name, code in to_render]
+    )
+    for idx, ok, err in results:
+        if ok:
+            counts["n_generated"] += 1
+        else:
+            counts["n_failed"] += 1
+            _log(f"[prerender_latex] program {idx} failed: {err}")
+
+    _log(
+        f"[prerender_latex] done: generated={counts['n_generated']} "
+        f"failed={counts['n_failed']} cached={n_already_cached}"
+    )
+    return counts
+
+
 def _llm_from_task_spec(spec_path: Path) -> str | None:
     if not spec_path.exists():
         return None
@@ -115,7 +223,12 @@ def _llm_from_task_spec(spec_path: Path) -> str | None:
     except yaml.YAMLError:
         return None
     llms = spec.get("llms") or {}
-    return llms.get("model_llm")
+    model = llms.get("model_llm")
+    # model_llm can be a list (cycled per generation). Pick the first entry —
+    # we just need *some* valid model name to render LaTeX with.
+    if isinstance(model, list):
+        return model[0] if model else None
+    return model
 
 
 _LATEX_PROMPT = """\
