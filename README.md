@@ -124,6 +124,73 @@ Upon pushing to remote the following tests are run, and status displayed on gith
 
 ---
 
+## Running on a remote server (long runs over SSH)
+
+A full run can take a few hours. SSH connections drop. Use `tmux` so the run survives disconnects, then port-forward the dashboard back to your laptop.
+
+The examples below use the Janelia workstation `ruttenv-ws1.hhmi.org` to keep things concrete; substitute your own server, conda root, and repo path.
+
+### 1. Start a tmux session on the server and launch the run
+
+```bash
+ssh ruttenv-ws1.hhmi.org
+tmux new -s edgar          # creates a session named "edgar"
+
+# Inside tmux, in the first window:
+source /groups/ahrens/home/ruttenv/miniforge3/etc/profile.d/conda.sh && conda activate edgar
+cd /groups/ahrens/home/ruttenv/python_packages/EDGAR
+
+edgar run projects/orientation_tuning/config.yaml \
+  --io.data_path=data/gratings_drifting_GT1_2019_04_12_1.npy \
+  --llms.model_llm=claude-sonnet-4-6 \
+  --llms.param_est_llm=claude-sonnet-4-6 \
+  --llms.jax_model_translator_llm=claude-haiku-4-5
+```
+
+### 2. Open a second tmux window for the dashboard
+
+Press `Ctrl-b c` to open a new window inside tmux, then:
+
+```bash
+source /groups/ahrens/home/ruttenv/miniforge3/etc/profile.d/conda.sh && conda activate edgar
+cd /groups/ahrens/home/ruttenv/python_packages/EDGAR
+edgar dashboard --no-open
+```
+
+Defaults bind to `127.0.0.1:8765`. Use `Ctrl-b 0` / `Ctrl-b 1` to flip between windows.
+
+If you want the dashboard reachable from anywhere on the network (no SSH tunnel) — less secure — pass `--host 0.0.0.0`:
+
+```bash
+edgar dashboard --host 0.0.0.0 --no-open
+```
+
+### 3. Access the dashboard from your laptop
+
+In a local terminal on your Mac, set up port forwarding:
+
+```bash
+ssh -L 8765:localhost:8765 ruttenv-ws1.hhmi.org
+```
+
+Leave that terminal open. Then in your browser: `http://localhost:8765`.
+
+### 4. Detach, drop SSH, come back later
+
+- `Ctrl-b d` — detach from tmux. The session keeps running on the server; you can now safely drop SSH.
+- `tmux attach -t edgar` — reattach in a later SSH session, even from a different machine.
+- `tmux ls` — list sessions.
+
+### 5. If the run dies anyway (OOM, reboot, killed tmux)
+
+```bash
+edgar resume program_databases/MM-DD/HH-MM-SS/
+```
+
+Loads the saved population and continues from the next unfinished generation. See `tutorials/how_to_run.md` for the full resume semantics.
+
+---
+
 ## Project Layout
 
 ```text

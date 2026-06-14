@@ -21,27 +21,38 @@ A new agent should read this + the latest `journal/YYYY-MM-DD.md` and be caught 
 
 ## Environment
 
-- **Python env:** `edgar` (miniforge, Python 3.13). Activate with `conda activate edgar`.
-- **Direct path** (if conda activate isn't reliable in a Claude tool call): `/opt/homebrew/Caskroom/miniforge/base/envs/edgar/bin/python`.
+- **Host:** as of 2026-06-06 development moved from Virginia's Mac to a Janelia Linux server. Repo lives at `/groups/ahrens/home/ruttenv/python_packages/EDGAR`. Anything below that says `/opt/homebrew/...` or other macOS paths is stale.
+- **Python env:** `edgar` (miniforge, Python 3.13). Activate with:
+  ```bash
+  source /groups/ahrens/home/ruttenv/miniforge3/etc/profile.d/conda.sh && conda activate edgar
+  ```
+  `conda activate edgar` alone may not work inside Claude tool calls because the conda function isn't loaded by default — always source the profile.d hook first.
+- **Direct python path** (fallback if activation is unreliable): `/groups/ahrens/home/ruttenv/miniforge3/envs/edgar/bin/python`.
 - **Install the repo as a package** (one-time, after activating the env):
   ```bash
   pip install -e .
   ```
-  This makes `import edgar` work from any cwd / IDE cell. `pyproject.toml` at the repo root drives the install; deps are sourced dynamically from `requirements.txt` so that file stays the source of truth.
-- **Dependencies:** `requirements.txt`. Notable pins/decisions:
+  This makes `import edgar` work from any cwd / IDE cell. `pyproject.toml` at the repo root drives the install; deps come from `pyproject.toml`'s `dependencies` list (not `requirements.txt`).
+- **`edgar` console script** is wired in `pyproject.toml` (`[project.scripts] edgar = "edgar.cli:run_cli"`), so after `pip install -e .` you can use `edgar run ...` / `edgar resume ...` / `edgar dashboard` directly. `python -m edgar.cli` still works as a fallback.
+- **Dependencies:** `pyproject.toml` is the source of truth (the older `requirements.txt` references in this file were stale). Notable pins/decisions:
   - `jax[cuda12]` is Linux-only; macOS gets plain `jax`. Conditional via `sys_platform` markers.
-  - `pydantic-ai>=1.0` (code uses `pydantic_ai.capabilities`).
-  - `anthropic` and `google-genai` are unpinned — they're transitive via pydantic-ai and old pins block resolution.
-- **Package was renamed from `src` to `edgar`** (2026-05-24). Any older chat / journal references to `from src.X import Y` or `python -m src.cli` are stale; use `from edgar.X import Y` and `python -m edgar.cli` instead.
+  - `pydantic-ai>=1.96.1` (code uses `pydantic_ai.capabilities`).
+  - `anthropic` and `google-genai` are pinned via `pyproject.toml`.
+- **Package was renamed from `src` to `edgar`** (2026-05-24). Any older chat / journal references to `from src.X import Y` or `python -m src.cli` are stale; use `from edgar.X import Y` and `edgar` (or `python -m edgar.cli`) instead.
 
 ---
 
 ## How to run
 
-- No console-script `edgar` binary is wired yet (the CLI dispatch function is `run_cli`, not `main`, so `[project.scripts]` is intentionally not set). Use:
+- Console script is wired. After `pip install -e .` use:
   ```bash
-  python -m edgar.cli run projects/<task>/config.yaml
+  edgar run projects/<task>/config.yaml
+  edgar test projects/<task>/config.yaml          # 1-gen / 2-island / batch=2 smoke
+  edgar test-fake                                  # offline fake-LLM end-to-end
+  edgar resume program_databases/MM-DD/HH-MM-SS/   # continue a crashed run
+  edgar dashboard                                  # local viewer; add --host 0.0.0.0 --no-open --port 8765 on a headless server
   ```
+  `python -m edgar.cli ...` still works.
 - Override config from the CLI: `--evolution.n_generations=1 --io.data_path=/path.npy`.
 - For a fast smoke run: `--evolution.n_generations=1 --evolution.n_islands=2 --evolution.batch_size=2 --evolution.topology="[1,0]"`.
 
@@ -63,9 +74,15 @@ ANTHROPIC_API_KEY=...
 
 ## Git workflow
 
-- Working branch: `vmsr` (forked from `reilly_image_model_debug`).
-- Main upstream is `main`; the active development branch is `reilly_image_model_debug`.
-- Don't push to anything other than `vmsr` without confirming first.
+- Working branch: `vmsr_gamma` (forked from upstream `gamma`, integrates Virginia's observability + resume + dashboard-deps-error PRs).
+- Remotes (both configured): `origin` = `https://github.com/vruetten/EDGAR.git` (our fork), `upstream` = `https://github.com/reillytilbury/EDGAR.git` (the team's repo we forked from).
+- PR status against upstream `gamma` (as of 2026-06-14):
+  - #42 (dashboard-deps-error): **merged** 2026-06-10.
+  - #40 (observability): **CHANGES_REQUESTED** by rajnutakki, then **addressed** — we pushed the `timed()` decorator refactor to `origin/pr/observability`. Awaiting re-review.
+  - #41 (resume): approved-pending, was **blocked on #40**; should unblock now that #40 is addressed.
+  - #43 (`rajnutakki:doc_bot`, Documentation Bot): open, not ours — watch it.
+- Push fixes to a PR branch (e.g. `pr/observability`) only when the team has reviewed and requested changes (as with #40). Otherwise don't disturb PR branches awaiting first review.
+- Don't push to anything other than `vmsr_gamma` (or a new feature branch off it) without confirming first.
 - Commits: small, focused, descriptive. Use HEREDOC for multi-line commit messages.
 - Don't commit `.env`, `data/*.npy`, or `program_databases/` (all gitignored).
 
@@ -77,6 +94,13 @@ ANTHROPIC_API_KEY=...
 - Each day starts with creating `journal/YYYY-MM-DD.md` with the aims list.
 - After each substantive task, update the journal's "Done" section with what changed and why.
 - End-of-day: write the "Next" section so the next session (or agent) knows where to pick up.
+
+### Check the team's repo every session (source of truth)
+The original repo we forked from (`upstream` = `reillytilbury/EDGAR`) keeps moving. At the **start of each session**, check whether the team has done things and decide whether to incorporate:
+- New commits on the team's branch: `git fetch upstream && git log --oneline vmsr_gamma..upstream/gamma`
+- Open PRs (theirs and ours): `gh pr list -R reillytilbury/EDGAR --base gamma`
+- **Requested changes on our own PRs** (easy to miss): `gh pr view <n> -R reillytilbury/EDGAR --json reviewDecision,reviews,comments` — if a reviewer asked for changes, that's an action item.
+When upstream has advanced, merge `upstream/gamma` into `vmsr_gamma` (or at least review the diff) so we stay close to the team. Keep environment-specific edits (e.g. local `data_path` in `projects/*/config.yaml`) in separate commits so they never leak into an upstream PR.
 
 ### Before non-trivial changes
 - Propose the approach in 2-3 sentences and confirm before implementing. Especially true for:
