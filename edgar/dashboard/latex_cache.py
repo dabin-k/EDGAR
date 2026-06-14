@@ -78,8 +78,10 @@ async def get_or_generate_latex(
 
         raise RuntimeError(
             f"LLM dependencies are missing in {sys.executable!r} "
-            f"(failed to import {e.name!r}). Activate the 'edgar' conda env "
-            "(or `pip install -e .` from this repo) and restart the dashboard."
+            f"(failed to import {e.name!r}). This is likely due to running the "
+            "dashboard from the wrong environment. Activate the 'edgar' conda env, "
+            "`pip install -e .` from the repo root, or use the prefix `uv run` "
+            "and restart the dashboard."
         ) from e
     try:
         retry_config = RetryConfig()
@@ -223,9 +225,10 @@ def _llm_from_task_spec(spec_path: Path) -> str | None:
     except yaml.YAMLError:
         return None
     llms = spec.get("llms") or {}
-    model = llms.get("model_llm")
-    # model_llm can be a list (cycled per generation). Pick the first entry —
-    # we just need *some* valid model name to render LaTeX with.
+    # Derive LaTeX from the jax translator LLM (upstream's choice — typically the
+    # cheaper model), falling back to model_llm. Either may be a list (cycled per
+    # generation); pick the first valid entry.
+    model = llms.get("jax_model_translator_llm") or llms.get("model_llm")
     if isinstance(model, list):
         return model[0] if model else None
     return model
