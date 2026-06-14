@@ -403,6 +403,34 @@ function dashboard() {
       this.panelOpen = false;
     },
 
+    // Switch panel tab; auto-show prerendered LaTeX if cached on disk.
+    async setPanelTab(tab) {
+      this.panelTab = tab;
+      if (tab === 'latex') {
+        await this.tryLoadCachedLatex();
+      }
+    },
+
+    // Read-only cache lookup — never triggers an LLM call. If cache is empty
+    // (pruned program, or run still in progress before prerender), leaves
+    // latexResult empty so the explicit "generate" button stays visible.
+    async tryLoadCachedLatex() {
+      if (this.programDetail.idx == null) return;
+      this.latexError = '';
+      try {
+        const r = await fetch(
+          `/api/runs/${this.runId}/programs/${this.programDetail.idx}/latex_cache`
+        );
+        if (r.ok) {
+          this.latexResult = await r.json();
+        } else {
+          this.latexResult = {};
+        }
+      } catch {
+        this.latexResult = {};
+      }
+    },
+
     async loadLatex(force = false) {
       if (this.programDetail.idx == null) return;
       this.latexError = '';

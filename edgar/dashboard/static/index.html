@@ -362,7 +362,7 @@
       <div class="flex border-b border-zinc-800 text-sm bg-zinc-900/50">
         <template x-for="t in ['code','latex','specs','lineage','fit']" :key="t">
           <button
-            @click="panelTab = t"
+            @click="setPanelTab(t)"
             :class="panelTab === t ? 'bg-zinc-800 text-zinc-50 border-b border-emerald-500' : 'text-zinc-400 hover:text-zinc-100'"
             class="px-4 py-2 capitalize"
             x-text="t"></button>

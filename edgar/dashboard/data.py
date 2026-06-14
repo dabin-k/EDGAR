@@ -293,7 +293,12 @@ def resolve_run_dir(run_id: str, roots: list[Path]) -> Path | None:
 
 # ── Summary ──
 
-STALE_THRESHOLD_S = 60.0
+# 60s was too aggressive: a single `generate_models` batch on Claude Sonnet
+# (48 parallel LLM calls per gen at default settings) can run 1-3 min without
+# touching status.json, since the heartbeat is only emitted on stage transitions.
+# 300s gives a comfortable margin for Sonnet-tier latencies while still catching
+# real crashes within a few minutes.
+STALE_THRESHOLD_S = 300.0
 
 
 def _derived_state(status_doc: dict | None) -> tuple[str, bool]:

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import data as dd
-from .latex_cache import get_or_generate_latex
+from .latex_cache import get_or_generate_latex, read_cached_latex
 
 
 HERE = Path(__file__).resolve().parent
@@ -90,6 +90,17 @@ def build_app(run_roots: list[Path], default_run_dir: Path | None = None) -> Fas
             # LLM key missing / quota etc — surface a 502 with a clean message
             raise HTTPException(502, str(e))
         return result
+
+    @app.get("/api/runs/{run_id}/programs/{idx}/latex_cache")
+    def program_latex_cached(run_id: str, idx: int):
+        # Read-only cache lookup. Never makes an LLM call. Lets the dashboard
+        # auto-show prerendered LaTeX without a click; falls back to 404 so the
+        # frontend can show the explicit "generate" button only when needed.
+        run_dir = _resolve(run_id)
+        cached = read_cached_latex(run_dir, idx)
+        if cached is None:
+            raise HTTPException(404, "not cached")
+        return {**cached, "cached": True}
 
     # ── images ──
 
