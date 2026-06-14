@@ -87,7 +87,7 @@ def plot_model_fits(
     plt.suptitle("Rate Maps\n" + "  |  ".join(title_parts), fontsize=16)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
 
 

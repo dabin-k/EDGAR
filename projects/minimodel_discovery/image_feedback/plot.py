@@ -378,5 +378,5 @@ def plot_model_fits(
     if title_parts:
         fig.suptitle(" | ".join([p for p in title_parts if p]), fontsize=13)
     fig.subplots_adjust(left=0.02, right=0.98, bottom=0.03, top=0.92, wspace=0.25, hspace=0.4)
-    fig.savefig(save_path, dpi=120, bbox_inches="tight")
+    fig.savefig(save_path, dpi=120, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)

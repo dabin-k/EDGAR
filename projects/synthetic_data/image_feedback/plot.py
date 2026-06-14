@@ -71,7 +71,7 @@ def plot_model_fits(data, programs, save_path="", losses=None, sample_losses=Non
     plt.suptitle("Model Fits\n" + "  |  ".join(title_parts), fontsize=16)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=100.0, bbox_inches="tight")
+    plt.savefig(save_path, dpi=100.0, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
 
 

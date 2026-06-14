@@ -500,7 +500,7 @@
         <div x-show="panelTab === 'fit'">
           <div x-show="programDetail.fit_image_url">
             <img :src="`/api/runs/${runId}/${programDetail.fit_image_url}`" alt="model fit"
-              class="rounded border border-zinc-800 max-w-full" />
+              class="rounded border border-zinc-800 max-w-full bg-white" />
           </div>
           <div x-show="!programDetail.fit_image_url" class="text-zinc-500 italic text-sm">
             No fit image was generated for this program (either not yet scored or plot_fn missing).

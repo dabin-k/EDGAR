@@ -243,5 +243,5 @@ def plot_model_fits(
         plt.suptitle(" | ".join(title_parts), fontsize=14)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(save_path, dpi=120, bbox_inches="tight")
+    plt.savefig(save_path, dpi=120, bbox_inches="tight", transparent=False, facecolor="white")
     plt.close(fig)
