@@ -1,6 +1,7 @@
 # Environment variables
 .env
 .vscode/ 
+.DS_Store
 
 CLAUDE.md
 .codex
