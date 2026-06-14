@@ -44,6 +44,27 @@ def test_llm_from_task_spec_missing(tmp_path: Path):
     assert _llm_from_task_spec(tmp_path / "nonexistent.yaml") is None
 
 
+def test_llm_from_task_spec_prefers_jax_translator(tmp_path: Path):
+    """jax_model_translator_llm is the primary source for LaTeX (upstream's
+    choice — usually the cheaper model); it wins over model_llm."""
+    (tmp_path / "task_spec.yaml").write_text(
+        "llms:\n"
+        f"  model_llm: {json.dumps('claude-sonnet-4-6')}\n"
+        f"  jax_model_translator_llm: {json.dumps('claude-haiku-4-5')}\n"
+    )
+    assert _llm_from_task_spec(tmp_path / "task_spec.yaml") == "claude-haiku-4-5"
+
+
+def test_llm_from_task_spec_jax_translator_list(tmp_path: Path):
+    """jax_model_translator_llm may be a list (cycled per generation); the config
+    schema allows list[ValidLLMs]. We need a single string for the LaTeX call."""
+    (tmp_path / "task_spec.yaml").write_text(
+        "llms:\n"
+        f"  jax_model_translator_llm: {json.dumps(['claude-haiku-4-5', 'x'])}\n"
+    )
+    assert _llm_from_task_spec(tmp_path / "task_spec.yaml") == "claude-haiku-4-5"
+
+
 def test_prerender_skips_already_cached(tmp_path: Path):
     """Programs with an existing cache file should be skipped, not re-rendered."""
     _write_task_spec(tmp_path, "claude-haiku-4-5")
