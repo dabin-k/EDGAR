@@ -457,10 +457,21 @@ function dashboard() {
 
     latexHtml(s) {
       if (!s) return '';
-      // Render the LLM output via marked so display equations stay $$...$$
-      // and KaTeX auto-render picks them up afterwards.
+      // KaTeX must see raw backslash macros (\!, \,, \\, \left, ...). marked
+      // applies CommonMark backslash-escaping (\!->!, \,->,) that strips them
+      // before KaTeX runs. So stash math spans out, run markdown on the prose
+      // (tables, **bold**, ...), then restore the spans HTML-escaped (so a
+      // literal '<' inside an equation survives) for renderMath() to pick up.
       try {
-        return marked.parse(s);
+        const math = [];
+        const stash = (m) => `MJX${math.push(m) - 1}XJM`;
+        const protectedSrc = s
+          .replace(/\$\$[\s\S]*?\$\$/g, stash)
+          .replace(/\\\[[\s\S]*?\\\]/g, stash)
+          .replace(/\\\([\s\S]*?\\\)/g, stash)
+          .replace(/\$[^$\n]+?\$/g, stash);
+        const html = marked.parse(protectedSrc);
+        return html.replace(/MJX(\d+)XJM/g, (_, i) => escapeHtml(math[Number(i)]));
       } catch {
         return `<pre>${escapeHtml(s)}</pre>`;
       }
