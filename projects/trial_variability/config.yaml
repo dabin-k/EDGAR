@@ -1,151 +1,23 @@
-task: trial_to_trial_variability
-model_name: model 
+io:
+  data_path: "/home/rajah/datasets/BZ015"
+  save_path: "/home/rajah/projects/trial_variability/run_output"
 
-data_processing_params:
-  data_path: /home/dabin/data/trial_to_trial_variability/data.npy # cheat to save time
-  # data_path: /home/dabin/data/stringer_2020/gratings_drifting_GT1_2019_04_12_1.npy
-  # # data_path: /home/dabin/data/jacob_gratings_202507/parsed/
-  # conc_threshold: 0.55
+evolution:
+  #n_generations: 4
+  n_generations: 1
+  batch_size: 2
+  #n_islands: 4
+  n_islands: 2
+  #topology: [1, 2, 3, 0]
+  topology: [1, 0]
 
-# inputs:
-#   - name: x
-#     description: "Input variable"
 
-experiment_params:
-  n_iterations: 6
-  batch_size: 3
-  n_islands: 3
-  param_penalty_weight: 0.0
-  exploration_topology: [1, 2, 0]
-  exploitation_topology: [1, 2, 0]
-  param_estimator_refinement_rounds: 0
-  param_estimator_timeout_s : 20
-  open_family_tree: true
-  fit_params: true
-  # model_llm: [gemini-3.1-flash-lite-preview, gemini-2.5-flash]
-  model_llm: [gemini-2.5-flash-lite, gemini-2.5-flash-lite] # use cheap models until architectural improvements are made
-  swear_words: [sklearn, PLSRegression, scipy.optimize, optimize.minimize, curve_fit, cvxpy, torch, tensorflow]
-  # No linspace evaluation: the model depends on multiple real data keys
-  # (source responses, per-cell tuning params, etc.) that cannot be replaced
-  # with a 1-D grid. Use the real training data as the behavioral fingerprint.
-  eval_keys: []
-  time_limit: 240
+llms:
+  model_llm:
+    - gemini-2.5-flash
+    - gemini-2.5-flash
+    - gemini-2.5-flash
+  swear_words: []
 
-# ========================
-# Prompt Defaults
-# ========================
-prompts:
-  program_prompt:
-    base: |
-      You are an ambitious computational neuroscience PhD student who is looking to build a model for cell-level trial-to-trial variability in the responses of orientation selective neurons, and contribute significantly to the field.
-      Such model would predict the activity of a group of target cells based on the activity of some source cells given a stimulus angle.
-      The model should aim to capture the trial-to-trial varaibility beyond the mean response given by the tuning curves. The models below are sorted by performance, with the best parent last.
-      Your goal is to generate a new model in the form of a python function, model_v{next_version}, that outperforms all previous models.
-      Here are the ideas that you have already generated. Analyze the progression of models, generalize what worked, and create a better model. 
-    explore: | 
-      Use the models below as *inspiration*, but be *creative* and *invent*
-      something new. Which features in the models below correlate with lower loss?
-      Find these features and *extrapolate* them. You should also *combine* features
-      from several models, and *experiment* with new ideas.
-    exploit: | 
-      Use the parent models as a template to create a better model.
-      Extrapolate features associated with lower loss and remove weak or redundant structure.
-      You will be penalized for complexity, so keep the model as simple as possible while improving performance.
-    code_guidelines: |
-     **Code Generation Guidelines:**
-      * Import any packages you use.
-      * Do NOT include any text other than the code.
-      * Model signature must be `def model(data, params):` where `data` is a dict that contains exactly 4 keys :
-        1. "stimulus" (shape (n_time,))
-        2. "source" (shape (n_time, n_source_cells))
-        3. "source_tuning_params" (shape (n_source_cells, 11))
-        4. "target_tuning_params" (shape (n_target_cells, 11))
-      and `params` is a dict of named arrays/scalars.
-      * Ensure all free parameters are numeric, not strings.
-      * At the beginning of the code, clip the free parameters to a biologically plausible range, e.g., `theta_pref = np.clip(theta_pref, 0, 2 * np.pi)`.
-      * Explicitly state matrix shapes in comments when defining parameters and intermediate variables.
-      * Output a single function and any auxiliary code used by that function should be contained within that function (i.e. no external helper functions).
-
-    docstring_guidelines: |
-      ** Docstring Guidelines:**
-      Each function should include a short docstring. At the start of each model docstring, provide an equation or mathematical description of the model. 
-      Use LaTeX formatting for equations and make it a raw string by prefixing with r.
-    per_model_detail: |
-      **Parent {model_idx} (loss={train_loss})**
-      Model:
-      {program_code_string}
-    image_analysis: | 
-      **Image Analysis Instructions:**
-      Attched is a 3x3 plot of target-cell responses given some stimulus angles. The x-axis is the preferred angle of each target-cell and 
-      the y axis is the response magnitude. Grey scatter points show the observed responses of individual cells and the orange and blue lines 
-      show the model prediction for each cell. 
-
-      Below each stimulus angle plot, there is also a plot of the binned mean errors of the model prediction where the error was binned by 
-      the preferred angle of the target cells. The x-axis is again the preferred angle of the target cells and the y-axis is the mean squared error 
-      of the model prediction for cells with that preferred angle. You can see the stimulus angle as the dotted grey line. 
-
-      Analyse the models' fits to the data in the image below. Identify systematic weaknesses 
-      of the models by observing patterns across multiple cell plots. 
-      Use this analysis to inform the design of a new model, `model_v{next_version}`, that 
-      improves upon the previous models.\n
-
-      Start by documenting the strengths and weaknesses of the existing models based on the image analysis, 
-      making reference to specific stimulus angles and the features that are well or poorly captured by the models. 
-      Then say how you will address the weaknesses in the new model.For every innovation you make, explicitly link it to a part of the plot that inspired it. 
-      
-      Finally, implement the new model in code."
-
-  parameter_estimator:
-    generation_base: |
-      You are an ambitious PhD student in computation neuroscience, developing a model for trial-to-trial variability for orientation selective neurons.
-      Your task is to build parameter_estimator_v{next_version} for the latest model, {model_name}_v{next_version}.
-      The function signature of parameter_estimator_v{next_version} must be `def parameter_estimator_v{next_version}(data : dict) -> dict:`
-      where the data dict contains only these keys ["stimulus", "source", "target", "source_tuning_params", "target_tuning_params"] and the returned dictionary contains named parameters necessary to fit the model (e.g. params["multiplicative_gain"], params["additive_offset"]).
-      Output a single function and any auxiliary code used by that function should be contained within that function (i.e. no external helper functions).
-      Identify the keys of the parameter dictionary from the model code and ensure your estimator returns all necessary parameters.
-      Analyze the parent estimators, generalize what improves loss, and create a better estimator.
-
-    code_guidelines: |
-      **Code Generation Guidelines:**
-      * Use only lightweight NumPy operations.
-      * Do not import heavy ML/stat libraries.
-      * Do not include any text other than the code.
-      * Function signature must be `def parameter_estimator_v{next_version} (data : dict) -> dict:`
-      * Do NOT include external helper functions; the estimator must be self-contained in one function.
-      * Return a parameter dict with keys that match the model parameters.
-      * Every value in the returned parameter dict must be floating-point (`float`/`np.float32`/`np.float64` or float arrays).
-      * Never return integer or boolean parameters (including choices like `0`, `1`, or `np.asarray(1)`); cast to float explicitly.
-      * Do not call the model function in your estimator code; the estimator must be self-contained.
-      * The estimator should be fast and "quick-and-dirty": prefer closed-form linear algebra (`np.linalg.lstsq`, regularized normal equations).
-      * Avoid expensive grid searches, iterative optimizers, or nested loops over large hyperparameter grids.
-      * Keep matrix dimensions explicit and valid for all matmul operations; avoid hard-coded dimensions that can mismatch source / target responses.
-      * Explicitly check and preserve matrix shapes when adding biases (e.g., use `bias[:, None]` for `(n_cells, n_time)` outputs).
-      * Ensure all returned arrays are finite: use `np.nan_to_num` before returning.
-      * If your main solve fails, return a robust finite fallback dict with the same keys and valid shapes.
-      * Avoid `np.log` on unconstrained values; clip first (e.g., `np.log(np.clip(x, 1e-6, None))`).
-      * Avoid building large temporary matrices in the estimator (no full covariance over expanded latent stacks unless size-checked).
-
-    docstring_guidelines: |
-      **Docstring Guidelines:**
-      * Explicitly list all keys of the returned parameter dict and their shapes.
-      * Briefly explain how this estimator improves stability and fit quality.
-
-    refinement_image_instructions: |
-      **Image Analysis Instructions:**
-      Attched is a 3x3 plot of target-cell responses given some stimulus angles. The x-axis is the preferred angle of each target-cell and
-      the y axis is the response magnitude. Grey scatter points show the observed responses of individual cells and the orange and blue lines
-      show the model prediction for each cell.
-
-      Below each stimulus angle plot, there is also a plot of the binned mean errors of the model prediction where the error was binned by
-      the preferred angle of the target cells. The x-axis is again the preferred angle of the target cells and the y-axis is the mean squared error
-      of the model prediction for cells with that preferred angle. You can see the stimulus angle as the dotted grey line.
-      Identify systematic estimator failures (scale bias, baseline bias, or cell-specific outliers),
-      then propose concrete parameter-estimation updates that address these repeated patterns.
-      Do not call the model function in your estimator code.
-
-    per_model_detail: |
-      **Parent {model_idx} (loss={train_loss}, opt_time={optimization_time_s})**
-      Model:
-      {program_code_string}
-      Estimator:
-      {parameter_estimator_code_string}
+project_params:
+  random_seed: 42
