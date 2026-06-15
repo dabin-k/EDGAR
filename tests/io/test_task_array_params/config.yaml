@@ -13,6 +13,7 @@ evolution:
 llms:
   num_parents: 2
   model_llm: gemini-2.5-flash-lite
+  model_response_schema: ModelSchemaDynamicDefaultParams #lambda function for dynamic size default_params
   param_est_llm: gemini-2.5-flash-lite
   jax_model_translator_llm: gemini-2.5-flash-lite
   max_lines: 50

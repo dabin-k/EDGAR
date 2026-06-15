@@ -81,3 +81,11 @@ class TranslationSchema(BaseModel):
     code: str = Field(
         description="The translated JAX-compatible code, including imports."
     )
+
+
+RESPONSE_SCHEMAS = {
+    "ModelSchema": ModelSchema,
+    "ModelSchemaDynamicDefaultParams": ModelSchemaDynamicDefaultParams,
+    "ParamEstSchema": ParamEstSchema,
+    "TranslationSchema": TranslationSchema,
+}

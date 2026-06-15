@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 from typing import Callable
+from pydantic import BaseModel
 
 import numpy as np
 import yaml
@@ -38,12 +39,14 @@ import yaml
 from ..evolution.program import Program, BirthCertificate, Code
 from ..llm.code_loading import load_function_from_source
 from ..llm.prompt_schema import PromptSchema
+from ..llm.response_schema import RESPONSE_SCHEMAS
 from .config import Config
 from .config import REPO_ROOT
 
 
 LLMs = namedtuple("LLMs", ["model", "param_est", "model_jax"])
 PromptSchemas = namedtuple("PromptSchemas", ["model", "param_est", "jax_model"])
+ResponseSchemas = namedtuple("ResponseSchemas", ["model", "param_est", "jax_model"])
 
 
 def _git_state() -> tuple[str, bool]:
@@ -161,6 +164,26 @@ class TaskSpec:
     param_est_prompt_schema: PromptSchema
 
     jax_model_prompt_schema: PromptSchema
+
+    # ── response schemas — one per LLM role, resolved from config strings ──
+    # Pydantic model for the model generation response.
+    model_response_schema: type[BaseModel]
+
+    # Pydantic model for the parameter estimator response.
+    param_est_response_schema: type[BaseModel]
+
+    # Pydantic model for the JAX translation response.
+    jax_model_response_schema: type[BaseModel]
+
+    # ── response schemas — one per LLM role, resolved from config strings ──
+    # Pydantic model for the model generation response.
+    model_response_schema: type[BaseModel]
+
+    # Pydantic model for the parameter estimator response.
+    param_est_response_schema: type[BaseModel]
+
+    # Pydantic model for the JAX translation response.
+    jax_model_response_schema: type[BaseModel]
 
     load_data_fn: Callable
 
@@ -286,6 +309,13 @@ class TaskSpec:
             model_prompt_schema=config.prompts.model,
             param_est_prompt_schema=config.prompts.parameter_estimator,
             jax_model_prompt_schema=config.prompts.jax_translator_model,
+            model_response_schema=RESPONSE_SCHEMAS[config.llms.model_response_schema],
+            param_est_response_schema=RESPONSE_SCHEMAS[
+                config.llms.param_est_response_schema
+            ],
+            jax_model_response_schema=RESPONSE_SCHEMAS[
+                config.llms.jax_model_response_schema
+            ],
             load_data_fn=load_data_fn,
             loss_fn=loss_fn,
             plot_fn=plot_fn,
@@ -334,6 +364,11 @@ class TaskSpec:
                 "model": self.model_prompt_schema.model_dump(),
                 "param_est": self.param_est_prompt_schema.model_dump(),
                 "jax_model": self.jax_model_prompt_schema.model_dump(),
+            },
+            "response_schemas": {
+                "model": self.model_response_schema.__name__,
+                "param_est": self.param_est_response_schema.__name__,
+                "jax_model": self.jax_model_response_schema.__name__,
             },
         }
 
@@ -448,6 +483,20 @@ class TaskSpec:
             model=self.model_prompt_schema,
             param_est=self.param_est_prompt_schema,
             jax_model=self.jax_model_prompt_schema,
+        )
+
+    @property
+    def response_schemas(self) -> ResponseSchemas:
+        """
+        Get all response schemas as a namedtuple.
+
+        Returns:
+            ResponseSchemas with model, param_est, and jax response schema classes
+        """
+        return ResponseSchemas(
+            model=self.model_response_schema,
+            param_est=self.param_est_response_schema,
+            jax_model=self.jax_model_response_schema,
         )
 
     @staticmethod

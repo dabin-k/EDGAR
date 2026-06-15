@@ -9,6 +9,7 @@ from edgar.llm.generate import (
     _translate_one_model,
     translate_programs,
 )
+from edgar.llm.response_schema import ModelSchemaDynamicDefaultParams
 from edgar.llm.code_loading import load_function_from_source
 from edgar.llm.prompt_schema import PromptSchema
 from tests.evolution.utils import make_empty_program
@@ -96,6 +97,7 @@ async def test_generate_one_model_dynamic_params():
         1.0,
         spec=make_fake_spec(output_dir="test_output"),
         data=data,
+        output_schema=ModelSchemaDynamicDefaultParams,
     )
 
     header = (
