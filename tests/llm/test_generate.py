@@ -1,5 +1,6 @@
 import pytest
 from edgar.evolution.program import BirthCertificate, Code, LossPair, Losses, Program
+import numpy as np
 from edgar.llm.generate import (
     _generate_one_model,
     _generate_one_param_est,
@@ -11,7 +12,14 @@ from edgar.llm.generate import (
 from edgar.llm.code_loading import load_function_from_source
 from edgar.llm.prompt_schema import PromptSchema
 from tests.evolution.utils import make_empty_program
-from tests.llm.programs import Program1, InvalidProgram, Program2, ProgramSolution
+from tests.llm.programs import (
+    Program1,
+    InvalidProgram,
+    Program2,
+    ProgramSolution,
+    ProgramArrayParamsFallback,
+    DEFAULT_FAKE_PROGRAMS,
+)
 from tests.llm.fakellm import FakeLLM, CyclingModel
 from tests.llm.utils import (
     generate_one_fake_model,
@@ -38,7 +46,7 @@ async def test_generate_one_model():
         parent_program_template="..",
         parent_program_vars=[],
     )
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_model = llm.gen_model()  # A TestModel with code for Program1
     await _generate_one_model(
         program,
@@ -57,6 +65,55 @@ async def test_generate_one_model():
     assert program.name == "Fake Model 0"
     assert program.birth == birth
     assert program.image_path is not None
+
+
+@pytest.mark.asyncio
+async def test_generate_one_model_dynamic_params():
+    program = make_empty_program()
+    birth = program.birth
+    parents = [Program1(), InvalidProgram()]
+    prompt_schema = PromptSchema(
+        base="...",
+        explore="...",
+        code_guidelines="...",
+        docstring_guidelines="...",
+        parent_program_template="..",
+        parent_program_vars=[],
+    )
+    llm = FakeLLM([ProgramArrayParamsFallback])
+    llm_model = llm.gen_model()  # A TestModel with code for ProgramArrayFallback
+
+    # data has x with shape (n_trials, n_features)
+    n_trials, n_features = 10, 5
+    data = {"x": np.ones((n_trials, n_features))}
+
+    await _generate_one_model(
+        program,
+        parents,
+        prompt_schema,
+        llm_model,
+        "explore",
+        1.0,
+        spec=make_fake_spec(output_dir="test_output"),
+        data=data,
+    )
+
+    header = (
+        '"""\nfake thought process\n\n'
+        + ProgramArrayParamsFallback.latex_equation
+        + '\n"""\n\n'
+    )
+    assert (
+        program.code.model == header + ProgramArrayParamsFallback.model + " + 0.000\n"
+    )
+
+    # Verify default_params is a dict (resolved from callable)
+    assert isinstance(program.default_params, dict)
+    assert np.allclose(program.default_params["a"], np.ones((n_features,)))
+    assert program.default_params["b"] == 0.1
+
+    assert program.name == "Fake Model 0"
+    assert program.birth == birth
 
 
 @pytest.mark.asyncio
@@ -82,7 +139,7 @@ async def test_generate_same_model():
         parent_program_template="..",
         parent_program_vars=[],
     )
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_model = llm.gen_model()  # A TestModel with code for Program1
     await generate_models(population, prompt_schema, llm_model, "explore", 1.0)
 
@@ -127,7 +184,7 @@ async def test_generate_distinct_models():
         parent_program_template="..",
         parent_program_vars=[],
     )
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_models = CyclingModel([llm.gen_model() for _ in range(9)])
     await generate_models(population, prompt_schema, llm_models, "explore", 1.0)
 
@@ -169,7 +226,7 @@ async def test_generate_one_param_est():
         parent_program_template="..",
         parent_program_vars=[],
     )
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_model = llm.gen_param_est()  # A TestModel with param_est for Program1
     await _generate_one_param_est(program, [], prompt_schema, llm_model)
 
@@ -197,7 +254,7 @@ async def test_generate_param_est():
     model_and_param_est = (
         await generate_one_fake_param_est()
     )  # Already has model and param est
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_models = CyclingModel([llm.gen_param_est() for _ in range(3)])
     population = [no_model] + model_no_param_est + [model_and_param_est]
     await generate_param_ests(population, prompt_schema, llm_models)
@@ -237,7 +294,7 @@ async def test_translate_one_model():
         parent_program_template="..",
         parent_program_vars=[],
     )
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_model = (
         llm.gen_model_translation()
     )  # A TestModel with code.model_jax for Program1
@@ -275,7 +332,7 @@ async def test_translate_models():
     models_no_jax = await generate_fake_models(3)
     model_jax = await generate_one_fake_model()  # Already has model
     model_jax.code.model_jax = "Existing jax model code"  # Set existing jax model code to check it is unchanged
-    llm = FakeLLM()
+    llm = FakeLLM(DEFAULT_FAKE_PROGRAMS)
     llm_models = CyclingModel([llm.gen_model_translation() for _ in range(3)])
     population = [no_model] + models_no_jax + [model_jax]
     await translate_programs(population, prompt_schema, llm_models)

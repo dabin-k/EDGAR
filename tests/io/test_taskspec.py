@@ -162,3 +162,29 @@ def test_schedule_single_model():
         assert llms.model == "gemini-2.5-flash-lite"
         assert llms.param_est == "gemini-2.5-flash-lite"
         assert llms.model_jax == "gemini-2.5-flash-lite"
+
+
+def test_load_with_seeds_with_dynamic_default_params():
+    """
+    Tests that a TaskSpec can be created from a config with seed programs that have dynamic default_params (i.e. default_params is a callable that needs to be resolved using the program's data).
+    Checks that the dynamic default_params are correctly resolved and n_params counted.
+    """
+    config = Config.from_yaml("tests/io/test_task_array_params/config.yaml")
+    taskspec = TaskSpec.from_config(config)
+    X_discover, X_validate, X_eval = taskspec.load_data_fn(
+        taskspec.io["data_path"], **taskspec.project_params
+    )
+    expected_n_params = (6, 5)  # n_trials//2 +1 for model1, n_trials//2 for model2
+    expected_output_size = 5  # n_trials//2
+    for X in [X_discover, X_validate]:
+        for i, seed in enumerate(taskspec.seed_programs):
+            sample_data = {k: v[0] for k, v in X[0].items()}  # remove sample dimension
+            default_params = seed.default_params
+            assert isinstance(default_params, dict)
+            assert seed.n_params == expected_n_params[i]
+            seed.code.model_jax = seed.code.model
+            model_fn = seed.compile_model()  # compiles code.model_jax
+            output = model_fn(
+                sample_data, default_params
+            )  # single unbatched evaluation]
+            assert output.size == expected_output_size

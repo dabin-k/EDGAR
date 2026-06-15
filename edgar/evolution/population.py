@@ -45,6 +45,7 @@ import json
 from dataclasses import asdict
 import numpy as np
 from .program import NotValidated, Program, BirthCertificate, Code, LossPair, Losses
+from ..io.utils import EDGARJSONEncoder
 
 
 def _params_to_json(params: dict) -> dict:
@@ -163,27 +164,18 @@ class Population:
             path: The file path where the population should be saved.
         """
         from io import StringIO
+
         from ..io.status import atomic_write_text
 
         buf = StringIO()
         for p in self._programs:
             d = asdict(p)
-            if d["eval_fingerprint"] is not None:
-                d["eval_fingerprint"] = p.eval_fingerprint.tolist()
-            if d["params"] is not None:
-                d["params"] = _params_to_json(p.params)
-            if d.get("params_init") is not None:
-                d["params_init"] = _params_to_json(p.params_init)
-            if d["sample_losses"] is not None:
-                d["sample_losses"] = p.sample_losses.tolist()
-            if d.get("sample_losses_init") is not None:
-                d["sample_losses_init"] = p.sample_losses_init.tolist()
             if isinstance(d["program_losses"]["validate"]["final"], NotValidated):
                 d["program_losses"]["validate"]["final"] = "NOTVALIDATED"
             llm = d["birth"]["llm_name"]
             if llm is not None and not isinstance(llm, str):
                 d["birth"]["llm_name"] = getattr(llm, "model_name", repr(llm))
-            buf.write(json.dumps(d) + "\n")
+            buf.write(json.dumps(d, cls=EDGARJSONEncoder) + "\n")
         atomic_write_text(path, buf.getvalue())
 
     def get_sorted(self) -> list[Program]:
@@ -235,6 +227,7 @@ class Population:
                     fingerprint = np.array(fingerprint)
                 raw_params = d.get("params")
                 raw_params_init = d.get("params_init")
+                raw_default_params = d.get("_default_params")
                 raw_sample_losses = d.get("sample_losses")
                 raw_sample_losses_init = d.get("sample_losses_init")
                 # save() serializes the NotValidated sentinel as "NOTVALIDATED";
@@ -261,6 +254,9 @@ class Population:
                     params_init=_params_from_json(raw_params_init)
                     if raw_params_init is not None
                     else None,
+                    _default_params=_params_from_json(raw_default_params)
+                    if isinstance(raw_default_params, dict)
+                    else raw_default_params,
                     sample_losses=np.array(raw_sample_losses)
                     if raw_sample_losses is not None
                     else None,

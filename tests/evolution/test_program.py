@@ -94,6 +94,35 @@ def test_setting_default_params_with_invalid_input():
     assert program.default_params is None
 
 
+def test_setting_default_params_with_callable():
+    def default_params_fn(data):
+        return {"a": np.zeros(data["x"].shape), "b": np.ones(data["x"].shape)}
+
+    data = {"x": np.array([1.0, 2.0, 3.0])}
+    program = make_program(data=data, default_params=default_params_fn)
+    assert program.n_params == 6  # a and b each have 3 parameters
+    expected_params = {"a": np.zeros(3), "b": np.ones(3)}
+    assert all(
+        np.array_equal(program.default_params[key], expected_params[key])
+        for key in expected_params
+    )
+
+
+def test_setting_default_params_with_callable_after_initialization():
+    def default_params_fn(data):
+        return {"a": np.zeros(data["x"].shape), "b": np.ones(data["x"].shape)}
+
+    data = {"x": np.array([1.0, 2.0, 3.0])}
+    program = make_program(data=data)
+    program.default_params = default_params_fn
+    assert program.n_params == 6  # a and b each have 3 parameters
+    expected_params = {"a": np.zeros(3), "b": np.ones(3)}
+    assert all(
+        np.array_equal(program.default_params[key], expected_params[key])
+        for key in expected_params
+    )
+
+
 class TestLossesDefaults:
     def test_discover_final_is_none(self):
         program = make_program()

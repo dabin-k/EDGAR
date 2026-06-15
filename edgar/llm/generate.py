@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import warnings
 from typing import Any, TYPE_CHECKING, Callable
+import numpy as np
 
 from pydantic_ai.models import Model
 
@@ -171,7 +172,19 @@ async def _generate_one_model(
         return
     header = f'"""\n{result.thought_process}\n\n{result.latex_equations}\n"""\n\n'
     program.code.model = header + result.code
-    program.default_params = result.default_params
+    default_params = result.default_params
+    if isinstance(default_params, str):
+        try:
+            default_params = eval(default_params, {"np": np})
+            program.data = data  # Make data available for dynamic default_params
+        except Exception as e:
+            warnings.warn(
+                f"Failed to evaluate default_params for Program #{program.idx}: {e}",
+                UserWarning,
+            )
+            default_params = None
+
+    program.default_params = default_params
     program.name = result.descriptive_name
     program.birth.llm_name = llm
 

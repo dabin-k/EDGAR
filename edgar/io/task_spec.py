@@ -220,8 +220,41 @@ class TaskSpec:
         git_sha, git_dirty = _git_state()
 
         seed_dir = config.project_dir / "seed_programs"
+
+        # Pre-extract params to see if we need data for resolution
+        seed_model_paths = sorted(seed_dir.glob("model*.py"))
+        all_default_params = [
+            cls._extract_default_params(p.read_text()) for p in seed_model_paths
+        ]
+
+        # Enforce consistency: all seeds must be dynamic if any are dynamic
+        is_dynamic = [callable(p) for p in all_default_params]
+        if any(is_dynamic) and not all(is_dynamic):
+            static_files = [
+                seed_model_paths[i].name for i, d in enumerate(is_dynamic) if not d
+            ]
+            raise ValueError(
+                f"Mixed seed models detected. If any seed model uses a dynamic (callable) "
+                f"DEFAULT_PARAMS, all seed models must be dynamic. Please update the following "
+                f"static models to be dynamic (e.g., wrap in a lambda): {static_files}"
+            )
+
+        data_for_resolution = None
+        if any(is_dynamic):
+            try:
+                # Load discovery training split for resolution
+                data_path = config.io.data_path
+                (disc_train, _), _, _ = load_data_fn(data_path, **config.project_params)
+                data_for_resolution = disc_train
+            except Exception as e:
+                import warnings
+
+                warnings.warn(
+                    f"Failed to load data for dynamic parameter resolution: {e}"
+                )
+
         seed_programs = []
-        for batch_idx, model_path in enumerate(sorted(seed_dir.glob("model*.py"))):
+        for batch_idx, model_path in enumerate(seed_model_paths):
             model_num = model_path.stem.replace("model", "")
             param_est_path = seed_dir / f"param_est{model_num}.py"
             seed_programs.append(
@@ -234,7 +267,8 @@ class TaskSpec:
                         param_est=param_est_path.read_text(),
                     ),
                     name=f"Seed Model {model_num}",
-                    _default_params=cls._extract_default_params(model_path.read_text()),
+                    data=data_for_resolution,
+                    _default_params=all_default_params[batch_idx],
                 )
             )
 
@@ -418,11 +452,11 @@ class TaskSpec:
 
     @staticmethod
     def _extract_default_params(model_code: str) -> dict:
-        """Reads the `DEFAULT_PARAMS` dictionary attached to a model function's source code.
+        """Read DEFAULT_PARAMS attached to a model function.
 
         By convention, seed model files can attach a `DEFAULT_PARAMS` dictionary
-        as an attribute to their `model` function (often via a decorator). These
-        parameters serve as the initial guess for gradient-descent parameter
+        or lambda function as an attribute to their `model` function (often via a decorator). 
+        These parameters serve as the initial guess for gradient-descent parameter
         fitting before a program is scored. This method safely loads the model
         function from its source code and attempts to retrieve this attribute.
 
