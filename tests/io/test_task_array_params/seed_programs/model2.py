@@ -8,5 +8,5 @@ def model(data, params):
     return a * x
 
 
-# batched data is passed
-model.DEFAULT_PARAMS = lambda data: {"a": np.ones(data["x"].shape[-1])}
+# unbatched data is passed (first sample)
+model.DEFAULT_PARAMS = lambda data: {"a": np.ones(data["x"].shape[0])}

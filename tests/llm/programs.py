@@ -220,7 +220,7 @@ class ProgramArrayParams:
         "\treturn a * x + b"
     )
     # Dynamic default params: returns a dict with 'a' matching x trials
-    default_params = 'lambda data: {"a": np.ones(data["x"].shape[-1]), "b": 0.1}'
+    default_params = 'lambda data: {"a": np.ones(data["x"].shape[0]), "b": 0.1}'
     latex_equation = r"y = ax + b"
 
     model_jax = (
@@ -236,7 +236,7 @@ class ProgramArrayParams:
     param_est = (
         "import numpy as np\n\n"
         "def parameter_estimator(data):\n"
-        '\treturn {"a": np.ones(data["x"].shape[-1]), "b": float(0.1)}\n'
+        '\treturn {"a": np.ones(data["x"].shape[0]), "b": float(0.1)}\n'
     )
 
 
@@ -251,7 +251,7 @@ class ProgramArrayParamsFallback:
         "\treturn a * x + b"
     )
     # Dynamic default params: returns a dict with 'a' matching x trials
-    default_params = 'lambda data: {"a": np.ones(data["x"].shape[-1]), "b": 0.1}'
+    default_params = 'lambda data: {"a": np.ones(data["x"].shape[0]), "b": 0.1}'
     latex_equation = r"y = ax + b"
 
     model_jax = (

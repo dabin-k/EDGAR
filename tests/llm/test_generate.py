@@ -57,7 +57,6 @@ async def test_generate_one_model():
         "explore",
         1.0,
         spec=make_fake_spec(output_dir="test_output"),
-        data={},
     )
 
     header = '"""\nfake thought process\n\n' + Program1.latex_equation + '\n"""\n\n'
@@ -84,9 +83,9 @@ async def test_generate_one_model_dynamic_params():
     llm = FakeLLM([ProgramArrayParamsFallback])
     llm_model = llm.gen_model()  # A TestModel with code for ProgramArrayFallback
 
-    # data has x with shape (n_trials, n_features)
-    n_trials, n_features = 10, 5
-    data = {"x": np.ones((n_trials, n_features))}
+    # data has x with shape (n_samples, n_trials)
+    n_samples, n_trials = 10, 5
+    data = {"x": np.ones((n_samples, n_trials))}
 
     await _generate_one_model(
         program,
@@ -111,7 +110,7 @@ async def test_generate_one_model_dynamic_params():
 
     # Verify default_params is a dict (resolved from callable)
     assert isinstance(program.default_params, dict)
-    assert np.allclose(program.default_params["a"], np.ones((n_features,)))
+    assert np.allclose(program.default_params["a"], np.ones((n_trials,)))
     assert program.default_params["b"] == 0.1
 
     assert program.name == "Fake Model 0"

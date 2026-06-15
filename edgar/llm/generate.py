@@ -178,7 +178,10 @@ async def _generate_one_model(
     if isinstance(default_params, str):
         try:
             default_params = eval(default_params, {"np": np})
-            program.data = data  # Make data available for dynamic default_params
+            # Debatch data for default_params resolution, since model expects data of shape (n1, n2, ...) not (n_samples, n1, n2, ...)
+            program.data = (
+                {k: v[0] for k, v in data.items()} if data is not None else None
+            )
         except Exception as e:
             warnings.warn(
                 f"Failed to evaluate default_params for Program #{program.idx}: {e}",

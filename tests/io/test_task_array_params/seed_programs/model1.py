@@ -10,6 +10,6 @@ def model(data, params):
 
 
 model.DEFAULT_PARAMS = lambda data: {
-    "a": np.ones(data["x"].shape[-1]),
+    "a": np.ones(data["x"].shape[0]),
     "b": np.zeros(1),
 }

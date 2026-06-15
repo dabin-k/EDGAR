@@ -138,13 +138,10 @@ async def test_call_llm_live_model_schema_dynamic_default_params():
     default_params = eval(result.default_params)
     assert default_params.__name__ == "<lambda>"
     data = {"x": np.array([0.0, 1.0, 2.0])}
-    vectorized_data = {
-        "x": np.array([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0]])
-    }  # shape (n_samples, n_x)
-    default_params_dict = default_params(vectorized_data)
+    default_params_dict = default_params(data)
     assert isinstance(default_params_dict, dict)
-    assert default_params_dict["a"].shape == vectorized_data["x"].shape[-1:]
-    assert default_params_dict["b"].shape == vectorized_data["x"].shape[-1:]
+    assert default_params_dict["a"].shape == data["x"].shape
+    assert default_params_dict["b"].shape == data["x"].shape
     compile(result.code, "<ModelSchema.code>", "exec")
     output = run_model_code(result.code, data, default_params_dict)
     print(output)

@@ -268,7 +268,8 @@ class TaskSpec:
                 # Load discovery training split for resolution
                 data_path = config.io.data_path
                 (disc_train, _), _, _ = load_data_fn(data_path, **config.project_params)
-                data_for_resolution = disc_train
+                # Take first sample for unbatched data
+                data_for_resolution = {k: v[0] for k, v in disc_train.items()}
             except Exception as e:
                 import warnings
 

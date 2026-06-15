@@ -59,7 +59,6 @@ class ModelSchemaDynamicDefaultParams(ModelSchema):
             "Keys must exactly match those used in `params` inside the model function. "
             "Dynamically returned values must be numeric scalars or numpy arrays."
             "Example: \"lambda data: {'amplitude': np.ones(data['response'].shape[-1])}\"."
-            "**CRITICAL:** Indexing of data values within the lambda must be done using negative indices, as the data will have an extra leading batch dimension compared to the data passed to the model function."
         )
     )
 
