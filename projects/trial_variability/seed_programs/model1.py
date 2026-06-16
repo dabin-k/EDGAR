@@ -20,7 +20,7 @@ def model(data, params):
 
     return gain[:, np.newaxis] * signal
 
-#Data is shaped (n_samples, n_trials, n_cells) when not vmapped
+#Data is shaped (n_trials, n_cells) when not vmapped
 model.DEFAULT_PARAMS = lambda data: {
     "multiplicative_gain": np.ones(data['response'].shape[-2])
 }

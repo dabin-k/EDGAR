@@ -23,10 +23,10 @@ def model(data, params):
     coupling = params["coupling_factor"]
     return gain[:, np.newaxis] * signal + np.outer(offset, coupling)
 
-#Data is shaped (n_samples, n_trials, n_cells) when not vmapped
+#Data is shaped (n_trials, n_cells)
 model.DEFAULT_PARAMS = lambda data: {
     "multiplicative_gain": np.ones(data['response'].shape[-2]),
     "additive_offset": np.zeros(data['response'].shape[-2]),
-    "coupling_factor": np.ones(data['response'].shape-[1])
+    "coupling_factor": np.ones(data['response'].shape[-1])
 }
     

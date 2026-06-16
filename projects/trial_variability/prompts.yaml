@@ -1,0 +1,127 @@
+model:
+  use_image_feedback: true
+  base: 'You are an AI scientist. The {num_parents} programs below are models of neural responses to stimuli across trials. Each trial corresponds to a specific stimulus angle. The models are sorted from highest to lowest loss.
+
+    Your task is to create a new model that outperforms all previous models.
+
+    All models have access to the signal (data["signal"], of shape (n_trials, n_cells)), the response for a given cell, averaged over binned stimulus angles, as well as the stimulus angles (data["stimulus"], of shape (n_trials,)). The raw response data["response"] is also available but contains NaNs where data is masked for testing.
+
+    The loss will be evaluated in a cross-validated setting, so the model should be able to generalize to unseen data.
+
+    Analyze the progression of models, generalize the improvements, and create a new model that is better than all previous models.
+    '
+  explore: 'Use the parent models as inspiration, but be creative and try new structure.
+
+    Identify model features that correlate with lower loss, combine strong ideas, and test novel variants.
+
+    '
+  exploit: 'Use the parent models as a template to produce a stronger model.
+
+    Extrapolate features associated with lower loss and remove weak or redundant structure.
+
+    You will be penalized for complexity, so keep the model as simple as possible.
+
+    '
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use.
+
+    * Do not include any text other than the code.
+
+    * Model signature must be `def model(data, params):` where `data` is a dict with keys "signal", "stimulus", and "response".
+
+    * params is a dict of named arrays/scalars.
+
+    * Ensure all free parameters are numeric, not strings or functions.
+
+    * At the beginning of the code, clip the free parameters to a biologically plausible range.
+
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument (e.g. `n_bins = int(np.sqrt(len(x)))`).
+
+    * You must also provide `default_params`. Since parameter shapes may depend on the number of trials or cells, you MUST provide `default_params` as a Python lambda string that takes `data` as an argument and returns a dictionary.
+      Example: "lambda data: {{''gain'': np.ones(data[''response''].shape[-2])}}"
+
+    * Ensure all string values in function call arguments are properly JSON-escaped
+    '
+  docstring_guidelines: '**Docstring Guidelines:**
+
+    * Use a descriptive name for this model, not a version number.
+
+    * Briefly describe what the model computes, including an equation.
+
+    '
+  image_analysis_instructions: '**Image Analysis Instructions:**\n 
+    Analyze the provided plot showing model fits for 9 random trials.
+    The top panels show the population response (grey dots) and model predictions (orange for worst average fit, blue for best average fit).
+    The bottom panels show the Binned Mean Squared Error (MSE) across the population.
+    Look for specific orientations where the error is high and consider how to adjust the gain or offset mechanisms to better capture these fluctuations, and consider how to capture trial-to-trial fluctuations.
+
+    '
+
+  parent_program_template: '**Model: {name}**
+
+    loss: {program_losses_discover_final}
+
+    {code_model}
+
+    '
+  parent_program_vars:
+  - name
+  - program_losses.discover.final
+  - code.model
+
+parameter_estimator:
+  base: 'You are an AI scientist. Your task is to create a simple parameter estimator function to estimate the free parameters of the latest model (shown last below). Also included are previous parent models and their parameter estimators.
+
+    The parameter should be estimated directly, using statistical principles and knowledge of what the parameters represent biologically.
+
+    Analyze the progression of the parameter estimators, generalize the improvements, and create a new parameter estimator that is better than all previous estimators.
+
+    '
+  explore: null
+  exploit: null
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use.
+
+    * Do not include any text other than the code.
+
+    * Return a parameter dict with the same keys, and with values of the correct shape expected by the model.
+
+    * Function signature must be `def parameter_estimator(data):`.
+
+    * data is a dictionary with the keys : "stimulus", "response" and "signal". 
+    
+    * Your response **must** be less than {max_lines} lines. If it is longer, it will be immediately rejected.
+
+    * Do not attempt to fit the parameters using complex fitting functions like `curve_fit`, `least_squares` or `minimize`. This function should be a simple starting point.
+
+    '
+  docstring_guidelines: '**Docstring Guidelines:**
+
+    * Briefly describe the estimation method.
+
+    '
+  image_analysis_instructions: null
+  parent_program_template: |
+    **Parent model: {name}**
+    loss: {program_losses_discover_final}
+    model:
+    {code_model}
+    parameter_estimator:
+    {code_param_est}
+
+    ----------
+  parent_program_vars:
+  - name
+  - program_losses.discover.final
+  - code.model
+  - code.param_est
+  current_program_template: |
+    **New model: {name}**
+    {code_model}
+    -----------
+  current_program_vars:
+  - name
+  - code.model
+

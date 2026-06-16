@@ -72,6 +72,10 @@ def generate_samples(project: str):
         # Initialize with dummy parameters and losses to demonstrate plotting
         model_fn = p.compile_model()
         default_params = getattr(model_fn, "DEFAULT_PARAMS", {})
+        if callable(default_params):
+            # Resolve dynamic params using a single sample of data
+            sample_data = {k: v[0] for k, v in data.items() if hasattr(v, "__getitem__")}
+            default_params = default_params(sample_data)
 
         # Mock initial and final parameters (per-sample)
         p.params_init = {
