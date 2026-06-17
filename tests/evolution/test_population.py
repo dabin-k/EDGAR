@@ -105,6 +105,33 @@ class TestPopulation:
                         p_original.params_init[k], p_loaded.params_init[k]
                     )
 
+    def test_population_save_and_load_with_numpy_array_default_params(self, tmp_path):
+        pop = Population()
+        program = initialize_program(0, linear_model_code(), linear_param_est_code())
+
+        # Manually set resolved _default_params with numpy arrays
+        default_params = {"a": np.array([1.0, 2.0]), "b": np.array([0.5])}
+        program._default_params = default_params
+        # n_params should correspond to the size of the arrays (3)
+        program.n_params = 3
+        pop.add(program)
+
+        pop.save(tmp_path / "population.jsonl")
+        loaded_pop = Population.load(tmp_path / "population.jsonl")
+
+        assert len(loaded_pop) == 1
+        loaded_program = loaded_pop[0]
+
+        # Check _default_params is correctly loaded back with numpy arrays
+        assert isinstance(loaded_program.default_params, dict)
+        np.testing.assert_array_equal(
+            loaded_program.default_params["a"], default_params["a"]
+        )
+        np.testing.assert_array_equal(
+            loaded_program.default_params["b"], default_params["b"]
+        )
+        assert loaded_program.n_params == 3
+
     def test_population_prepare_validation_scoring(self):
         pop = Population()
         for i in range(5):

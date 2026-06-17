@@ -139,3 +139,28 @@ class TestLossesDefaults:
     def test_validate_init_is_none(self):
         program = make_program()
         assert program.program_losses.validate.init is None
+
+
+def test_setting_callable_default_params_resolution_failure():
+    def faulty_default_params_fn(data):
+        raise ValueError("Simulated resolution error")
+
+    data = {"x": np.array([1.0, 2.0])}
+    program = make_program(data=data)
+    with pytest.warns(UserWarning, match="Failed to resolve dynamic default_params"):
+        with pytest.warns(UserWarning, match="Invalid default_params"):
+            program.default_params = faulty_default_params_fn
+    assert program.n_params is None
+    assert program.default_params is None
+
+
+def test_setting_callable_default_params_without_data_raises_error():
+    def default_params_fn(data):
+        return {"a": 1.0}
+
+    program = make_program(data=None)
+    with pytest.raises(
+        RuntimeError,
+        match="Cannot resolve dynamic default_params.*because program.data is None",
+    ):
+        program.default_params = default_params_fn

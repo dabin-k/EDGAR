@@ -57,6 +57,7 @@ async def test_generate_one_model():
         "explore",
         1.0,
         spec=make_fake_spec(output_dir="test_output"),
+        data={},
     )
 
     header = '"""\nfake thought process\n\n' + Program1.latex_equation + '\n"""\n\n'
@@ -115,6 +116,49 @@ async def test_generate_one_model_dynamic_params():
 
     assert program.name == "Fake Model 0"
     assert program.birth == birth
+
+
+@pytest.mark.asyncio
+async def test_generate_one_model_dynamic_params_evaluation_failure():
+    program = make_empty_program()
+    parents = [Program1(), InvalidProgram()]
+    prompt_schema = PromptSchema(
+        base="...",
+        explore="...",
+        code_guidelines="...",
+        docstring_guidelines="...",
+        parent_program_template="..",
+        parent_program_vars=[],
+    )
+
+    # We define a custom fake program whose default_params string contains invalid Python
+    class ProgramWithFaultyDefaultParams:
+        model = "def model(data, params): return 0.0"
+        default_params = "lambda data: {'a': np.ones(data['x'].shape[1])"  # syntax error (missing brace)
+        latex_equation = "y = 0"
+        descriptive_name = "Faulty Model"
+
+    llm = FakeLLM([ProgramWithFaultyDefaultParams])
+    llm_model = llm.gen_model()
+
+    n_samples, n_trials = 10, 5
+    data = {"x": np.ones((n_samples, n_trials))}
+
+    with pytest.warns(UserWarning, match="Failed to evaluate default_params"):
+        await _generate_one_model(
+            program,
+            parents,
+            prompt_schema,
+            llm_model,
+            "explore",
+            1.0,
+            spec=make_fake_spec(output_dir="test_output"),
+            data=data,
+            output_schema=ModelSchemaDynamicDefaultParams,
+        )
+
+    # default_params should fall back to None
+    assert program.default_params is None
 
 
 @pytest.mark.asyncio
