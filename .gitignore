@@ -12,6 +12,7 @@ program_databases/
 figures/gradopt_tests/
 test_output/
 sample_plots/
+journal/ 
 
 # Python cache
 __pycache__/

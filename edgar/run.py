@@ -1,5 +1,6 @@
-"""
-Main runner. Translates the pseudocode directly into real code.
+"""Orchestrates the entire EDGAR evolutionary experiment.
+
+This module serves as the main entry point for running an EDGAR experiment.
 """
 
 # ruff: noqa: E402
@@ -47,10 +48,7 @@ from .scoring.scoring import rank, score
 from .io.plotting import generate_program_fits
 
 
-# Stage-timed aliases. Each wraps a pipeline call in stage_timer via timed() so
-# the run loop below reads as clean pseudocode rather than nested `with` blocks
-# (see PR #40 review). Behaviour is identical: same stage names, n_items progress
-# counters, and quiet flags. Pass the per-stage item count as `n_items=...`.
+# Stage-timed aliases. Wraps the functions for individual timing and logging.
 t_seed = timed("seed", quiet=True)(seed)
 t_translate_seeds = timed("translate_seeds")(translate_programs)
 t_score_seeds = timed("score_seeds")(score)
@@ -73,17 +71,41 @@ async def run(
     spec: TaskSpec,
     log_level: str = "compact",
     resume_from: str | Path | None = None,
-) -> str:
-    """Run an EDGAR experiment, optionally resuming a crashed run.
+) -> None:
+    """Orchestrates and executes the entire EDGAR evolutionary experiment.
 
-    Args:
-        spec: TaskSpec built from a config or task_spec.yaml.
-        log_level: Logging verbosity (compact/code/prompts).
-        resume_from: Path to a run directory (containing population.jsonl +
-            island_census.jsonl + task_spec.yaml). When set:
-              - The seed phase is skipped; state is loaded from disk.
-              - Output is written back into ``resume_from`` (spec is restamped).
-              - The loop continues at ``len(census)``.
+    This function manages the full lifecycle of an EDGAR run, from initialization
+    and data loading to the generational evolutionary loop, LLM interactions, scoring, and final
+    validation. It ensures logging, status tracking, and persistence of results for
+    real-time dashboard monitoring and post-hoc analysis.
+
+    The core algorithm follows these steps:
+    1.  **Initialization**: Sets up the run environment, creates the output directory, and
+        saves the `TaskSpec` for reproducibility. Initializes structured logging and real-time
+        status tracking.
+    2.  **Data Loading**: Loads the scientific problem data into `X_discover`, `X_validate`,
+        and `X_eval` splits using the `spec.load_data_fn`.
+    3.  **Seed Phase**:
+        *   Seed programs are loaded and optionally translated.
+        *   Seed programs are scored to establish a baseline.
+    4.  **Generational Loop**: For each generation:
+        *   New program variants are `spawn`ed from the current population.
+        *   LLMs generate new model architectures (`generate_models`) and parameter
+            estimation logic (`generate_param_ests`).
+        *   Programs are `translate`d to JAX.
+        *   Programs are `score`ed and `rank`ed.
+        *   The population is `deduplicate`d, `prune`d, and survivors `migrate` between islands.
+    5.  **Finalization**:
+        *   The final population and island census are saved.
+        *   Programs are `rank`ed based on their final validation losses.
+    6.  **Error Handling**: A `finally` block ensures that the `Population`, `census`, and
+        `status.json` are always saved, even if an exception occurs during the run. Any exceptions
+        are captured, logged with their traceback, and the run status is updated to 'failed'.
+
+    Resuming Runs:
+        If `resume_from` is provided:
+              - The population and census are loaded from the specified directory.
+              - The run starts from the next generation (max(population.birth.gen) + 1).
               - run.log is opened in append mode with a RESUMED banner.
               - started_at is preserved from the original status.json so total
                 wall time across resumes is recoverable from gen timings.
@@ -93,29 +115,31 @@ async def run(
                 resumed spawning/migration draws differ from a continuous run.
                 LLM responses are non-deterministic anyway.
               - The original task_spec.yaml is reused as-is (chmod read-only).
-    """
-    resume = resume_from is not None
-    if resume:
-        resume_from = Path(resume_from).resolve()
-        _prepare_resume(spec, resume_from)
 
-    os.makedirs(spec.output_dir, exist_ok=True)
-    if not resume:
-        spec.save(spec.output_dir)
-    log = open_log(spec.output_dir, log_level, append=resume)
+    Args:
+        spec: A `TaskSpec` object containing all configuration, data, and callable functions
+            required for the experiment.
+        log_level: The verbosity level for logging messages to the console and `run.log`.
+            Can be 'compact', 'code', or 'prompts'.
+        resume_from: Optional path to a previous run's output directory to resume from.
+
+    Returns:
+        None. The function's primary effects are side effects: creating output files, updating
+        status, and logging.
+    """
+    log, resume = _init_env(spec, resume_from, log_level)
+    (
+        population,
+        census,
+        islands,
+        start_gen,
+        n_dropped,
+        started_at,
+    ) = _load_or_init_state(spec, resume)
 
     n_gens = spec.evolution["n_generations"]
     pop_path = os.path.join(spec.output_dir, "population.jsonl")
     census_path = os.path.join(spec.output_dir, "island_census.jsonl")
-
-    if resume:
-        prior_status = read_status(spec.output_dir) or {}
-        started_at = float(prior_status.get("started_at", time.time()))
-    else:
-        started_at = time.time()
-        write_status(
-            spec.output_dir, state="starting", n_gens=n_gens, started_at=started_at
-        )
 
     X_discover, X_validate, X_eval = spec.load_data_fn(
         data_path=spec.io["data_path"], **spec.project_params
@@ -126,20 +150,6 @@ async def run(
     n_islands = spec.evolution["n_islands"]
     batch_size = spec.evolution["batch_size"]
 
-    if resume:
-        population = Population.load(pop_path)
-        census = load_island_census(census_path)
-        _validate_resume_state(population, census, n_gens)
-        n_dropped = _drop_trailing_unscored(population)
-        islands = [set(s) for s in census[-1]]
-        start_gen = len(census)
-    else:
-        population = Population()
-        census = []
-        islands = None  # populated in seed phase below
-        start_gen = 0
-        n_dropped = 0
-
     with RunMetrics(
         output_dir=Path(spec.output_dir),
         run_log=log,
@@ -147,30 +157,8 @@ async def run(
         started_at=started_at,
     ) as metrics:
         try:
-            if resume:
-                # Restore historical per-gen metrics so the dashboard's
-                # last_metrics reflects the full timeline, not just the resume.
-                metrics._gen_rows.extend(read_metrics(Path(spec.output_dir)))
-                print_and_log(log, f"Run RESUMED from {spec.output_dir}")
-                if n_dropped:
-                    print_and_log(
-                        log,
-                        f"Resume: dropped {n_dropped} trailing unscored programs "
-                        f"(stale spawn shells from the crashed generation).",
-                    )
-                print_and_log(
-                    log,
-                    f"Loaded population={len(population)} programs, "
-                    f"census={len(census)} completed gens. Resuming at gen={start_gen}.",
-                )
-            else:
-                print_and_log(log, f"Run started. Output: {spec.output_dir}")
-            print_and_log(
-                log,
-                f"Config: n_gens={n_gens} n_islands={n_islands} "
-                f"batch_size={batch_size} "
-                f"num_parents={spec.llms['num_parents']} "
-                f"critical_pop={spec.evolution['critical_population_size']}",
+            _log_startup(
+                log, spec, resume, population, census, start_gen, n_dropped, metrics
             )
 
             if not resume:
@@ -278,8 +266,7 @@ async def run(
 
                 log_generation(log, gen, population, islands, spec, metrics=metrics)
 
-                # Per-generation persistence for the live dashboard. Atomic writes
-                # protect a polling reader from observing torn files.
+                # Save each generation
                 population.save(pop_path)
                 save_island_census(census, census_path)
                 metrics.finish_generation()
@@ -354,6 +341,7 @@ async def run(
                     f"{''.join(traceback.format_exception(*exc_info))}"
                     f"***** Output directory: {spec.output_dir} *****",
                 )
+            # Final save, even if run failed
             population.save(pop_path)
             save_island_census(census, census_path)
             write_status(
@@ -434,7 +422,103 @@ def _validate_resume_state(population: Population, census: list, n_gens: int) ->
         )
 
 
+def _init_env(
+    spec: TaskSpec, resume_from: str | Path | None, log_level: str
+) -> tuple[any, bool]:
+    """Sets up the run environment, output directory, and logging."""
+    resume = resume_from is not None
+    if resume:
+        resume_from = Path(resume_from).resolve()
+        _prepare_resume(spec, resume_from)
+
+    os.makedirs(spec.output_dir, exist_ok=True)
+    if not resume:
+        spec.save(spec.output_dir)
+
+    log = open_log(spec.output_dir, log_level, append=resume)
+    return log, resume
+
+
+def _load_or_init_state(
+    spec: TaskSpec, resume: bool
+) -> tuple[Population, list, list[set[int]] | None, int, int, float]:
+    """Loads existing population/census if resuming, or initializes new state."""
+    n_gens = spec.evolution["n_generations"]
+    pop_path = os.path.join(spec.output_dir, "population.jsonl")
+    census_path = os.path.join(spec.output_dir, "island_census.jsonl")
+
+    if resume:
+        prior_status = read_status(spec.output_dir) or {}
+        started_at = float(prior_status.get("started_at", time.time()))
+        population = Population.load(pop_path)
+        census = load_island_census(census_path)
+        _validate_resume_state(population, census, n_gens)
+        n_dropped = _drop_trailing_unscored(population)
+        islands = [set(s) for s in census[-1]]
+        start_gen = len(census)
+    else:
+        started_at = time.time()
+        write_status(
+            spec.output_dir, state="starting", n_gens=n_gens, started_at=started_at
+        )
+        population = Population()
+        census = []
+        islands = None
+        start_gen = 0
+        n_dropped = 0
+
+    return population, census, islands, start_gen, n_dropped, started_at
+
+
+def _log_startup(
+    log: any,
+    spec: TaskSpec,
+    resume: bool,
+    population: Population,
+    census: list,
+    start_gen: int,
+    n_dropped: int,
+    metrics: RunMetrics,
+) -> None:
+    """Consolidates startup logging and restores historical metrics if resuming."""
+    n_gens = spec.evolution["n_generations"]
+    n_islands = spec.evolution["n_islands"]
+    batch_size = spec.evolution["batch_size"]
+
+    if resume:
+        metrics._gen_rows.extend(read_metrics(Path(spec.output_dir)))
+        print_and_log(log, f"Run RESUMED from {spec.output_dir}")
+        if n_dropped:
+            print_and_log(
+                log,
+                f"Resume: dropped {n_dropped} trailing unscored programs "
+                f"(stale spawn shells from the crashed generation).",
+            )
+        print_and_log(
+            log,
+            f"Loaded population={len(population)} programs, "
+            f"census={len(census)} completed gens. Resuming at gen={start_gen}.",
+        )
+    else:
+        print_and_log(log, f"Run started. Output: {spec.output_dir}")
+
+    print_and_log(
+        log,
+        f"Config: n_gens={n_gens} n_islands={n_islands} "
+        f"batch_size={batch_size} "
+        f"num_parents={spec.llms['num_parents']} "
+        f"critical_pop={spec.evolution['critical_population_size']}",
+    )
+
+
 if __name__ == "__main__":
+    """Main execution block for running EDGAR from the command line.
+
+    This block parses command-line arguments to obtain the configuration file path.
+    It then loads the `Config` (either from a `config.yaml` or a previously saved
+    `task_spec.yaml`), initializes a `TaskSpec` object from this configuration,
+    and finally runs the asynchronous EDGAR experiment using `asyncio.run()`.
+    """
     parser = argparse.ArgumentParser(description="Run EDGAR")
     parser.add_argument(
         "config", type=str, help="Path to task config.yaml or task_spec.yaml"

@@ -10,6 +10,7 @@ function dashboard() {
     summary: {},
     state: {},
     programs: [],
+    familyTreeData: null,
     loading: true,
     autoPoll: true,
     pollIntervalMs: 2500,
@@ -44,7 +45,12 @@ function dashboard() {
       if (this.runId) await this.refreshAll();
       this.startPolling();
       // re-render charts on view change
-      this.$watch('view', () => this.renderCharts());
+      this.$watch('view', async (v) => {
+        if (v === 'family_tree' && !this.familyTreeData) {
+          await this.fetchFamilyTree();
+        }
+        this.renderCharts();
+      });
       this.$watch('state', () => this.renderCharts());
       // sync hash
       this.$watch('runId', v => this.updateHash());
@@ -54,7 +60,7 @@ function dashboard() {
 
     parseHash() {
       const h = window.location.hash || '';
-      const m = h.match(/^#\/(live|inspect)(?:\?run=([^&]+))?/);
+      const m = h.match(/^#\/(live|inspect|family_tree)(?:\?run=([^&]+))?/);
       if (!m) return {};
       return { view: m[1], runId: m[2] ? decodeURIComponent(m[2]) : null };
     },
@@ -98,6 +104,7 @@ function dashboard() {
         this.fetchSummary(),
         this.fetchState(),
         this.fetchPrograms(),
+        this.view === 'family_tree' ? this.fetchFamilyTree() : Promise.resolve(),
       ]);
       this.renderCharts();
     },
@@ -113,6 +120,9 @@ function dashboard() {
           if (this.view === 'inspect') {
             await this.fetchPrograms();
             await this.fetchSummary();
+          }
+          if (this.view === 'family_tree') {
+            await this.fetchFamilyTree();
           }
           this.renderCharts();
         }
@@ -131,6 +141,10 @@ function dashboard() {
     async fetchPrograms() {
       const r = await fetch(`/api/runs/${this.runId}/programs`);
       if (r.ok) this.programs = await r.json();
+    },
+    async fetchFamilyTree() {
+      const r = await fetch(`/api/runs/${this.runId}/family_tree`);
+      if (r.ok) this.familyTreeData = await r.json();
     },
 
     // ── helpers ──
@@ -188,6 +202,17 @@ function dashboard() {
       if (this.state?.is_stale) return 'stalled';
       return state || 'unknown';
     },
+    fmtStage(s) {
+      if (!s) return '\u00a0';
+      const labels = {
+        translate_programs: 'translate',
+        translate_seeds: 'translate',
+        score: 'score',
+        score_seeds: 'score',
+        score_validate: 'score',
+      };
+      return labels[s] || s;
+    },
     lossClass(v) {
       if (v === null || v === undefined) return 'text-zinc-500';
       // green at low loss, red at high. anchor at orientation-tuning scale.
@@ -237,6 +262,7 @@ function dashboard() {
         this.renderSwimlanes();
         this.renderSpark();
         this.renderStageChart();
+        this.renderFamilyTree();
       });
     },
 
@@ -355,6 +381,13 @@ function dashboard() {
         prune: '#fb7185',
         migrate: '#facc15',
       };
+      const stageLabels = {
+        translate_programs: 'translate',
+        translate_seeds: 'translate',
+        score: 'score',
+        score_seeds: 'score',
+        score_validate: 'score',
+      };
       const stageOrder = [
         'spawn', 'generate_models', 'generate_param_ests',
         'translate_programs', 'translate_seeds',
@@ -363,14 +396,21 @@ function dashboard() {
       ];
       const xs = rows.map(r => r.gen);
       const traces = [];
+      const seenLabels = new Set();
+
       for (const stage of stageOrder) {
         const ys = rows.map(r => (r.stage_times && r.stage_times[stage]) || 0);
         if (ys.every(v => !v)) continue;
+
+        const label = stageLabels[stage] || stage;
         traces.push({
-          x: xs, y: ys, type: 'bar', name: stage,
+          x: xs, y: ys, type: 'bar', name: label,
           marker: { color: stagePalette[stage] || '#71717a' },
           hovertemplate: `${stage}: %{y:.1f}s<br>gen %{x}<extra></extra>`,
+          legendgroup: label,
+          showlegend: !seenLabels.has(label),
         });
+        seenLabels.add(label);
       }
       Plotly.react(el, traces, {
         paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
@@ -382,6 +422,111 @@ function dashboard() {
         showlegend: true,
         legend: { font: { size: 9 }, orientation: 'h', y: -0.25 },
       }, { displayModeBar: false, responsive: true });
+    },
+
+    renderFamilyTree() {
+      const el = document.getElementById('family-tree-chart');
+      if (!el || this.view !== 'family_tree' || !this.familyTreeData) return;
+
+      const d = this.familyTreeData;
+
+      const edgeTrace = {
+        x: d.edge_x,
+        y: d.edge_y,
+        mode: 'lines',
+        line: { color: '#ccc', width: 1 },
+        hoverinfo: 'none',
+        type: 'scatter'
+      };
+
+      const highlightTrace = {
+        x: [],
+        y: [],
+        mode: 'lines',
+        line: { color: '#fbbf24', width: 3 },
+        hoverinfo: 'none',
+        type: 'scatter'
+      };
+
+      const nodeTrace = {
+        x: d.node_x,
+        y: d.node_y,
+        customdata: d.node_ids,
+        text: d.node_labels,
+        hovertext: d.node_hover,
+        mode: 'markers+text',
+        textposition: 'bottom center',
+        textfont: { size: 9, color: '#fff' },
+        hoverinfo: 'text',
+        marker: {
+          color: d.node_colors,
+          symbol: d.node_symbols,
+          size: d.node_sizes,
+          line: { width: 1, color: '#333' }
+        },
+        type: 'scatter'
+      };
+
+      const layout = {
+        showlegend: false,
+        hovermode: 'closest',
+        xaxis: { showgrid: false, zeroline: false, showticklabels: false },
+        yaxis: { showgrid: false, zeroline: false, showticklabels: false },
+        margin: { l: 40, r: 40, t: 40, b: 40 },
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#d4d4d8', family: 'ui-sans-serif' },
+        hoverlabel: { bgcolor: '#0a0a0a', bordercolor: '#3f3f46', font: { color: '#fafafa' } },
+      };
+
+      Plotly.react(el, [edgeTrace, highlightTrace, nodeTrace], layout, { responsive: true, displayModeBar: false });
+
+      const getAncestorEdgeCoords = (nodeId) => {
+        const hx = [], hy = [];
+        const visited = new Set();
+        const queue = [String(nodeId)];
+        while (queue.length > 0) {
+          const current = queue.shift();
+          if (visited.has(current)) continue;
+          visited.add(current);
+          const parents = d.parent_map[current] || [];
+          for (const parent of parents) {
+            const pStr = String(parent);
+            if (d.pos_map[pStr] && d.pos_map[current]) {
+              hx.push(d.pos_map[pStr][0], d.pos_map[current][0], null);
+              hy.push(d.pos_map[pStr][1], d.pos_map[current][1], null);
+              queue.push(pStr);
+            }
+          }
+        }
+        return { hx, hy };
+      };
+
+      el.removeAllListeners?.('plotly_hover');
+      el.on('plotly_hover', (data) => {
+        if (data.points.length > 0) {
+          const pt = data.points[0];
+          if (pt.customdata != null) {
+            const { hx, hy } = getAncestorEdgeCoords(pt.customdata);
+            Plotly.restyle(el, { x: [hx], y: [hy] }, [1]);
+          }
+        }
+      });
+
+      el.removeAllListeners?.('plotly_unhover');
+      el.on('plotly_unhover', () => {
+        Plotly.restyle(el, { x: [[]], y: [[]] }, [1]);
+      });
+
+      el.removeAllListeners?.('plotly_click');
+      el.on('plotly_click', (data) => {
+        if (data.points.length > 0) {
+          const pt = data.points[0];
+          if (pt.customdata != null) {
+            this.openProgram(pt.customdata);
+          }
+        }
+      });
     },
 
     // ── program panel ──

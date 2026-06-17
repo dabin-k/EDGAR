@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import textwrap
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from ..evolution.population import Population
 from ..evolution.program import NotValidated, Program
 from ..io.metrics import METRICS_FILENAME, read_metrics
 from ..io.status import read_status
+from ..llm.prompt_schema import PromptSchema
 
 
 # ── Population cache (path, mtime) → Population ──
@@ -56,6 +58,58 @@ def _load_population(run_dir: Path) -> Population | None:
         return cached[1] if cached else None
     _POP_CACHE[key] = (mtime, pop)
     return pop
+
+
+def _reconstruct_model_prompt(run_dir: Path, pop: Population, idx: int) -> str:
+    """Reconstruct the prompt shown to the LLM for a given program.
+
+    This uses the PromptSchema and configuration from task_spec.yaml along
+    with the program's parents to rebuild the exact prompt string.
+    """
+    spec_doc = _load_task_spec(run_dir)
+    if not spec_doc:
+        return ""
+
+    schemas = spec_doc.get("prompt_schemas") or {}
+    model_schema_dict = schemas.get("model")
+    if not model_schema_dict:
+        return ""
+
+    try:
+        prompt_schema = PromptSchema(**model_schema_dict)
+    except Exception:
+        return "(error: could not parse PromptSchema from task_spec.yaml)"
+
+    # Flatten config for build_prompt (evolution + llms + scoring)
+    flat_config = {
+        **(spec_doc.get("evolution") or {}),
+        **(spec_doc.get("llms") or {}),
+        **(spec_doc.get("scoring") or {}),
+    }
+
+    p = pop[idx]
+    if p.birth.generation < 0:
+        return "Seed program: no LLM prompt was used."
+
+    # Retrieve parents. Same sort logic as generate._resolve_parents
+    parents = [pop[i] for i in p.birth.parent_indices if 0 <= i < len(pop)]
+
+    def _loss(prog: Program) -> float:
+        v = prog.program_losses.discover.final
+        return float("inf") if (v is None or not isinstance(v, float)) else v
+
+    parents = sorted(parents, key=_loss, reverse=True)
+
+    mode = p.birth.mode or "explore"
+
+    try:
+        return prompt_schema.build_prompt(
+            mode=mode,
+            parent_programs=parents,
+            config=flat_config,
+        )
+    except Exception as e:
+        return f"(error: prompt reconstruction failed: {e})"
 
 
 def _load_census(run_dir: Path) -> list[list[set[int]]]:
@@ -641,6 +695,7 @@ def load_program_detail(run_dir: Path, idx: int) -> dict | None:
 
     return {
         **base,
+        "reconstructed_prompt": _reconstruct_model_prompt(run_dir, pop, idx),
         "code": {
             "model": p.code.model or "",
             "param_est": p.code.param_est or "",
@@ -704,6 +759,139 @@ def _fit_image_url_for(p: Program) -> str | None:
     if p.idx is None or p.fit_image_path is None:
         return None
     return f"fit_image/{p.idx}"
+
+
+# ── Family Tree ──
+
+
+def load_family_tree_data(run_dir: Path) -> dict:
+    pop = _load_population(run_dir)
+    if not pop:
+        return {}
+    census = _load_census(run_dir)
+    alive_idxs = _alive_set(census)
+
+    pos = _layout_by_generation(pop)
+    edge_x, edge_y = _build_edges(pop, pos)
+    nodes = _build_nodes(pop, pos, alive_idxs)
+    parent_map = _build_parent_map(pop)
+    pos_map = {str(idx): list(xy) for idx, xy in pos.items()}
+
+    return {
+        "parent_map": parent_map,
+        "pos_map": pos_map,
+        "edge_x": edge_x,
+        "edge_y": edge_y,
+        "node_x": nodes["x"],
+        "node_y": nodes["y"],
+        "node_ids": nodes["ids"],
+        "node_labels": nodes["labels"],
+        "node_hover": nodes["hover"],
+        "node_colors": nodes["colors"],
+        "node_symbols": nodes["symbols"],
+        "node_sizes": nodes["sizes"],
+    }
+
+
+def _layout_by_generation(pop: Population) -> dict[int, tuple[float, float]]:
+    """Hierarchical layout: y = -generation, x = horizontal slot per generation."""
+    by_gen: dict[int, list[int]] = {}
+    for i in range(len(pop)):
+        p = pop[i]
+        by_gen.setdefault(p.birth.generation, []).append(p.idx)
+
+    pos = {}
+    for gen, ids in by_gen.items():
+        n = len(ids)
+        for i, idx in enumerate(sorted(ids)):
+            x = (i - (n - 1) / 2.0) if n > 1 else 0.0
+            pos[idx] = (x, -gen)
+    return pos
+
+
+def _build_edges(pop: Population, pos: dict) -> tuple[list, list]:
+    edge_x, edge_y = [], []
+    for i in range(len(pop)):
+        p = pop[i]
+        for parent_idx in p.birth.parent_indices:
+            if p.idx not in pos or parent_idx not in pos:
+                continue
+            x_c, y_c = pos[p.idx]
+            x_p, y_p = pos[parent_idx]
+            edge_x.extend([x_p, x_c, None])
+            edge_y.extend([y_p, y_c, None])
+    return edge_x, edge_y
+
+
+def _build_nodes(pop: Population, pos: dict, alive_idxs: set[int]) -> dict:
+    """Per-node display arrays for Plotly."""
+    x, y, ids, labels, hover = [], [], [], [], []
+    colors, symbols, sizes = [], [], []
+    for i in range(len(pop)):
+        p = pop[i]
+        if p.idx not in pos:
+            continue
+        nx, ny = pos[p.idx]
+        x.append(nx)
+        y.append(ny)
+        ids.append(p.idx)
+        label = p.name or f"P{p.idx}"
+        labels.append(_wrap_label(label))
+        hover_label = f"★ {label}" if p.rank == 1 else label
+        final_loss = p.program_losses.discover.final
+        loss_val = f"{final_loss:.4f}" if _finite(final_loss) else "N/A"
+        hover.append(f"{hover_label}<br>loss: {loss_val}")
+        colors.append(_node_colour(final_loss))
+        if p.rank == 1:
+            symbols.append("star")
+            sizes.append(24)
+        elif p.birth.generation == -1:
+            symbols.append("square")
+            sizes.append(20)
+        else:
+            symbols.append("circle")
+            sizes.append(16)
+    return {
+        "x": x,
+        "y": y,
+        "ids": ids,
+        "labels": labels,
+        "hover": hover,
+        "colors": colors,
+        "symbols": symbols,
+        "sizes": sizes,
+    }
+
+
+def _wrap_label(label: str, width: int = 15) -> str:
+    """Wrap a string into multiple lines using <br> for Plotly."""
+    if not label:
+        return ""
+    # Avoid wrapping short numeric IDs like "P0" or "P123"
+    if len(label) <= width:
+        return label
+    return "<br>".join(textwrap.wrap(label, width=width, break_long_words=True))
+
+
+def _node_colour(loss) -> str:
+    if not _finite(loss):
+        return "#52525b"
+    if loss < 30:
+        return "#34d399"
+    if loss < 50:
+        return "#fbbf24"
+    return "#fb7185"
+
+
+def _build_parent_map(pop: Population) -> dict[str, list[int]]:
+    """{str(child_idx): [parent_idx, ...]} for ancestor highlighting in the JS."""
+    parent_map = {}
+    for i in range(len(pop)):
+        p = pop[i]
+        parents = list(p.birth.parent_indices)
+        if parents:
+            parent_map[str(p.idx)] = parents
+    return parent_map
 
 
 # ── helpers ──
