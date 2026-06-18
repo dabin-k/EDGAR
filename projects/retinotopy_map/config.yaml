@@ -1,0 +1,28 @@
+io:
+  data_path: /home/dabin/data/retinotopy_map
+  save_path: program_databases
+
+evolution:
+  n_generations: 12
+  n_islands: 8
+  batch_size: 6
+  critical_population_size: 12
+  n_migrants: 2
+
+llms:
+  num_parents: 2
+  model_llm: gemini-2.5-flash
+  param_est_llm: gemini-2.5-flash
+  jax_model_translator_llm: gemini-2.5-flash-lite
+
+scoring:
+  param_penalty_weight: 0.01
+
+project_params:
+  seed: 0
+  n_pixels_train: 3000
+  n_pixels_test: 3000
+  block_size: 200          # checkerboard block side (px); train/test alternate whole blocks
+  normalize_coords: true   # cortical (col,row) -> [0,1] by (W,H) so the optimizer behaves
+  validate_animals: null   # null -> hold out the last animal (alphabetical) for validate
+  n_eval_samples: 3
