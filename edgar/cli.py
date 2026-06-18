@@ -66,6 +66,12 @@ import argparse
 from pathlib import Path
 from textwrap import dedent
 
+# Fraction of the best seed model's (penalty-free) loss to suggest as
+# param_penalty_weight, so the per-parameter complexity penalty stays a small
+# slice of the data loss rather than dominating it. Advisory only — printed by
+# `edgar validate`, not applied automatically.
+PARAM_PENALTY_SEED_LOSS_FRACTION = 0.01
+
 SPEC_TEMPLATE_DATA_LOADER = dedent(
     '''\
     from __future__ import annotations
@@ -335,6 +341,117 @@ def init_project(task: str) -> int:
     return 0
 
 
+def _seed_data_loss(program, data_train, data_test, loss_fn) -> float | None:
+    """Computes a seed model's penalty-free mean data loss using NumPy only.
+
+    Mirrors the estimate-then-evaluate path in `edgar.scoring.scoring` (initial
+    parameters from the parameter estimator, evaluated on the test split) but
+    skips the JAX gradient-descent refit, so it needs neither a JAX translation
+    of the model nor an LLM call. This keeps `edgar validate` offline. Per-sample
+    parameters are estimated on `data_train` and the model is evaluated on
+    `data_test`, matching how scoring aligns the two splits.
+
+    Args:
+        program: A seed `Program` whose `code.model` / `code.param_est` hold the
+            NumPy source for the model and parameter estimator.
+        data_train: The training split dict (leading axis = samples), used to
+            estimate per-sample parameters.
+        data_test: The test split dict (leading axis = samples), used to evaluate.
+        loss_fn: The project loss function, returning per-sample losses.
+
+    Returns:
+        The mean penalty-free loss as a float, or None if the model source could
+        not be loaded.
+    """
+    import numpy as np
+
+    from .llm.code_loading import load_function_from_source
+
+    model_fn = load_function_from_source(program.code.model, "model")
+    if model_fn is None:
+        return None
+    param_est_fn = load_function_from_source(
+        program.code.param_est or "", "parameter_estimator"
+    )
+
+    def _slice(d, i):
+        return {k: np.asarray(v)[i] for k, v in d.items() if not k.startswith("_")}
+
+    n_train = next(iter(data_train.values())).shape[0]
+    try:
+        if param_est_fn is None:
+            raise ValueError("no parameter_estimator")
+        per_sample = [param_est_fn(_slice(data_train, i)) for i in range(n_train)]
+        params = {k: np.stack([p[k] for p in per_sample]) for k in per_sample[0]}
+    except Exception:
+        params = {
+            k: np.stack([np.asarray(v)] * n_train)
+            for k, v in program.default_params.items()
+        }
+
+    n_test = next(iter(data_test.values())).shape[0]
+    outputs = np.stack(
+        [
+            np.asarray(
+                model_fn(_slice(data_test, i), {k: params[k][i] for k in params})
+            )
+            for i in range(n_test)
+        ]
+    )
+    return float(np.mean(np.asarray(loss_fn(outputs, data_test))))
+
+
+def _print_param_penalty_suggestion(task_path: Path) -> None:
+    """Prints a suggested ``param_penalty_weight`` scaled to the seed-model losses.
+
+    Loads the project, evaluates the penalty-free loss of each seed model, and
+    suggests ``PARAM_PENALTY_SEED_LOSS_FRACTION * min(seed losses)`` so the
+    complexity penalty starts as a small fraction of the data loss instead of
+    dominating it. Best-effort: any failure (e.g. data loader errors) is reported
+    as a skipped suggestion and does not affect the structural validation result.
+
+    Args:
+        task_path: The project directory (containing ``config.yaml``).
+    """
+    import numpy as np
+
+    from .io.config import Config
+    from .io.task_spec import TaskSpec
+
+    try:
+        config = Config.from_yaml(task_path / "config.yaml")
+        spec = TaskSpec.from_config(config)
+        data_train, data_test = spec.load_data_fn(
+            data_path=spec.io["data_path"], **spec.project_params
+        )[0]
+        seed_losses = [
+            (p.name, _seed_data_loss(p, data_train, data_test, spec.loss_fn))
+            for p in spec.seed_programs
+        ]
+    except Exception as e:
+        print(f"  (skipped param_penalty_weight suggestion: {e})")
+        return
+
+    finite = [loss for _, loss in seed_losses if loss is not None and np.isfinite(loss)]
+    if not finite:
+        print("  (skipped param_penalty_weight suggestion: no seed loss available)")
+        return
+
+    min_loss = min(finite)
+    suggested = PARAM_PENALTY_SEED_LOSS_FRACTION * min_loss
+    current = spec.scoring.get("param_penalty_weight")
+    print("\n  param_penalty_weight suggestion (penalty-free seed losses):")
+    for name, loss in seed_losses:
+        shown = f"{loss:.5g}" if loss is not None else "(could not evaluate)"
+        print(f"    - {name}: {shown}")
+    print(
+        f"    suggested: {suggested:.3g}  "
+        f"(= {PARAM_PENALTY_SEED_LOSS_FRACTION:g} x min seed loss {min_loss:.5g})"
+    )
+    if current is not None:
+        print(f"    current config value: {current:.3g}")
+
+
 def validate_project(task: str) -> int:
     """
     Validates an EDGAR project by checking for the existence of required files and functions.
@@ -399,6 +516,7 @@ def validate_project(task: str) -> int:
     print("  ✓ data_loader/load_data.py  (load_data, loss_fn)")
     print("  ✓ image_feedback/plot.py  (plot_model_fits)")
     print("  ✓ config.yaml")
+    _print_param_penalty_suggestion(task_path)
     return 0
 
 
