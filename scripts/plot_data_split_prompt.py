@@ -8,8 +8,8 @@ Given a project name (or a config path), this:
   4. renders the split figure.
 
 Usage:
-    python scripts/test_plot_split_prompt.py particle_eom
-    python scripts/test_plot_split_prompt.py projects/retinotopy_map/config.yaml
+    python scripts/plot_data_split_prompt.py particle_eom
+    python scripts/plot_data_split_prompt.py projects/retinotopy_map/config.yaml
 """
 
 import os
@@ -114,7 +114,7 @@ def main(project: str):
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(
-            "Usage: python scripts/test_plot_split_prompt.py <project_name|config.yaml>",
+            "Usage: python scripts/plot_data_split_prompt.py <project_name|config.yaml>",
             file=sys.stderr,
         )
         sys.exit(2)
