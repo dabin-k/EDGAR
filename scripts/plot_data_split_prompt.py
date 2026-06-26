@@ -1,6 +1,7 @@
-"""Test the meta-prompt approach for generating plot_split from a project's load_data.py.
+"""Visualise any EDGAR project's train/test/discover/validate split.
 
-Given a project name (or a config path), this:
+Works for any project that has a ``data_loader/load_data.py`` — you don't need the
+data-loader-helper agent. Given a project name (or a config path), this:
   1. resolves the project's config -> TaskSpec (same machinery as check_loader.py),
   2. feeds the project's load_data.py source through plot_split_prompt.md to have Claude
      generate a project-specific plot_split function,
