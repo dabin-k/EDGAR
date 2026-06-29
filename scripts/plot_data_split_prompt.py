@@ -11,6 +11,10 @@ data-loader-helper agent. Given a project name (or a config path), this:
 Usage:
     python scripts/plot_data_split_prompt.py particle_eom
     python scripts/plot_data_split_prompt.py projects/retinotopy_map/config.yaml
+
+Pass a second argument to skip the Claude generate step and use an existing
+plot_split script instead (e.g. one you've hand-fixed):
+    python scripts/plot_data_split_prompt.py retinotopy_map test_output/plot_split_test/retinotopy_map_plot_split.py
 """
 
 import os
@@ -61,15 +65,8 @@ def _resolve_config_path(project: str) -> Path:
     return config_path
 
 
-def main(project: str):
-    config_path = _resolve_config_path(project)
-    config = Config.from_yaml(config_path)
-    spec = TaskSpec.from_config(config)
-    name = config.task_name
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    load_data_path = config.project_dir / "data_loader" / "load_data.py"
+def _generate_plot_split_code(name: str, load_data_path: Path) -> str:
+    """Calls Claude to generate a project-specific plot_split function."""
     prompt_template = PROMPT_PATH.read_text()
     load_data_source = load_data_path.read_text()
     prompt = prompt_template.replace("{load_data_source}", load_data_source)
@@ -77,25 +74,53 @@ def main(project: str):
     print(f"Calling Claude to generate plot_split for {name}...")
     client = anthropic.Anthropic()
     message = client.messages.create(
-        model="claude-opus-4-8",
+        # model="claude-opus-4-8",
         max_tokens=8192,
-        thinking={"type": "adaptive"},
+        model="claude-sonnet-4-6",
+        # max_tokens=16384,
+        # thinking={"type": "adaptive"},
         messages=[{"role": "user", "content": prompt}],
     )
 
-    generated = next(b.text for b in message.content if b.type == "text")
+    generated = next((b.text for b in message.content if b.type == "text"), None)
+    if generated is None:
+        raise SystemExit(
+            f"No text block in response (stop_reason={message.stop_reason}). "
+            "Likely hit max_tokens during thinking — raise max_tokens or reduce thinking budget."
+        )
+
     print("--- Generated code ---")
     print(generated)
     print("----------------------")
     if message.stop_reason == "max_tokens":
         print("WARNING: response truncated at max_tokens; generated code may be incomplete.")
 
-    code = _strip_fences(generated)
+    return _strip_fences(generated)
 
-    # Save the generated code for inspection
-    code_path = OUTPUT_DIR / f"{name}_plot_split.py"
-    code_path.write_text(code)
-    print(f"\nGenerated code saved to {code_path}")
+
+def main(project: str, override_script: str | None = None):
+    config_path = _resolve_config_path(project)
+    config = Config.from_yaml(config_path)
+    spec = TaskSpec.from_config(config)
+    name = config.task_name
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if override_script is not None:
+        override_path = Path(override_script)
+        if not override_path.is_absolute():
+            override_path = REPO_ROOT / override_path
+        if not override_path.exists():
+            raise SystemExit(f"Override script not found: {override_path}")
+        print(f"Using override plot_split script: {override_path}")
+        code = override_path.read_text()
+    else:
+        load_data_path = config.project_dir / "data_loader" / "load_data.py"
+        code = _generate_plot_split_code(name, load_data_path)
+        # Save the generated code for inspection
+        code_path = OUTPUT_DIR / f"{name}_plot_split.py"
+        code_path.write_text(code)
+        print(f"\nGenerated code saved to {code_path}")
 
     # Execute the generated functions
     ns = {}
@@ -113,10 +138,11 @@ def main(project: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         print(
-            "Usage: python scripts/plot_data_split_prompt.py <project_name|config.yaml>",
+            "Usage: python scripts/plot_data_split_prompt.py "
+            "<project_name|config.yaml> [override_plot_split.py]",
             file=sys.stderr,
         )
         sys.exit(2)
-    main(sys.argv[1])
+    main(*sys.argv[1:])
