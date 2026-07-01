@@ -22,12 +22,14 @@ Work out these decisions from the source, then write the code:
 1. SAMPLE SCOPE — show one representative sample. Exception: if there is only one independent
    variable, stack all samples and use (sample, that variable) as the two axes.
 2. AXES — the model's independent variables. If one has structure (position, time, angle), put it on
-   an axis (and sort it) so uneven sampling is visible.
+   an axis (and sort it) so uneven sampling is visible. (train, test) splits data within a single sample.
+   Represent the missing observations from each train and test as nan so that we can visually see which 
+   observations are held out from either train or test. 
 3. PLOT TYPE — scatter when the split dicts carry explicit coordinate keys whose spatial layout is
    meaningful; otherwise imshow. For imshow, NaN-mask held-out positions so they render white.
 4. COLOR — colour by the regression target (what the equation predicts) to expose uneven target
    coverage between train/test. Share one colormap range across all four panels.
-
+   
 Examples:
 - Map f: R²→R, split into a spatial checkerboard. One sample; x/y positions as axes; scatter (also
   shows sampling density); colour by the target scalar.
