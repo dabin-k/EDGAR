@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
 
 from edgar.llm.code_loading import load_function_from_source
 
@@ -28,13 +29,20 @@ def plot_model_fits(
     program_names=None,
     params=None,
 ):
-    """Predicted-vs-observed visual-field scatter for a few example recordings.
+    """Retinotopic contour maps in cortical space for a few example recordings.
 
-    The cortex->visual-field map is 2-D -> 2-D, so each recording gets two panels —
-    azimuth and elevation — of predicted vs. observed degrees, with the parent programs
-    overlaid in different colours and the y=x reference drawn. A tight cloud on the
-    diagonal means the map form fits; structured departure from the diagonal is the
-    signal the LLM should react to.
+    The cortex->visual-field map is a smooth scalar field over the cortical sheet, so the
+    most legible diagnostic is to plot it *in cortical coordinates*: the panel axes are
+    cortical x and y, and the visual-field value (azimuth or elevation) is shown as a
+    field over that sheet. Each recording gets two panels — azimuth and elevation. The
+    measured field is drawn as a filled contour background (`tricontourf`) and each parent
+    model's predicted field is overlaid as iso-value contour *lines* on shared levels. A
+    model whose contour lines hug the boundaries between the measured colour bands has the
+    right map shape; lines that cut across the gradient, are rotated, or are spaced wrong
+    are the structured error the LLM should react to.
+
+    Because the data are scattered subsampled pixels (not a dense grid), contouring is
+    done on a Delaunay triangulation of the cortical points (`matplotlib.tri`).
 
     Two call sites exist (`edgar/io/plotting.py`): `generate_feedback_image` calls with
     just (data, parents, save_path) for live LLM feedback; `generate_program_fits`
@@ -44,9 +52,9 @@ def plot_model_fits(
 
     Args:
         data: X_disc_train dict of JAX arrays. data['cortical_pos'] shape
-            (n_recordings, n_pixels, 2), data['visual_field'] shape
+            (n_recordings, n_pixels, 2) = (x, y), data['visual_field'] shape
             (n_recordings, n_pixels, 2) = (azimuth, elevation).
-        parent_programs: list of Program objects, each with .compile_model().
+        parent_programs: list of Program objects, each with a loadable model.
         save_path: file path (not directory) to save the figure.
         losses: optional list of scalar loss values, one per program; defaults to
             program.program_losses.discover.final.
@@ -73,16 +81,22 @@ def plot_model_fits(
 
     n_show = min(3, n_rec)
     rec_indices = np.random.choice(n_rec, size=n_show, replace=False)
-    colours = ["tab:red", "tab:green", "tab:orange", "tab:purple"]
+    # line_colours = ["tab:red", "lime", "tab:orange", "tab:purple"]
+    line_colours = ["k", "white", "tab:red"]
     coord_names = ["azimuth", "elevation"]
+    n_levels = 12
 
     model_fns = [_load_model(program) for program in parent_programs]
 
-    fig, axes = plt.subplots(n_show, 2, figsize=(10, 4.5 * n_show), squeeze=False)
+    fig, axes = plt.subplots(n_show, 2, figsize=(11, 5 * n_show), squeeze=False)
 
     for i, s in enumerate(rec_indices):
-        sample_data = {"cortical_pos": cortical_pos[s], "visual_field": visual_field[s]}
+        xy = cortical_pos[s]  # (n_pix, 2)
+        sample_data = {"cortical_pos": xy, "visual_field": visual_field[s]}
         y_obs = visual_field[s]  # (n_pix, 2)
+
+        # Delaunay triangulation of the scattered cortical points (shared across panels).
+        tri = Triangulation(xy[:, 0], xy[:, 1])
 
         preds = []
         for j, model_fn in enumerate(model_fns):
@@ -91,27 +105,36 @@ def plot_model_fits(
 
         for c in range(2):  # azimuth, elevation
             ax = axes[i, c]
-            lims = [float(y_obs[:, c].min()), float(y_obs[:, c].max())]
-            ax.plot(lims, lims, color="black", lw=1, ls="--", alpha=0.5, label="y=x")
+            obs_c = y_obs[:, c]
+            levels = np.linspace(float(obs_c.min()), float(obs_c.max()), n_levels)
+
+            cf = ax.tricontourf(tri, obs_c, levels=levels, cmap="viridis", alpha=0.85)
+            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label(f"observed {coord_names[c]} (deg)", fontsize=8)
+
+            handles = []
             for j in range(len(model_fns)):
+                colour = line_colours[j % len(line_colours)]
+                ax.tricontour(
+                    tri,
+                    preds[j][:, c],
+                    levels=levels,
+                    colors=colour,
+                    linewidths=1.2,
+                )
                 sl = sample_losses[j][s] if sample_losses[j] is not None else None
                 label = (
                     f"{program_names[j]} (loss={sl:.3f})"
                     if sl is not None
                     else program_names[j]
                 )
-                ax.scatter(
-                    y_obs[:, c],
-                    preds[j][:, c],
-                    s=6,
-                    alpha=0.35,
-                    color=colours[j % len(colours)],
-                    label=label,
-                )
+                handles.append(plt.Line2D([], [], color=colour, lw=1.2, label=label))
+
             ax.set_title(f"Recording {s} — {coord_names[c]}")
-            ax.set_xlabel(f"observed {coord_names[c]} (deg)")
-            ax.set_ylabel(f"predicted {coord_names[c]} (deg)")
-            ax.legend(fontsize=8)
+            ax.set_xlabel("cortical x")
+            ax.set_ylabel("cortical y")
+            ax.set_aspect("equal")
+            ax.legend(handles=handles, fontsize=8, loc="best")
 
     title_parts = [
         f"{program_names[j]}: loss={losses[j]:.4f}"
@@ -119,7 +142,11 @@ def plot_model_fits(
         else f"{program_names[j]}: loss=n/a"
         for j in range(len(parent_programs))
     ]
-    plt.suptitle("  |  ".join(title_parts), fontsize=12)
+    plt.suptitle(
+        "Filled = observed field, lines = predicted iso-contours  |  "
+        + "  |  ".join(title_parts),
+        fontsize=11,
+    )
     plt.tight_layout()
     plt.savefig(save_path, dpi=100.0, bbox_inches="tight")
     plt.close(fig)
