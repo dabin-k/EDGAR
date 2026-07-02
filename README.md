@@ -276,6 +276,13 @@ Must define:
 
 If this file/function is left as a `pass` stub, no images will be generated or provided as LLM feedback.
 
+Verify it renders correctly on your real data with:
+
+```bash
+uv run python scripts/generate_sample_plots.py my_task          # fast, dummy final params
+uv run python scripts/generate_sample_plots.py my_task --fit     # real fit (LLM translate + optax)
+```
+
 ### 7. Validate
 
 ```bash
