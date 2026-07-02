@@ -21,9 +21,9 @@ scoring:
 
 project_params:
   seed: 0
-  n_pixels_train: 3000
-  n_pixels_test: 3000
-  block_size: 200          # checkerboard block side (px); train/test alternate whole blocks
+  n_pixels_train: 50000
+  n_pixels_test: 30000
+  block_size: 100          # checkerboard block side (px); train/test alternate whole blocks
   normalize_coords: true   # cortical (col,row) -> [0,1] by (W,H) so the optimizer behaves
   validate_animals: null   # null -> hold out the last animal (alphabetical) for validate
   n_eval_samples: 3

@@ -84,7 +84,7 @@ def plot_model_fits(
     # line_colours = ["tab:red", "lime", "tab:orange", "tab:purple"]
     line_colours = ["k", "white", "tab:red"]
     coord_names = ["azimuth", "elevation"]
-    n_levels = 12
+    n_levels = 16
 
     model_fns = [_load_model(program) for program in parent_programs]
 
