@@ -136,6 +136,11 @@ program_databases/
             └── P0000.png 
 ```
 
+> **EXPERIMENTAL (work in progress): edgar-analyzer agent.**
+  To in order to help with analyzing results we have configured a subagent for use with claude code or gemini cli in `agents/output`. See `agents/output/README.md` for further information on how to use this.
+  The idea is to be able to use natural language to query results, e.g: **YOU:** Summarize the top models from the most recent run and identify common features which led to an improved score. 
+  Additions to the instructions and tools in the mcp server are very welcome.
+
 ---
 
 ## Setting Up a New Project
@@ -270,6 +275,13 @@ Must define:
 - `save_path`: file path to save the generated figure.
 
 If this file/function is left as a `pass` stub, no images will be generated or provided as LLM feedback.
+
+Verify it renders correctly on your real data with:
+
+```bash
+uv run python scripts/generate_sample_plots.py my_task          # fast, dummy final params
+uv run python scripts/generate_sample_plots.py my_task --fit     # real fit (LLM translate + optax)
+```
 
 ### 7. Validate
 
