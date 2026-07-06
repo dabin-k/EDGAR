@@ -1,29 +1,128 @@
 """
 Generate sample plots (feedback and fit comparison) for a given project.
-Useful for verifying that the project's plot_fn handles the data and 
+Useful for verifying that the project's plot_fn handles the data and
 program structures correctly.
 
+By default the "final" fit is faked (dummy params) so the script runs fast and
+needs no LLM. Pass --fit to instead run the real seed phase of a run
+(LLM np->jax translation + optax gradient descent), so the plotted "final" fit
+reflects what the models actually look like once fit. --fit needs a working LLM
+API key (see .env) and is much slower.
+
 Usage:
-    uv run python scripts/generate_sample_plots.py <project>
+    uv run python scripts/generate_sample_plots.py <project> [--fit]
     uv run python scripts/generate_sample_plots.py orientation_tuning
+    uv run python scripts/generate_sample_plots.py retinotopy_map --fit
 """
 
-import sys
+import argparse
+import asyncio
 import os
+import sys
 from pathlib import Path
 import numpy as np
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from edgar.io.config import Config
+from edgar.io.config import Config, RetryConfig
 from edgar.io.task_spec import TaskSpec
 from edgar.evolution.program import Program, BirthCertificate, Code, Losses, LossPair
+from edgar.evolution.population import Population
+from edgar.evolution.island import seed as seed_population
+from edgar.llm.generate import translate_programs
+from edgar.scoring.scoring import score
 from edgar.io.plotting import generate_feedback_image, generate_program_fits
 
 
-def generate_samples(project: str):
+def build_mock_programs(spec: TaskSpec, n_samples: int) -> list[Program]:
+    """Copies seed programs and attaches dummy init/final params and losses.
+
+    Fast path (no LLM, no fitting): the "final" params are just the init params
+    scaled by 2, so the plot exercises the plot_fn but does not reflect a real fit.
+    """
+    programs = []
+    for i, seed_p in enumerate(spec.seed_programs):
+        p = Program(
+            birth=seed_p.birth,
+            name=seed_p.name,
+            code=seed_p.code,
+        )
+        p.idx = i
+
+        # Ensure model_jax is set for compile_model() (numpy source doubles as JAX).
+        if not p.code.model_jax:
+            p.code.model_jax = p.code.model
+
+        model_fn = p.compile_model()
+        default_params = getattr(model_fn, "DEFAULT_PARAMS", {})
+
+        # Mock initial and final parameters (per-sample).
+        p.params_init = {
+            k: np.full(n_samples, v)
+            if isinstance(v, (int, float))
+            else np.repeat(np.asarray(v)[np.newaxis, ...], n_samples, axis=0)
+            for k, v in default_params.items()
+        }
+        p.params = {k: v * 2 for k, v in p.params_init.items()}
+
+        # Mock losses.
+        p.sample_losses_init = np.random.uniform(0.5, 1.0, size=n_samples)
+        p.sample_losses = p.sample_losses_init * 0.8
+        p.program_losses = Losses(
+            discover=LossPair(
+                init=float(np.mean(p.sample_losses_init)),
+                final=float(np.mean(p.sample_losses)),
+            )
+        )
+        programs.append(p)
+
+    return programs
+
+
+async def build_fitted_programs(
+    spec: TaskSpec, X_discover: tuple, X_eval
+) -> list[Program]:
+    """Runs the real seed phase (LLM translation + optax fitting) on seed programs.
+
+    Mirrors the seed phase of `edgar.run`: seeds a fresh population with the
+    project's seed programs, translates their numpy models to JAX via the LLM,
+    then scores them on the discovery split. `score` mutates each program in
+    place with real `params_init`/`params`, `sample_losses(_init)`, and
+    `program_losses.discover`, exactly as a real run would.
+    """
+    population = Population()
+    seed_population(population, spec.seed_programs, n_islands=1)
+
+    retry_config = RetryConfig(**spec.llms.get("retry", {}))
+    max_tokens = spec.flat_config.get("max_tokens")
+
+    print("Translating seed models to JAX (LLM)...")
+    await translate_programs(
+        population,
+        spec.prompt_schemas.jax_model,
+        spec.llms["jax_model_translator_llm"],
+        retry_config=retry_config,
+        max_tokens=max_tokens,
+    )
+
+    print("Fitting parameters (param estimator + optax gradient descent)...")
+    score(
+        population,
+        X_discover,
+        X_eval,
+        spec.scoring,
+        spec.loss_fn,
+        split="discover",
+    )
+
+    return list(population)
+
+
+def generate_samples(project: str, fit: bool = False):
     print(f"--- Generating sample plots for project: {project} ---")
+    if fit:
+        print("(--fit: running real LLM translation + optax fitting)")
 
     # 1. Load project spec
     config_path = Path(f"projects/{project}/config.yaml")
@@ -32,64 +131,41 @@ def generate_samples(project: str):
         return
 
     config = Config.from_yaml(config_path)
-    
+
     # Set a custom save path so output_dir is predictable
     sample_dir = Path("sample_plots") / project
     config.io.save_path = str(sample_dir)
-    
+
     spec = TaskSpec.from_config(config)
     output_dir = spec.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     # 2. Load real data
     print("Loading project data...")
-    X_discover, _, _ = spec.load_data_fn(
+    X_discover, _, X_eval = spec.load_data_fn(
         data_path=spec.io["data_path"], **spec.project_params
     )
     # feedback_image and program_fits usually take the 'test' part of the discovery split
     data = X_discover[1]
     n_samples = next(iter(data.values())).shape[0]
 
-    # 3. Use seed programs as basis for samples
+    # 3. Build programs (real fit or dummy params)
     if not spec.seed_programs:
         print("Error: No seed programs found in project to use as samples.")
         return
 
-    programs = []
-    for i, seed_p in enumerate(spec.seed_programs):
-        # Create a copy with necessary fields for plotting
-        p = Program(
-            birth=seed_p.birth,
-            name=seed_p.name,
-            code=seed_p.code,
-        )
-        p.idx = i
-        
-        # Ensure model_jax is set for compile_model()
-        if not p.code.model_jax:
-            p.code.model_jax = p.code.model
-
-        # Initialize with dummy parameters and losses to demonstrate plotting
-        model_fn = p.compile_model()
-        default_params = getattr(model_fn, "DEFAULT_PARAMS", {})
-
-        # Mock initial and final parameters (per-sample)
-        p.params_init = {
-            k: np.full(n_samples, v) if isinstance(v, (int, float)) else np.repeat(np.asarray(v)[np.newaxis, ...], n_samples, axis=0)
-            for k, v in default_params.items()
-        }
-        p.params = {
-            k: v * 2 for k, v in p.params_init.items()
-        }
-
-        # Mock losses
-        p.sample_losses_init = np.random.uniform(0.5, 1.0, size=n_samples)
-        p.sample_losses = p.sample_losses_init * 0.8
-        p.program_losses = Losses(
-            discover=LossPair(init=float(np.mean(p.sample_losses_init)), final=float(np.mean(p.sample_losses)))
-        )
-
-        programs.append(p)
+    if fit:
+        programs = asyncio.run(build_fitted_programs(spec, X_discover, X_eval))
+        fitted = [p for p in programs if p.params is not None]
+        if not fitted:
+            print(
+                "  [FAIL] No program was fit successfully (translation or scoring "
+                "failed for all). Check API keys / seed model code."
+            )
+            return
+        programs = fitted
+    else:
+        programs = build_mock_programs(spec, n_samples)
 
     # 4. Generate Feedback Image (using first 2 as parents)
     print("Generating feedback image...")
@@ -108,16 +184,24 @@ def generate_samples(project: str):
     # 5. Generate Program Fits
     print("Generating program fit comparisons...")
     generate_program_fits(spec, data, programs)
-    
+
     fit_count = sum(1 for p in programs if p.fit_image_path)
     print(f"  [OK] {fit_count}/{len(programs)} fit images generated in {output_dir}/image_fits/")
 
     print(f"\nDone. View plots in: {output_dir}")
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <project>")
-        sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", help="Project name under projects/ (e.g. retinotopy_map)")
+    parser.add_argument(
+        "--fit",
+        action="store_true",
+        help="Run real LLM translation + optax fitting instead of using dummy params.",
+    )
+    args = parser.parse_args()
+    generate_samples(args.project, fit=args.fit)
 
-    generate_samples(sys.argv[1])
+
+if __name__ == "__main__":
+    main()

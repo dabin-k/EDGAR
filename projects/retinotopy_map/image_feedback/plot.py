@@ -1,8 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.tri import Triangulation
 
 from edgar.llm.code_loading import load_function_from_source
+
+# Targets, in the model's output-column order: (azimuth, elevation, log-magnification).
+TARGET_NAMES = ["azimuth (deg)", "elevation (deg)", "log area-magnification"]
 
 
 def _load_model(program):
@@ -20,6 +22,38 @@ def _load_model(program):
     return fn
 
 
+def _scatter(ax, xy, vals, cmap, vmin, vmax):
+    """Raw per-pixel scatter (no triangulation/smoothing) coloured by `vals`.
+
+    Square markers on the true cortical pixel coordinates so the granular, salt-and-pepper
+    structure of the mouse map is shown honestly rather than blurred by interpolation.
+    NaNs (e.g. border pixels with no magnification) are dropped.
+    """
+    m = np.isfinite(vals)
+    return ax.scatter(
+        xy[m, 0], xy[m, 1], c=vals[m], s=7, marker="s", linewidths=0,
+        cmap=cmap, vmin=vmin, vmax=vmax,
+    )
+
+
+def _tidy(ax):
+    ax.set_aspect("equal")
+    ax.set_xlabel("cortical x", fontsize=8)
+    ax.set_ylabel("cortical y", fontsize=8)
+    ax.tick_params(labelsize=7)
+
+
+def _resid_limit(resid_cols):
+    """Symmetric colour limit for residual panels: robust 99th pct of |residual|."""
+    allv = (
+        np.concatenate([r[np.isfinite(r)] for r in resid_cols])
+        if resid_cols
+        else np.array([])
+    )
+    v = float(np.percentile(np.abs(allv), 99)) if allv.size else 1.0
+    return v if v > 0 else 1.0
+
+
 def plot_model_fits(
     data,
     parent_programs,
@@ -29,37 +63,41 @@ def plot_model_fits(
     program_names=None,
     params=None,
 ):
-    """Retinotopic contour maps in cortical space for a few example recordings.
+    """Per-pixel residual maps of a retinotopy fit, in cortical space.
 
-    The cortex->visual-field map is a smooth scalar field over the cortical sheet, so the
-    most legible diagnostic is to plot it *in cortical coordinates*: the panel axes are
-    cortical x and y, and the visual-field value (azimuth or elevation) is shown as a
-    field over that sheet. Each recording gets two panels — azimuth and elevation. The
-    measured field is drawn as a filled contour background (`tricontourf`) and each parent
-    model's predicted field is overlaid as iso-value contour *lines* on shared levels. A
-    model whose contour lines hug the boundaries between the measured colour bands has the
-    right map shape; lines that cut across the gradient, are rotated, or are spaced wrong
-    are the structured error the LLM should react to.
+    For each shown recording and each target (azimuth, elevation, log area-magnification),
+    the observed field and each model's *signed residual* (pred − obs) are drawn as a raw
+    per-pixel scatter — no Delaunay/`tricontourf` interpolation, so the granular
+    salt-and-pepper structure of the mouse map is preserved rather than smoothed away.
 
-    Because the data are scattered subsampled pixels (not a dense grid), contouring is
-    done on a Delaunay triangulation of the cortical points (`matplotlib.tri`).
+    The residual is the diagnostic the LLM should react to: on a symmetric diverging scale
+    (red = model over-predicts, blue = under), the *location*, *magnitude*, and *sign* of
+    the error are the colour directly, instead of being inferred from how predicted contour
+    lines sit relative to a smoothed background. Coherent red/blue patches are structured
+    error a better map form can fix; random speckle is the irreducible local disorder a
+    smooth parametric map cannot (and should not try to) capture. The log-magnification row
+    is shown because it is a scored target that discriminates a structured (dipole) map from
+    a flat-magnification (affine) null, yet is otherwise invisible in az/el.
 
-    Two call sites exist (`edgar/io/plotting.py`): `generate_feedback_image` calls with
-    just (data, parents, save_path) for live LLM feedback; `generate_program_fits`
-    additionally passes `losses`/`sample_losses`/`program_names`/`params` (e.g. init vs.
-    final fit of one program) for the dashboard. All four default to the corresponding
-    `Program` attributes when not given.
+    Two recordings are shown — the worst- and best-fit (by the first model's per-recording
+    loss) — so both a failure case and a success case are in view.
+
+    Two call sites exist (`edgar/io/plotting.py`): `generate_feedback_image` calls with just
+    (data, parents, save_path) for live LLM feedback; `generate_program_fits` additionally
+    passes `losses`/`sample_losses`/`program_names`/`params` (e.g. init vs. final fit of one
+    program) for the dashboard. All four default to the corresponding `Program` attributes.
 
     Args:
-        data: X_disc_train dict of JAX arrays. data['cortical_pos'] shape
-            (n_recordings, n_pixels, 2) = (x, y), data['visual_field'] shape
-            (n_recordings, n_pixels, 2) = (azimuth, elevation).
+        data: X-split dict of arrays. data['cortical_pos'] shape (n_rec, n_pix, 2) = (x, y),
+            data['visual_field'] shape (n_rec, n_pix, 2) = (azimuth, elevation), optional
+            data['log_mag'] shape (n_rec, n_pix, 1) = observed log area-magnification.
         parent_programs: list of Program objects, each with a loadable model.
         save_path: file path (not directory) to save the figure.
         losses: optional list of scalar loss values, one per program; defaults to
             program.program_losses.discover.final.
-        sample_losses: optional list of per-recording loss arrays (shape
-            (n_recordings,) or None), one per program; defaults to program.sample_losses.
+        sample_losses: optional list of per-recording loss arrays (shape (n_rec,) or None),
+            one per program; defaults to program.sample_losses. The first drives which
+            recordings are shown.
         program_names: optional list of display names; defaults to program.name.
         params: optional list of per-recording param dicts; defaults to program.params.
     """
@@ -77,76 +115,86 @@ def plot_model_fits(
 
     cortical_pos = np.asarray(data["cortical_pos"])  # (n_rec, n_pix, 2)
     visual_field = np.asarray(data["visual_field"])  # (n_rec, n_pix, 2)
+    log_mag = np.asarray(data["log_mag"])[..., 0] if "log_mag" in data else None
     n_rec = cortical_pos.shape[0]
+    n_p = len(parent_programs)
+    model_fns = [_load_model(p) for p in parent_programs]
 
-    n_show = min(3, n_rec)
-    rec_indices = np.random.choice(n_rec, size=n_show, replace=False)
-    # line_colours = ["tab:red", "lime", "tab:orange", "tab:purple"]
-    line_colours = ["k", "white", "tab:red"]
-    coord_names = ["azimuth", "elevation"]
-    n_levels = 16
+    # Show the worst- and best-fit recordings (by the first model's per-recording loss),
+    # so a failure and a success case are both in view.
+    ref = sample_losses[0]
+    if ref is not None and n_rec > 1:
+        order = np.argsort(np.asarray(ref))
+        rec_indices = sorted({int(order[-1]), int(order[0])})
+    else:
+        rec_indices = list(range(min(2, n_rec)))
+    n_show = len(rec_indices)
 
-    model_fns = [_load_model(program) for program in parent_programs]
+    n_t = None  # common target width, resolved from the first recording.
+    fig = axes = None
 
-    fig, axes = plt.subplots(n_show, 2, figsize=(11, 5 * n_show), squeeze=False)
-
-    for i, s in enumerate(rec_indices):
-        xy = cortical_pos[s]  # (n_pix, 2)
+    for ri, s in enumerate(rec_indices):
+        xy = cortical_pos[s]
         sample_data = {"cortical_pos": xy, "visual_field": visual_field[s]}
-        y_obs = visual_field[s]  # (n_pix, 2)
-
-        # Delaunay triangulation of the scattered cortical points (shared across panels).
-        tri = Triangulation(xy[:, 0], xy[:, 1])
+        if log_mag is not None:
+            sample_data["log_mag"] = log_mag[s][:, None]
 
         preds = []
-        for j, model_fn in enumerate(model_fns):
-            params_s = {k: np.asarray(v[s]) for k, v in params[j].items()}
-            preds.append(np.asarray(model_fn(sample_data, params_s)))  # (n_pix, 2)
+        for j, fn in enumerate(model_fns):
+            ps = {k: np.asarray(v[s]) for k, v in params[j].items()}
+            preds.append(np.asarray(fn(sample_data, ps)))
 
-        for c in range(2):  # azimuth, elevation
-            ax = axes[i, c]
-            obs_c = y_obs[:, c]
-            levels = np.linspace(float(obs_c.min()), float(obs_c.max()), n_levels)
+        obs_cols = [visual_field[s][:, 0], visual_field[s][:, 1]]
+        if log_mag is not None:
+            obs_cols.append(log_mag[s])
 
-            cf = ax.tricontourf(tri, obs_c, levels=levels, cmap="viridis", alpha=0.85)
-            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label(f"observed {coord_names[c]} (deg)", fontsize=8)
+        if n_t is None:
+            n_t = min(len(obs_cols), min(p.shape[1] for p in preds))
+            fig, axes = plt.subplots(
+                n_show * n_t,
+                1 + n_p,
+                figsize=(4.2 * (1 + n_p), 3.6 * n_show * n_t),
+                squeeze=False,
+            )
 
-            handles = []
-            for j in range(len(model_fns)):
-                colour = line_colours[j % len(line_colours)]
-                ax.tricontour(
-                    tri,
-                    preds[j][:, c],
-                    levels=levels,
-                    colors=colour,
-                    linewidths=1.2,
-                )
+        obs = np.stack(obs_cols[:n_t], axis=-1)
+        preds = [p[:, :n_t] for p in preds]
+
+        for t in range(n_t):
+            row = ri * n_t + t
+            o = obs[:, t]
+            finite = o[np.isfinite(o)]
+            vmin, vmax = (
+                (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
+            )
+
+            ax = axes[row][0]
+            sc = _scatter(ax, xy, o, "viridis", vmin, vmax)
+            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(f"rec {s} · observed {TARGET_NAMES[t]}", fontsize=9)
+            _tidy(ax)
+
+            resid_cols = [preds[j][:, t] - o for j in range(n_p)]
+            rlim = _resid_limit(resid_cols)
+            for j in range(n_p):
+                ax = axes[row][1 + j]
+                sc = _scatter(ax, xy, resid_cols[j], "RdBu_r", -rlim, rlim)
+                fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
                 sl = sample_losses[j][s] if sample_losses[j] is not None else None
-                label = (
-                    f"{program_names[j]} (loss={sl:.3f})"
-                    if sl is not None
-                    else program_names[j]
-                )
-                handles.append(plt.Line2D([], [], color=colour, lw=1.2, label=label))
+                lbl = f"  (loss={sl:.3f})" if sl is not None else ""
+                ax.set_title(f"{program_names[j]}{lbl}\nresidual (pred − obs)", fontsize=8)
+                _tidy(ax)
 
-            ax.set_title(f"Recording {s} — {coord_names[c]}")
-            ax.set_xlabel("cortical x")
-            ax.set_ylabel("cortical y")
-            ax.set_aspect("equal")
-            ax.legend(handles=handles, fontsize=8, loc="best")
-
-    title_parts = [
-        f"{program_names[j]}: loss={losses[j]:.4f}"
+    suptitle = "  |  ".join(
+        f"{program_names[j]}: loss={losses[j]:.3f}"
         if losses[j] is not None
-        else f"{program_names[j]}: loss=n/a"
-        for j in range(len(parent_programs))
-    ]
-    plt.suptitle(
-        "Filled = observed field, lines = predicted iso-contours  |  "
-        + "  |  ".join(title_parts),
+        else f"{program_names[j]}: n/a"
+        for j in range(n_p)
+    )
+    fig.suptitle(
+        "Residual maps (pred − obs) — red = model over-predicts, blue = under.  " + suptitle,
         fontsize=11,
     )
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=100.0, bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=100.0, bbox_inches="tight")
     plt.close(fig)
