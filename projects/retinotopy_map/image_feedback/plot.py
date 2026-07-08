@@ -67,13 +67,11 @@ def plot_model_fits(
 
     For each shown recording and each target (azimuth, elevation, log area-magnification),
     the observed field and each model's *signed residual* (pred − obs) are drawn as a raw
-    per-pixel scatter — no Delaunay/`tricontourf` interpolation, so the granular
-    salt-and-pepper structure of the mouse map is preserved rather than smoothed away.
+    per-pixel scatter.
 
     The residual is the diagnostic the LLM should react to: on a symmetric diverging scale
     (red = model over-predicts, blue = under), the *location*, *magnitude*, and *sign* of
-    the error are the colour directly, instead of being inferred from how predicted contour
-    lines sit relative to a smoothed background. Coherent red/blue patches are structured
+    the error are the colour directly. Coherent red/blue patches are structured
     error a better map form can fix; random speckle is the irreducible local disorder a
     smooth parametric map cannot (and should not try to) capture. The log-magnification row
     is shown because it is a scored target that discriminates a structured (dipole) map from

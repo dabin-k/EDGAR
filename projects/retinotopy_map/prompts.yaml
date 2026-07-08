@@ -32,17 +32,23 @@ model:
     * In the docstring, give a LaTeX equation for the model.
     * Briefly describe what the model computes.'
 
-  image_analysis_instructions: "**Image Analysis Instructions:**
-      Attached is a scatter plot of the neuron models' performance on top of raw neural data. 
-      The binned mean of the experimental data is plotted in **sky-blue**, the model with higher average loss in **red** and model with lower average loss in **green**.\n
+  image_analysis_instructions: "**Image Analysis Instructions:**\n
+      The attached figure is a grid in cortical space (axes = cortical x, y; one point = one pixel).
+      Rows are recording × target (**azimuth**, **elevation**, **log area-magnification**), for the worst-
+      and best-fitting recordings. The **left column** is the observed field (viridis); the **remaining
+      columns** are each model's **signed residual (pred − obs)** on a symmetric red/blue scale
+      (**red = over-predicts, blue = under, white ≈ correct**), ordered highest→lowest loss. White gaps
+      are held-out pixels — ignore them.\n\n
 
-      Analyse the models' fits to the data in the image below. Identify systematic weaknesses of the models by observing patterns across multiple cell plots. For instance, consider:\n
-      **Model Comparisons:** Which models are better for each cell? That is to say, which models track the blue curve better? Which features of the models are responsible for improving the fit?\n
-      **Model Fit:** How well do the models fit the binned data mean? Look for places where even the models (**green** curve for best model, **red** for second best model) deviate most from the binned data mean (**blue** curve). This is where the models are weakest, and where you should focus your improvements. \n
-      **Model Shape:** Do the models' shapes (e.g., peak sharpness, width, skewness, amplitude, etc.) align with the binned data mean (**blue**) and raw data scatter points (**black**)? If not, how do they differ? How can you change the model to better match the data shape? \n
-      **Parameter Flexibility:** Are there free parameters that could be introduced or modified to better capture the observed response profiles? Utilize your analysis of the shortcomings of the current models' shapes and add free parameters or modify existing ones to address these issues.\n
-
-      Use this analysis to inform the design of a new neuron model that improves upon the previous models.\n"
+      Reason step by step:\n
+      1. **Structure vs. noise:** *coherent* red/blue patches are systematic map-form errors a better
+         equation can remove; fine random speckle is irreducible — don't chase it.\n
+      2. **Compare the parents:** for each target, state what each parent gets right (strength) and the
+         specific region/pattern it gets wrong (weakness). The log-magnification row is the key
+         discriminator: a structured dipole map varies spatially, a flat/affine map leaves a large uniform
+         residual.\n
+      3. **Improve:** combine the parents' strengths and modify terms/parameters to remove the largest
+         coherent residual patches.\n"
   parent_program_template: '**Model: {name}**
 
     loss: {program_losses_discover_final}
