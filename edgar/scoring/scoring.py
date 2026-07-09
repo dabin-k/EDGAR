@@ -49,6 +49,14 @@ from ..io.metrics import get_active_metrics, stream_line
 # ── helpers ──
 
 
+def apply_model_plain(model_fn, data, params):
+    """Default model application: vmap the model over axis-0 (one sample = one
+    param set), matching EDGAR's standard contract. Projects can override this
+    via ``TaskSpec.apply_model_fn`` to change how ``model_fn`` is mapped over the
+    data (e.g. a nested vmap for per-neuron windowed prediction)."""
+    return jax.vmap(model_fn, in_axes=(0, 0))(data, params)
+
+
 def _get_params(param_est_fn, default_params, data_train):
     """Estimates initial parameters for a model, falling back to defaults if the parameter estimator fails.
 
@@ -85,7 +93,9 @@ def _get_params(param_est_fn, default_params, data_train):
         return jax.tree_util.tree_map(lambda x: jnp.stack([x] * n), default_params)
 
 
-def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
+def _optimize(
+    model_fn, loss_fn, params_init, data_train, gd_config, apply_model_fn=apply_model_plain
+):
     """Performs gradient descent to optimize model parameters.
 
     This function uses the Optax library and JAX to perform gradient-based
@@ -111,7 +121,7 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
 
     def total_loss(flat_p):
         p = unflatten(flat_p)
-        output = jax.vmap(model_fn, in_axes=(0, 0))(data_train, p)
+        output = apply_model_fn(model_fn, data_train, p)
         return jnp.mean(loss_fn(output, data_train))
 
     loss_and_grad = jax.jit(jax.value_and_grad(total_loss))
@@ -138,7 +148,7 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
     return unflatten(best_flat)
 
 
-def _eval_loss(model_fn, loss_fn, params, data_test):
+def _eval_loss(model_fn, loss_fn, params, data_test, apply_model_fn=apply_model_plain):
     """Computes the overall scalar loss for a model on a given dataset.
 
     This function calculates the mean of the per-sample losses from the `loss_fn`
@@ -155,11 +165,13 @@ def _eval_loss(model_fn, loss_fn, params, data_test):
     """
     if params is None:
         return float("inf")
-    output = jax.vmap(model_fn, in_axes=(0, 0))(data_test, params)
+    output = apply_model_fn(model_fn, data_test, params)
     return float(jnp.mean(loss_fn(output, data_test)))
 
 
-def _eval_sample_losses(model_fn, loss_fn, params, data_test):
+def _eval_sample_losses(
+    model_fn, loss_fn, params, data_test, apply_model_fn=apply_model_plain
+):
     """Computes individual losses for each sample in a dataset.
 
     This function applies the model and loss function to each sample in the
@@ -175,11 +187,11 @@ def _eval_sample_losses(model_fn, loss_fn, params, data_test):
     Returns:
         A NumPy array of per-sample loss values.
     """
-    output = jax.vmap(model_fn, in_axes=(0, 0))(data_test, params)
+    output = apply_model_fn(model_fn, data_test, params)
     return np.asarray(loss_fn(output, data_test))
 
 
-def _eval_fingerprint(model_fn, params, X_eval):
+def _eval_fingerprint(model_fn, params, X_eval, apply_model_fn=apply_model_plain):
     """Generates a low-dimensional "fingerprint" of model outputs for deduplication.
 
     This fingerprint is used to compare models and identify functionally
@@ -197,10 +209,12 @@ def _eval_fingerprint(model_fn, params, X_eval):
     """
     sample_indices = X_eval["_sample_indices"]
     params_matched = jax.tree_util.tree_map(lambda p: p[sample_indices], params)
-    return jax.vmap(model_fn, in_axes=(0, 0))(X_eval, params_matched)
+    return apply_model_fn(model_fn, X_eval, params_matched)
 
 
-def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
+def _worker(
+    queue, program_bytes, data, loss_fn_bytes, config, X_eval, split, apply_model_fn_bytes
+):
     """Scores one program inside a subprocess.
 
     This function deserializes a `Program` and `loss_fn`, compiles the program's
@@ -229,6 +243,7 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     """
     program = cloudpickle.loads(program_bytes)
     loss_fn = cloudpickle.loads(loss_fn_bytes)
+    apply_model_fn = cloudpickle.loads(apply_model_fn_bytes)
     data_train, data_test = data
 
     try:
@@ -249,11 +264,21 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     try:
         penalty = config["param_penalty_weight"] * program.n_params
         params_init = _get_params(param_est_fn, program.default_params, data_train)
-        initial_loss = _eval_loss(model_fn, loss_fn, params_init, data_test) + penalty
-        params = _optimize(
-            model_fn, loss_fn, params_init, data_train, config["gradient_descent"]
+        initial_loss = (
+            _eval_loss(model_fn, loss_fn, params_init, data_test, apply_model_fn)
+            + penalty
         )
-        final_loss = _eval_loss(model_fn, loss_fn, params, data_test) + penalty
+        params = _optimize(
+            model_fn,
+            loss_fn,
+            params_init,
+            data_train,
+            config["gradient_descent"],
+            apply_model_fn,
+        )
+        final_loss = (
+            _eval_loss(model_fn, loss_fn, params, data_test, apply_model_fn) + penalty
+        )
     except Exception as e:
         print(f"[scoring] program #{program.idx} failed during optimize/eval: {e}")
         print(f"[scoring] traceback:\n{traceback.format_exc()}")
@@ -264,21 +289,25 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     # Fingerprint and sample losses are non-critical: failures here don't poison the loss.
     try:
         fingerprint = (
-            _eval_fingerprint(model_fn, params, X_eval) if X_eval is not None else None
+            _eval_fingerprint(model_fn, params, X_eval, apply_model_fn)
+            if X_eval is not None
+            else None
         )
     except Exception as e:
         print(f"[scoring] program #{program.idx} fingerprint failed (ignored): {e}")
         fingerprint = None
 
     try:
-        sample_losses = _eval_sample_losses(model_fn, loss_fn, params, data_test)
+        sample_losses = _eval_sample_losses(
+            model_fn, loss_fn, params, data_test, apply_model_fn
+        )
     except Exception as e:
         print(f"[scoring] program #{program.idx} sample_losses failed (ignored): {e}")
         sample_losses = None
 
     try:
         sample_losses_init = (
-            _eval_sample_losses(model_fn, loss_fn, params_init, data_test)
+            _eval_sample_losses(model_fn, loss_fn, params_init, data_test, apply_model_fn)
             if split == "discover"
             else None
         )
@@ -311,6 +340,7 @@ def _score_one_model(
     config: dict,
     X_eval=None,
     split: str = "discover",
+    apply_model_fn=apply_model_plain,
 ) -> tuple[
     float,
     float,
@@ -342,7 +372,9 @@ def _score_one_model(
         If a timeout occurs or `program.n_params` is `None`, infinite losses and `None`
         for other results are returned.
     """
-    result = _score_one_with_outcome(program, data, loss_fn, config, X_eval, split)
+    result = _score_one_with_outcome(
+        program, data, loss_fn, config, X_eval, split, apply_model_fn
+    )
     return result[:7]
 
 
@@ -353,6 +385,7 @@ def _score_one_with_outcome(
     config: dict,
     X_eval=None,
     split: str = "discover",
+    apply_model_fn=apply_model_plain,
 ) -> tuple[
     float,
     float,
@@ -378,9 +411,19 @@ def _score_one_with_outcome(
     queue = ctx.Queue()
     loss_fn_bytes = cloudpickle.dumps(loss_fn)
     program_bytes = cloudpickle.dumps(program)
+    apply_model_fn_bytes = cloudpickle.dumps(apply_model_fn)
     proc = ctx.Process(
         target=_worker,
-        args=(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split),
+        args=(
+            queue,
+            program_bytes,
+            data,
+            loss_fn_bytes,
+            config,
+            X_eval,
+            split,
+            apply_model_fn_bytes,
+        ),
     )
     proc.start()
     try:
@@ -456,6 +499,7 @@ def score(
     config: dict,
     loss_fn,
     split: str,
+    apply_model_fn=apply_model_plain,
 ) -> None:
     """Scores every program needing scoring on the given split.
 
@@ -505,7 +549,9 @@ def score(
             params_init,
             sample_losses_init,
             outcome,
-        ) = _score_one_with_outcome(program, X_split, loss_fn, config, X_eval, split)
+        ) = _score_one_with_outcome(
+            program, X_split, loss_fn, config, X_eval, split, apply_model_fn
+        )
         latency_ms = (time.monotonic() - t0) * 1000.0
         latencies_ms.append(latency_ms)
         counters[outcome] += 1

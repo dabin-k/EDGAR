@@ -1,0 +1,48 @@
+run:
+  random_seed: 42
+
+io:
+  # Resolved relative to the repo root (run_cluster.sh cd's there). Directory of
+  # Buzsaki-lab session .mat files; the loader finds *_SAll.mat + *_WSRestrictedIntervals.mat.
+  data_path: data/Dino_061914_mPFC
+
+evolution:
+  n_generations: 12
+  n_islands: 8
+  batch_size: 6
+  critical_population_size: 12
+  n_migrants: 2
+
+project_params:
+  bin_ms: 5.0
+  state: sws
+  sws_mode: longest          # single longest SWS episode (no history-corrupting joins)
+  # Windowed next-bin contract: each sample is a strictly-past window (W bins)
+  # mapped to the next bin, so leakage is structurally impossible. W=300 bins =
+  # 1.5 s of history at 5 ms bins (captures SWS UP/DOWN structure + fast bursting).
+  window_W: 300
+  # Anchors sampled per neuron per split (train/test each). mPFC units are sparse,
+  # so more anchors = more spikes = better-conditioned per-neuron fit, at the cost
+  # of history-array memory (N * A * W * 4 bytes per split).
+  anchors_per_neuron: 4000
+  min_region_spikes: 100      # keep neurons with >= this many spikes in each time-half
+  n_eval: 1
+  eval_anchors: 200
+  random_seed: 42
+
+llms:
+  num_parents: 2
+  model_llm: claude-sonnet-4-6
+  param_est_llm: claude-sonnet-4-6
+  jax_model_translator_llm: claude-haiku-4-5
+  max_tokens: 10000
+
+scoring:
+  param_penalty_weight: 0.01   # per-spike NLL is O(1) (~6.8 constant-rate baseline)
+  # Windowed models are cheap (elementwise/dot ops over a length-W window, vmapped
+  # over anchors and neurons) — no full-series scan — so scoring is fast; the
+  # timeout only needs to kill genuine hangs.
+  timeout_s: 120.0
+  gradient_descent:
+    max_iter: 300
+    learning_rate: 0.02

@@ -24,3 +24,6 @@ __pycache__/
 *.egg-info/
 
 *scratchpad.ipynb
+
+# Cluster run logs (per-project, regenerated each submission)
+cluster_logs/

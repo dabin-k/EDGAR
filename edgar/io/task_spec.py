@@ -126,6 +126,11 @@ class TaskSpec:
         plot_fn (Callable | None): Optional function to render model-fit images for
             LLM image-feedback prompts. None if the project does not provide
             `image_feedback/plot.py`.
+        apply_model_fn (Callable): Controls how the scoring sandbox maps a
+            program's `model_fn` over the data. Defaults to `apply_model_plain`
+            (a single `vmap` over axis-0). A project may override it by defining
+            `apply_model(model_fn, data, params)` in its `data_loader/load_data.py`
+            (e.g. the mPFC windowed nested vmap).
         creation_timestamp (str): Timestamp set at construction, used to create the
             hierarchical on-disk layout `<save_path>/MM-DD/HH-MM-SS/`.
         seed_programs (list[Program]): Hand-written seed programs (typically 2) that
@@ -168,6 +173,8 @@ class TaskSpec:
 
     plot_fn: Callable | None
 
+    apply_model_fn: Callable = field(default=None)
+
     creation_timestamp: str = field(
         default_factory=lambda: datetime.now().strftime("%m-%d/%H-%M-%S")
     )
@@ -209,6 +216,15 @@ class TaskSpec:
         loss_fn = load_function_from_source(data_loader_path.read_text(), "loss_fn")
         if loss_fn is None:
             raise ValueError(f"{data_loader_path} must define callable loss_fn()")
+
+        # Optional per-project override of how model_fn is mapped over the data.
+        # Falls back to the plain single-vmap used by every existing project.
+        from ..scoring.scoring import apply_model_plain
+
+        apply_model_fn = (
+            load_function_from_source(data_loader_path.read_text(), "apply_model")
+            or apply_model_plain
+        )
 
         plot_path = config.project_dir / "image_feedback" / "plot.py"
         plot_fn = (
@@ -255,6 +271,7 @@ class TaskSpec:
             load_data_fn=load_data_fn,
             loss_fn=loss_fn,
             plot_fn=plot_fn,
+            apply_model_fn=apply_model_fn,
             seed_programs=seed_programs,
             rng=np.random.default_rng(config.run.random_seed),
         )

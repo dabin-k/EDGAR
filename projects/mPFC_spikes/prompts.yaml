@@ -1,0 +1,97 @@
+# Windowed point-process framing for the mPFC spiking task. Deep-merged over
+# projects/prompt_defaults.yaml — only the overridden keys appear here. The
+# code_guidelines strings fully REPLACE the base ones (they are not line-merged).
+
+model:
+  base: 'You are an AI scientist modelling the spontaneous spiking of a single
+    mouse prefrontal-cortex neuron during slow-wave sleep. There is no stimulus:
+    the neuron must be predicted from its OWN recent past activity.
+
+    The spike train is binned in time (5 ms bins). Your model is shown a short
+    WINDOW of the neuron''s immediately preceding spike counts and must predict
+    the expected number of spikes in the SINGLE next bin (the conditional
+    intensity `mu`). It is scored by a per-spike Poisson negative log-likelihood
+    (lower is better).
+
+    Because the model only ever sees strictly-past bins and never the bin it is
+    predicting, causality is guaranteed by the data layout — you do not need to
+    reason about it. Focus entirely on WHAT function of the recent past best
+    predicts the next bin.
+
+    Below are {num_parents} models, sorted from worst to best. *Analyze* their
+    progression, *generalize* what lowers the loss, and *create* a new model that
+    beats all of them. Good models capture what real cortical neurons do:
+    heavy-tailed inter-spike intervals, short-timescale bursting / refractoriness,
+    and slow regression to the mean firing rate.
+
+    '
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Model signature must be `def model(window, params):`. `window` is a 1-D
+    numpy array of the neuron''s spike counts in the W bins immediately BEFORE the
+    bin being predicted, oldest first: `window[-1]` is the most recent past bin
+    (one bin ago), `window[0]` is the oldest (W bins ago). W is fixed for a run;
+    read it as `W = window.shape[0]`. There is no time index and no full series —
+    just this one window.
+
+    * OUTPUT: return a single scalar `mu` >= 0, the expected spike count in the
+    next bin. Do NOT return an array. `params` is a dict of named scalars.
+
+    * POSITIVITY: `mu` is a Poisson rate, so it must be strictly positive. Pass
+    your linear predictor through `np.logaddexp(0.0, z)` (softplus) or a positive
+    clip, and add a tiny epsilon (e.g. 1e-6).
+
+    * Weight the recent past. A natural model is a weighted sum of the window
+    against a kernel, `np.dot(window, kernel)`, where the kernel emphasises recent
+    bins (e.g. exponential `np.exp(-lag/tau)` or heavy-tailed `1/(lag+u0)**a`).
+    Recall `window[-1]` is lag 1 and `window[0]` is lag W, so build the kernel in
+    that orientation (e.g. `lags = np.arange(W, 0, -1)`).
+
+    * CRITICAL: array shapes must be fixed. Derive kernel length from
+    `W = window.shape[0]` (a fixed integer), never from a learnable parameter. A
+    learnable timescale like `tau` is optimised at run time, so `np.arange(5*tau)`
+    or `kernel[:int(5*tau)]` FAILS (JAX needs static shapes). Let parameters shape
+    the kernel *values* over the fixed length W, e.g.
+    `k = np.arange(W); kernel = np.exp(-k / tau)`.
+
+    * Prefer vectorized operations over Python `for` loops. Keep it cheap: a few
+    `np.dot`/elementwise ops over a length-W window. Keep the number of separate
+    kernels small (<= 3).
+
+    * Cast to `int()` when using a numeric value as an array size, slice index,
+    or `range()` argument.
+
+    * Provide `model.DEFAULT_PARAMS`: a dict of sensible float initial values for
+    every key in `params`. A good default reduces to a near-constant rate so
+    gradient descent starts from the constant-rate baseline (e.g. a self-excitation
+    gain of 0.0).
+
+    '
+parameter_estimator:
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Function signature must be `def parameter_estimator(data):`. `data` is one
+    neuron''s training dict with keys `data[''history'']` (2-D array of shape
+    (A, W): A past windows, each of length W) and `data[''target_y'']` (1-D array
+    of the A next-bin counts).
+
+    * Estimate parameters using `data[''history'']` (the past windows). A robust
+    choice sets the baseline from the mean rate, e.g. inverse-softplus of
+    `data[''history''].mean()`. Do not rely on `data[''target_y'']`; it is the
+    held-out quantity the model predicts.
+
+    * Return a param dict whose keys EXACTLY match the model''s params, all values
+    plain Python floats.
+
+    * Your response **must** be less than {max_lines} lines including imports.
+
+    * Do not use complex fitting functions like {swear_words}; a simple, fast
+    initial estimate is all that is needed.
+
+    * Do not call the model function; you will not have access to it.
+
+    '

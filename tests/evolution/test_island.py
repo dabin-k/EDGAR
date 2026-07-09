@@ -355,11 +355,13 @@ def test_are_duplicates_loss_diff_exceeds_tol():
     assert not _are_duplicates(p0, p1, loss_tol=0.1, cosine_tol=0.95)
 
 
-def test_are_duplicates_none_loss_skips_loss_check():
-    """When either loss is None, the loss check is skipped and only fingerprint is compared."""
+def test_are_duplicates_none_loss_not_duplicate():
+    """A program with a None (failed) loss is never a meaningful duplicate, even
+    with an identical fingerprint — the dedup guard bails out on None/non-finite
+    losses (also avoids abs(inf - inf) == nan slipping past the tolerance)."""
     p0 = make_fingerprint_program(_E0, loss=None, n_params=2)
     p1 = make_fingerprint_program(_E0, loss=5.0, n_params=2)
-    assert _are_duplicates(p0, p1, loss_tol=0.01, cosine_tol=0.95)
+    assert not _are_duplicates(p0, p1, loss_tol=0.01, cosine_tol=0.95)
 
 
 def test_are_duplicates_near_identical_fingerprint():
