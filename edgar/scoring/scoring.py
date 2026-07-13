@@ -50,6 +50,31 @@ from .utils import _safe_loss
 # ── helpers ──
 
 
+def default_evaluate(model_fn, data, params):
+    """Evaluates a model on every sample in a batch.
+
+    This is the evaluation used unless a project supplies its own
+    `evaluate/evaluate.py`. It maps the model over the sample axis of both the data
+    and the parameters, and returns the data dict unchanged as the target — so a
+    project's `loss_fn(model_output, data)` sees exactly what it always has.
+
+    A project overrides this when the model cannot simply be applied to a whole
+    sample at once. An autoregressive project, for instance, hands the model a
+    window of past timepoints, rolls it forward, and returns predictions aligned
+    with the timepoints they predict (see `projects/synthetic_data_v2/`).
+
+    Args:
+        model_fn: The JAX model function, taking one sample's data dict and that
+            sample's parameters.
+        data: A dict of JAX arrays whose leading axis is the sample axis.
+        params: A JAX pytree whose leaves have the sample axis leading.
+
+    Returns:
+        A tuple `(predictions, targets)`, both accepted by the project's `loss_fn`.
+    """
+    return jax.vmap(model_fn, in_axes=(0, 0))(data, params), data
+
+
 def _get_params(param_est_fn, default_params, data_train):
     """Estimates initial parameters for a model, falling back to defaults if the parameter estimator fails.
 
@@ -86,7 +111,7 @@ def _get_params(param_est_fn, default_params, data_train):
         return jax.tree_util.tree_map(lambda x: jnp.stack([x] * n), default_params)
 
 
-def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
+def _optimize(model_fn, loss_fn, evaluate_fn, params_init, data_train, gd_config):
     """Performs gradient descent to optimize model parameters.
 
     This function uses the Optax library and JAX to perform gradient-based
@@ -98,7 +123,9 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
         model_fn: The JAX-compiled model function (callable). Expected to take
             data and parameters, and return predictions.
         loss_fn: The loss function (callable). Expected to take predictions
-            and data, and return per-sample losses.
+            and targets, and return per-sample losses.
+        evaluate_fn: The evaluation function (callable) applying `model_fn` to a
+            batch of samples and returning `(predictions, targets)`.
         params_init: The initial parameters for the model (JAX pytree).
         data_train: A dictionary of training data, where keys are feature names
             and values are JAX arrays. Assumes the first dimension is the batch size.
@@ -111,9 +138,8 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
     flat, unflatten = ravel_pytree(params_init)
 
     def total_loss(flat_p):
-        p = unflatten(flat_p)
-        output = jax.vmap(model_fn, in_axes=(0, 0))(data_train, p)
-        return jnp.mean(loss_fn(output, data_train))
+        output, targets = evaluate_fn(model_fn, data_train, unflatten(flat_p))
+        return jnp.mean(loss_fn(output, targets))
 
     loss_and_grad = jax.jit(jax.value_and_grad(total_loss))
     opt = optax.adam(gd_config["learning_rate"])
@@ -145,7 +171,7 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
     return unflatten(best_flat)
 
 
-def _eval_loss(model_fn, loss_fn, params, data_test):
+def _eval_loss(model_fn, loss_fn, evaluate_fn, params, data_test):
     """Computes the overall scalar loss for a model on a given dataset.
 
     This function calculates the mean of the per-sample losses from the `loss_fn`
@@ -154,6 +180,7 @@ def _eval_loss(model_fn, loss_fn, params, data_test):
     Args:
         model_fn: The JAX-compiled model function (callable).
         loss_fn: The loss function (callable) that returns per-sample losses.
+        evaluate_fn: The evaluation function (callable) returning `(predictions, targets)`.
         params: The model parameters (JAX pytree).
         data_test: A dictionary of test data.
 
@@ -162,11 +189,11 @@ def _eval_loss(model_fn, loss_fn, params, data_test):
     """
     if params is None:
         return float("inf")
-    output = jax.vmap(model_fn, in_axes=(0, 0))(data_test, params)
-    return float(jnp.mean(loss_fn(output, data_test)))
+    output, targets = evaluate_fn(model_fn, data_test, params)
+    return float(jnp.mean(loss_fn(output, targets)))
 
 
-def _eval_sample_losses(model_fn, loss_fn, params, data_test):
+def _eval_sample_losses(model_fn, loss_fn, evaluate_fn, params, data_test):
     """Computes individual losses for each sample in a dataset.
 
     This function applies the model and loss function to each sample in the
@@ -176,17 +203,18 @@ def _eval_sample_losses(model_fn, loss_fn, params, data_test):
     Args:
         model_fn: The JAX-compiled model function (callable).
         loss_fn: The loss function (callable) that returns per-sample losses.
+        evaluate_fn: The evaluation function (callable) returning `(predictions, targets)`.
         params: The model parameters (JAX pytree).
         data_test: A dictionary of test data.
 
     Returns:
         A NumPy array of per-sample loss values.
     """
-    output = jax.vmap(model_fn, in_axes=(0, 0))(data_test, params)
-    return np.asarray(loss_fn(output, data_test))
+    output, targets = evaluate_fn(model_fn, data_test, params)
+    return np.asarray(loss_fn(output, targets))
 
 
-def _eval_fingerprint(model_fn, params, X_eval):
+def _eval_fingerprint(model_fn, evaluate_fn, params, X_eval):
     """Generates a low-dimensional "fingerprint" of model outputs for deduplication.
 
     This fingerprint is used to compare models and identify functionally
@@ -195,6 +223,7 @@ def _eval_fingerprint(model_fn, params, X_eval):
 
     Args:
         model_fn: The JAX-compiled model function (callable).
+        evaluate_fn: The evaluation function (callable) returning `(predictions, targets)`.
         params: The model parameters (JAX pytree).
         X_eval: A dictionary of evaluation data, containing a `_sample_indices`
             key to select a subset of samples for fingerprinting.
@@ -204,10 +233,13 @@ def _eval_fingerprint(model_fn, params, X_eval):
     """
     sample_indices = X_eval["_sample_indices"]
     params_matched = jax.tree_util.tree_map(lambda p: p[sample_indices], params)
-    return jax.vmap(model_fn, in_axes=(0, 0))(X_eval, params_matched)
+    predictions, _ = evaluate_fn(model_fn, X_eval, params_matched)
+    return predictions
 
 
-def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
+def _worker(
+    queue, program_bytes, data, loss_fn_bytes, evaluate_fn_bytes, config, X_eval, split
+):
     """Scores one program inside a subprocess.
 
     This function deserializes a `Program` and `loss_fn`, compiles the program's
@@ -223,6 +255,7 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
         data: A tuple `(data_train, data_test)` containing dictionaries of JAX arrays
             for training and testing.
         loss_fn_bytes: A `cloudpickle`-serialized loss function.
+        evaluate_fn_bytes: A `cloudpickle`-serialized evaluation function.
         config: A dictionary containing scoring configuration, e.g.,
             `param_penalty_weight` and `gradient_descent` settings.
         X_eval: A dictionary of evaluation data for fingerprinting, or `None`.
@@ -236,6 +269,7 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     """
     program = cloudpickle.loads(program_bytes)
     loss_fn = cloudpickle.loads(loss_fn_bytes)
+    evaluate_fn = cloudpickle.loads(evaluate_fn_bytes)
     data_train, data_test = data
 
     try:
@@ -256,11 +290,20 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     try:
         penalty = config["param_penalty_weight"] * program.n_params
         params_init = _get_params(param_est_fn, program.default_params, data_train)
-        initial_loss = _eval_loss(model_fn, loss_fn, params_init, data_test) + penalty
-        params = _optimize(
-            model_fn, loss_fn, params_init, data_train, config["gradient_descent"]
+        initial_loss = (
+            _eval_loss(model_fn, loss_fn, evaluate_fn, params_init, data_test) + penalty
         )
-        final_loss = _eval_loss(model_fn, loss_fn, params, data_test) + penalty
+        params = _optimize(
+            model_fn,
+            loss_fn,
+            evaluate_fn,
+            params_init,
+            data_train,
+            config["gradient_descent"],
+        )
+        final_loss = (
+            _eval_loss(model_fn, loss_fn, evaluate_fn, params, data_test) + penalty
+        )
     except Exception as e:
         print(f"[scoring] program #{program.idx} failed during optimize/eval: {e}")
         print(f"[scoring] traceback:\n{traceback.format_exc()}")
@@ -271,21 +314,25 @@ def _worker(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split):
     # Fingerprint and sample losses are non-critical: failures here don't poison the loss.
     try:
         fingerprint = (
-            _eval_fingerprint(model_fn, params, X_eval) if X_eval is not None else None
+            _eval_fingerprint(model_fn, evaluate_fn, params, X_eval)
+            if X_eval is not None
+            else None
         )
     except Exception as e:
         print(f"[scoring] program #{program.idx} fingerprint failed (ignored): {e}")
         fingerprint = None
 
     try:
-        sample_losses = _eval_sample_losses(model_fn, loss_fn, params, data_test)
+        sample_losses = _eval_sample_losses(
+            model_fn, loss_fn, evaluate_fn, params, data_test
+        )
     except Exception as e:
         print(f"[scoring] program #{program.idx} sample_losses failed (ignored): {e}")
         sample_losses = None
 
     try:
         sample_losses_init = (
-            _eval_sample_losses(model_fn, loss_fn, params_init, data_test)
+            _eval_sample_losses(model_fn, loss_fn, evaluate_fn, params_init, data_test)
             if split == "discover"
             else None
         )
@@ -318,6 +365,7 @@ def _score_one_model(
     config: dict,
     X_eval=None,
     split: str = "discover",
+    evaluate_fn=None,
 ) -> tuple[
     float,
     float,
@@ -343,13 +391,17 @@ def _score_one_model(
         X_eval: Optional. A dictionary of evaluation data for fingerprinting.
             If `None`, fingerprint computation is skipped.
         split: The scoring split (e.g., "discover" or "validate").
+        evaluate_fn: Optional. The project's evaluation function. Defaults to
+            `default_evaluate`.
 
     Returns:
         A 7-tuple: `(final_loss, initial_loss, eval_fingerprint, params, sample_losses, params_init, sample_losses_init)`.
         If a timeout occurs or `program.n_params` is `None`, infinite losses and `None`
         for other results are returned.
     """
-    result = _score_one_with_outcome(program, data, loss_fn, config, X_eval, split)
+    result = _score_one_with_outcome(
+        program, data, loss_fn, config, X_eval, split, evaluate_fn
+    )
     return result[:7]
 
 
@@ -360,6 +412,7 @@ def _score_one_with_outcome(
     config: dict,
     X_eval=None,
     split: str = "discover",
+    evaluate_fn=None,
 ) -> tuple[
     float,
     float,
@@ -384,10 +437,20 @@ def _score_one_with_outcome(
     ctx = mp.get_context(os.environ.get("EDGAR_MP_START_METHOD", "spawn"))
     queue = ctx.Queue()
     loss_fn_bytes = cloudpickle.dumps(loss_fn)
+    evaluate_fn_bytes = cloudpickle.dumps(evaluate_fn or default_evaluate)
     program_bytes = cloudpickle.dumps(program)
     proc = ctx.Process(
         target=_worker,
-        args=(queue, program_bytes, data, loss_fn_bytes, config, X_eval, split),
+        args=(
+            queue,
+            program_bytes,
+            data,
+            loss_fn_bytes,
+            evaluate_fn_bytes,
+            config,
+            X_eval,
+            split,
+        ),
     )
     proc.start()
     try:
@@ -463,6 +526,7 @@ def score(
     config: dict,
     loss_fn,
     split: str,
+    evaluate_fn=None,
 ) -> None:
     """Scores every program needing scoring on the given split.
 
@@ -488,6 +552,10 @@ def score(
         config: A dictionary containing scoring configuration parameters.
         loss_fn: The loss function (callable) to be used for scoring.
         split: The name of the scoring split (e.g., "discover" or "validate").
+        evaluate_fn: The project's evaluation function, applying a model to a batch of
+            samples and returning `(predictions, targets)`. Defaults to
+            `default_evaluate`, which vmaps the model over samples and returns the data
+            dict as the target.
 
     Returns:
         None. The `population` object is mutated in place, updating
@@ -512,7 +580,9 @@ def score(
             params_init,
             sample_losses_init,
             outcome,
-        ) = _score_one_with_outcome(program, X_split, loss_fn, config, X_eval, split)
+        ) = _score_one_with_outcome(
+            program, X_split, loss_fn, config, X_eval, split, evaluate_fn
+        )
         latency_ms = (time.monotonic() - t0) * 1000.0
         latencies_ms.append(latency_ms)
         counters[outcome] += 1

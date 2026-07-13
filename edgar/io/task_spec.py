@@ -126,6 +126,13 @@ class TaskSpec:
             `load_data(data_path, **project_params) -> (X_disc, X_val, X_eval)`.
         loss_fn (Callable): Project-specific loss function used by the scoring
             sandbox to evaluate model predictions against held-out data.
+        evaluate_fn (Callable | None): Optional function applying a model to a batch of
+            samples and returning `(predictions, targets)` for `loss_fn`. Loaded from
+            `<project_dir>/evaluate/evaluate.py`. None if the project does not provide
+            one, in which case scoring uses `default_evaluate`, which vmaps the model
+            over samples. A project overrides it when the model cannot be applied to a
+            whole sample at once — an autoregressive project hands the model a window of
+            past timepoints and rolls it forward.
         plot_fn (Callable | None): Optional function to render model-fit images for
             LLM image-feedback prompts. None if the project does not provide
             `image_feedback/plot.py`.
@@ -189,6 +196,8 @@ class TaskSpec:
 
     loss_fn: Callable
 
+    evaluate_fn: Callable | None
+
     plot_fn: Callable | None
 
     creation_timestamp: str = field(
@@ -225,17 +234,30 @@ class TaskSpec:
 
         data_loader_path = config.project_dir / "data_loader" / "load_data.py"
         load_data_fn = load_function_from_source(
-            data_loader_path.read_text(), "load_data"
+            data_loader_path.read_text(), "load_data", data_loader_path
         )
         if load_data_fn is None:
             raise ValueError(f"{data_loader_path} must define callable load_data()")
-        loss_fn = load_function_from_source(data_loader_path.read_text(), "loss_fn")
+        loss_fn = load_function_from_source(
+            data_loader_path.read_text(), "loss_fn", data_loader_path
+        )
         if loss_fn is None:
             raise ValueError(f"{data_loader_path} must define callable loss_fn()")
 
+        evaluate_path = config.project_dir / "evaluate" / "evaluate.py"
+        evaluate_fn = (
+            load_function_from_source(
+                evaluate_path.read_text(), "evaluate", evaluate_path
+            )
+            if evaluate_path.exists()
+            else None
+        )
+
         plot_path = config.project_dir / "image_feedback" / "plot.py"
         plot_fn = (
-            load_function_from_source(plot_path.read_text(), "plot_model_fits")
+            load_function_from_source(
+                plot_path.read_text(), "plot_model_fits", plot_path
+            )
             if plot_path.exists()
             else None
         )
@@ -319,6 +341,7 @@ class TaskSpec:
             ],
             load_data_fn=load_data_fn,
             loss_fn=loss_fn,
+            evaluate_fn=evaluate_fn,
             plot_fn=plot_fn,
             seed_programs=seed_programs,
             rng=np.random.default_rng(config.run.random_seed),

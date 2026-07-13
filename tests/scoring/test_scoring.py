@@ -3,6 +3,7 @@ import sys
 import time
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 
 from tests.llm.programs import Program1
@@ -13,7 +14,14 @@ if str(ROOT) not in sys.path:
 
 from edgar.evolution.program import Program, BirthCertificate, Code, NotValidated
 from edgar.evolution.population import Population
-from edgar.scoring.scoring import _eval_loss, _optimize, _score_one_model, rank, score
+from edgar.scoring.scoring import (
+    _eval_loss,
+    _optimize,
+    _score_one_model,
+    default_evaluate,
+    rank,
+    score,
+)
 
 
 # --- shared fixtures ---
@@ -246,13 +254,90 @@ def test_optimize_before_convergence():
     best_params = _optimize(
         model_fn=model_fn,
         loss_fn=loss_fn,
+        evaluate_fn=default_evaluate,
         params_init=params_init,
         data_train=data_train,
         gd_config=gd_config,
     )
-    loss = _eval_loss(model_fn, loss_fn, best_params, data_train)
+    loss = _eval_loss(model_fn, loss_fn, default_evaluate, best_params, data_train)
     print(f"Final loss: {loss:.6f}")
     assert round(loss, 6) == 0.008466
+
+
+# --- evaluate_fn ---
+
+# A model that steps a series forward one point at a time. It is handed a window of
+# past values and never sees the value it is predicting, so `return data['x']` -- the
+# zero-loss cheat available under default_evaluate -- is not reachable here.
+AR_MODEL_CODE = """
+import jax.numpy as jnp
+def model(data, params):
+    return params['w'] * data['x'][-1]
+"""
+
+AR_PARAM_EST_CODE = """
+import jax.numpy as jnp
+def parameter_estimator(data):
+    return {'w': jnp.array(0.5)}
+"""
+
+
+def ar_evaluate(model_fn, data, params):
+    """Project-style evaluate: build windows, predict the next point, return targets."""
+
+    def per_sample(sample, sample_params):
+        x = sample["x"]
+        preds = jnp.stack(
+            [model_fn({"x": x[t : t + 1]}, sample_params) for t in range(len(x) - 1)]
+        )
+        return preds, x[1:]
+
+    return jax.vmap(per_sample)(data, params)
+
+
+def ar_loss_fn(preds, targets):
+    return jnp.mean((preds - targets) ** 2, axis=-1)
+
+
+def _make_ar_data(n_samples=3, n_times=6):
+    # x(t+1) = 2 x(t), so w = 2.0 is the exact answer.
+    series = 2.0 ** jnp.arange(n_times)
+    return {"x": jnp.stack([series] * n_samples)}
+
+
+def test_evaluate_fn_is_used_and_params_are_optimized_through_it():
+    program = _make_program(
+        AR_MODEL_CODE, param_est=AR_PARAM_EST_CODE, default_params={"w": jnp.array(0.5)}
+    )
+    data = (_make_ar_data(), _make_ar_data())
+    config = {
+        **BASE_CONFIG,
+        "gradient_descent": {"max_iter": 300, "learning_rate": 0.05},
+    }
+
+    final_loss, initial_loss, _, params, _, _, _ = _score_one_model(
+        program, data, ar_loss_fn, config, evaluate_fn=ar_evaluate
+    )
+
+    # The param estimator starts at w=0.5; gradient descent must find w=2 through
+    # the wrapper, which is only possible if evaluate_fn is on the gradient path.
+    assert final_loss < initial_loss
+    assert jnp.allclose(params["w"], 2.0, atol=1e-2)
+    assert final_loss < 1e-3
+
+
+def test_evaluate_fn_defaults_to_vmap_over_samples():
+    model_fn = lambda data, params: params["w"] * data["x"]  # noqa: E731
+    data = _make_data(n_samples=3, n_trials=8)
+    params = {"w": jnp.full((3,), 2.0)}
+
+    preds, targets = default_evaluate(model_fn, data, params)
+
+    assert preds.shape == (3, 8)
+    assert jnp.allclose(preds, 2.0)
+    # The default hands the data dict back as the target, so an existing project's
+    # loss_fn(model_output, data) is unchanged.
+    assert targets is data
 
 
 # --- score (population) ---

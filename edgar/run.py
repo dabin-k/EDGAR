@@ -180,6 +180,7 @@ async def run(
                     spec.scoring,
                     spec.loss_fn,
                     split="discover",
+                    evaluate_fn=spec.evaluate_fn,
                     n_items=len(spec.seed_programs),
                 )
                 t_fits_seeds(spec, X_discover[1], population)
@@ -252,6 +253,7 @@ async def run(
                     spec.scoring,
                     spec.loss_fn,
                     split="discover",
+                    evaluate_fn=spec.evaluate_fn,
                     n_items=n_spawn,
                 )
                 t_fits(spec, X_discover[1], population)
@@ -293,6 +295,7 @@ async def run(
                 spec.scoring,
                 spec.loss_fn,
                 split="validate",
+                evaluate_fn=spec.evaluate_fn,
             )
             rank(population)
             metrics.finish_generation()

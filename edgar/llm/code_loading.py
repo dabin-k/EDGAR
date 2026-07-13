@@ -5,6 +5,7 @@ from collections.abc import Callable
 def load_function_from_source(
     source: str | None,
     entrypoint_name: str,
+    file_path: str | None = None,
 ) -> Callable | None:
     """Executes Python source code in a fresh namespace and returns a specified callable object.
 
@@ -24,6 +25,10 @@ def load_function_from_source(
         source: The Python source code string to execute. If `None` or empty, no execution occurs.
         entrypoint_name: The name of the callable object expected to be defined in the `source`
             and to be returned.
+        file_path: Optional path the source was read from, bound as `__file__` in the
+            namespace. Pass it for project files, so they can locate their siblings —
+            e.g. `image_feedback/plot.py` importing the project's `evaluate/evaluate.py`
+            rather than duplicating it. LLM-generated code has no path and omits it.
 
     Returns:
         The callable object corresponding to `entrypoint_name` if successfully loaded and callable,
@@ -34,7 +39,7 @@ def load_function_from_source(
         return None
 
     # Execute the source in a fresh module-like namespace.
-    ns = {}
+    ns = {"__file__": str(file_path)} if file_path else {}
     try:
         exec(source, ns)
     except Exception as e:
