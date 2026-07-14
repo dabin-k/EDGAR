@@ -2,48 +2,96 @@
 # entirely (projects/prompt_defaults.yaml).
 model:
   base: |
-    You are an AI scientist studying the spontaneous dynamics of a population of recorded cells. The cells sit on a ring, and the data is ordered by position on the ring.
+    You are an AI scientist studying the spontaneous activity of single particles. Each particle was recorded on its own and evolves independently of the others: there is no stimulus, and no coupling between particles. 
+    Every particle obeys the same law, but with its own coefficients — so the parameters are fitted separately for each particle, and your model must be the *form* of the law, not a description of one particle.
 
-    Below are {num_parents} models predicting how the population's activity evolves in time, sorted from worst to best. Your task is to create a new model, better than all of them.
+    Below are {num_parents} models predicting how one cell's activity evolves in time, sorted from worst to best. Your task is to create a new model, better than all of them.
 
-    **How the model is used, and how the loss is computed.** Let x(s) be the activity of all cells at time s. For every start time t:
+    **How the model is used, and how the loss is computed.** Let x(t) be the activity of one cell at time t. The model sees the last 20 values and predicts the next one:
 
-        w1 = [x(t-1), x(t)]    p1 = model(w1)    # prediction of x(t+1)
-        w2 = [x(t),   p1   ]   p2 = model(w2)    # prediction of x(t+2)
-        w3 = [p1,     p2   ]   p3 = model(w3)    # prediction of x(t+3)
+        w = [x(t-19), ..., x(t-1), x(t)]    p = model(w)    # prediction of x(t+1)
 
-        loss = mean over all t, all h in 1..3, and all cells of ( ph - x(t+h) )^2
+        loss = mean over all t of ( p - x(t+1) )^2
 
-    After the first step the model runs on its own output, so errors compound. A model that is plausible one step ahead but has the dynamics wrong will drift over the three steps and be punished. Predicting that nothing changes is poor: the activity moves appreciably over three steps.
+    The prediction is one step ahead, and the model is never run on its own output, so errors do not compound. Every timepoint in the recording is scored this way.
+
+    The activity does not settle down and it does not decay away — it keeps moving, over a bounded range, indefinitely. So predicting that nothing changes is poor, and predicting a decay towards zero is poor. Note also that x(t+1) is a *weak* linear function of x(t): a straight-line fit leaves most of the variance unexplained. The law is worth taking seriously as a shape, not as a coefficient.
 
     *Analyze* the progression of the models, *generalize* the improvements, and *create* a new model that is better than *all* previous models.
+
+  explore: |
+    Be *creative* and *invent* something new. Which features in the models below correlate with lower loss? Interpret these features more broadly and creatively, and experiment with novel ways to implement these features.
+
   code_guidelines: |
     **Code Generation Guidelines:**
 
     * Import any packages you use.
     * Model signature must be `def model(data, params):`.
-    * `data['x']` is the window, shape (n_cells, max_length). Column -1 is the most recent step, column -2 the one before. This is the only information you get: no stimulus, and no sight of the step you are predicting.
-    * Return the predicted activity of every cell at the next step: shape (n_cells,).
-    * `params` is a dict of named arrays/scalars (e.g. params['decay_rate']). All free parameters must be numeric.
-    * Free parameters are penalized elementwise: an (n_cells, n_cells) matrix of couplings costs n_cells^2. Prefer structure over free parameters.
+    * `data['x']` is the window for a single cell: a **one-dimensional** array of shape (20,). `data['x'][-1]` is the most recent step, `data['x'][-2]` the one before it. This is the only information you get: no stimulus, no sight of the other cells, and no sight of the step you are predicting.
+    * Return the cell's predicted activity at the next step: a **scalar**, not an array.
+    * `params` is a dict of named scalars (e.g. params['decay_rate']). All free parameters must be numeric.
+    * Free parameters are penalized elementwise, and they are fitted per cell. A model with a handful of parameters that captures the shape of the law will beat a model with twenty that merely interpolates it.
     * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
     * Ensure all string values in function call arguments are properly JSON-escaped.
     * Also provide `default_params`: sensible initial float values for every key in `params`, with exactly matching keys.
   image_analysis_instructions: |
     **Image Analysis Instructions:**
 
-    The attached figure has one row per model, above a row showing the data.
+    The attached figure has one row per cell, for four cells drawn from the population. The cells change from generation to generation, so do not tune to the particular four you see.
 
-    *Left, heatmaps.* Cells (in ring order) by time, for one recording block. Red is positive activity, blue negative, white zero; all heatmaps share one colour scale, so they are directly comparable. The top panel is the data. Each panel below is that model's prediction of the same block three steps ahead, i.e. after three steps of running on its own output.
+    *Left.* The cell's true activity in black, over one block of the recording, with each model's one-step-ahead prediction overlaid in colour. The shaded region at the start is the first few timepoints, which have no window behind them and so are never predicted.
 
-    *Right, line plots.* The top panel shows the true activity of three cells, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three cells, in matching colours. Thin solid = residual one step ahead; thick dashed = three steps ahead. A perfect model leaves both flat at zero.
+    *Right.* Each model's residual (prediction minus data) for the same cell, in matching colours. A perfect model leaves this flat at zero.
 
-    Diagnose from the residuals, not the heatmaps: a mediocre and a good model have similar heatmaps but different residuals. Consider:
+    Diagnose from the residuals, not the traces: two models can track the data equally well by eye and still differ tenfold in loss. Consider:
 
-    **Growth with horizon.** How much larger is the three-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds. This matters most.
+    **Structure.** Does the residual look like noise, or does it vary systematically? Systematic residual is the signature of a missing term, and its shape is evidence about what that term is.
 
-    **Structure.** Does the residual vary smoothly with time, or look like noise? Smooth variation is a systematic failure, and its shape is evidence about what the model is missing.
+    **Amplitude dependence.** Is the residual large when the activity is large, or small, or near zero? A model whose error grows with |x| has the wrong curvature. A model that is fine near zero but wrong at the extremes is missing a saturating or oscillating component.
 
-    **Which cells.** Is the residual large for some cells and small for others, and does that depend on where they sit on the ring?
+    **Sign.** Does the residual flip sign as the activity sweeps through its range? A residual that changes sign several times across the range of x means the true law bends more times than your model does.
 
     Use this to design a new model that removes the systematic errors you can see.
+
+parameter_estimator:
+  base: |
+    You are an AI scientist studying the spontaneous activity of single cells. Your task is to write a `parameter_estimator` for the new model shown last below: a direct, closed-form estimate of its free parameters from data, using statistical principles rather than iterative fitting.
+
+    **The estimator does not see the same data as the model. Read this before writing any indexing.**
+
+    The *model* is called once per prediction, on a single window of one cell: `data['x']` has shape (20,), one-dimensional.
+
+    The *estimator* is called once per cell, on that cell's entire training split:
+
+        data['x'] : (n_blocks, block_len)     # two-dimensional
+
+        axis 0 - block. Independent segments of the recording. Blocks are NOT contiguous
+                 in time: never take a difference, lag or shift along axis 0.
+        axis 1 - time. Consecutive steps within a block. `x[:, :-1]` and `x[:, 1:]`
+                 are the (state, next state) pairs.
+
+    Your estimate is the starting point for gradient descent on the loss. It must be finite and in the right regime; it does not have to be optimal. Index every axis explicitly.
+
+    *Analyze* the progression of the parameter estimators below, *generalize* the improvements, and *create* a new parameter estimator that is better than *all* previous estimators.
+  code_guidelines: |
+    **Code Generation Guidelines:**
+
+    * Import any packages you use. Do not include any text other than the code.
+    * Function signature must be `def parameter_estimator(data):`, where `data['x']` has shape `(n_blocks, block_len)` as described above.
+    * Return a dict whose keys exactly match the model's `params` keys, with every value a float. Mismatched keys or non-float values are rejected.
+    * If the model is **linear in a set of coefficients**, estimate them *jointly*: build one design matrix over every (block, time) pair and solve the normal equations. Fitting each coefficient on its own with `np.sum(y * f) / np.sum(f * f)` ignores the correlation between features, and successive lags and powers of x are always strongly correlated — done that way the weights come out badly biased. For example:
+
+          x = np.asarray(data["x"])                    # (n_blocks, block_len)
+          y = x[:, 1:]                                 # target: state at t+1
+          x_t = x[:, :-1]                              # state at t
+          feats = [np.ones_like(x_t), x_t, x_t**2]
+          F = np.stack([f.ravel() for f in feats], axis=1)
+          w = np.linalg.solve(F.T @ F + 1e-8 * np.eye(F.shape[1]), F.T @ y.ravel())
+
+    * If a parameter enters the model **non-linearly** — a rate inside an exponential, a frequency inside a sine — there is no such closed form, and a linear solve will not find it. Estimate it from a *summary statistic of the data that it controls*: the scale of x it acts on, the range x covers, how many times the relationship between x(t) and x(t+1) turns over that range, the spacing of the zero crossings. A coarse scan over a small grid of candidate values, scoring each by one-step residual, is also acceptable and is not iterative fitting. Getting the order of magnitude right is what matters.
+    * Wrap the solve in `try` / `except np.linalg.LinAlgError` and fall back to sensible constants. Always return finite floats: a NaN or an inf makes the model unscoreable.
+    * Do not fit with {swear_words}. We need a fast initial estimate, not an optimizer.
+    * Do not call the model function — you will not have access to it.
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
+    * Ensure all string values in function call arguments are properly JSON-escaped.
+    * Your response **must** be less than {max_lines} lines including imports, or it will be rejected.

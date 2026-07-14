@@ -5,10 +5,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evaluate"))
-from evaluate import MAX_LENGTH, ROLLOUT_STEPS, evaluate  # noqa: E402
+from evaluate import M, evaluate  # noqa: E402
 
 
-TRACE_CELLS = (4, 14, 24)  # three cells spread around the ring
+N_TRACE_CELLS = 4
+
+
+def _trace_cells(programs, n_samples):
+    """Choose which cells to show: the same ones for every model of a generation, a
+    different set each generation, and the same sequence on every rerun of the run."""
+    try:
+        seed = int(programs[0].birth.generation)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        seed = 0
+    seed = max(seed, 0)  # seed programs are born at generation -1
+    n = min(N_TRACE_CELLS, n_samples)
+    return np.sort(np.random.default_rng(seed).choice(n_samples, n, replace=False))
 
 
 def plot_model_fits(
@@ -21,18 +33,21 @@ def plot_model_fits(
     params=None,
 ):
     """
-    Plot observed population activity against each program's autoregressive prediction.
+    Plot each cell's observed activity against every program's one-step prediction.
 
-    Left column: heatmaps of one recording block, cells by time, all sharing one colour
-    scale and one colourbar — the data on top, each program's rollout prediction below.
-    Right column: for three example cells, the residual (prediction minus data) over
-    time at the first and last rollout step, so a model that is right one step ahead but
-    drifts over the rollout is visibly different from one that is biased from the start.
+    One row per cell. Left: the true trace over one block, with each program's
+    prediction of the next step overlaid; the leading `M` timepoints have no window
+    behind them and are never predicted, so they are shaded. Right: the residual
+    (prediction minus data) for the same cell, which is where a mediocre and a good
+    model actually differ — their traces look alike, their residuals do not.
+
+    The cells shown are re-drawn each generation, so the models are compared on a fresh
+    sample of the population rather than on four cells that might happen to be easy.
 
     Programs are titled model_1, model_2, ... in the order given.
-    
+
     Args:
-        data: X_disc_train dict with key 'x', shape (n_samples, n_blocks, n_cells, block_len).
+        data: X_disc_test dict with key 'x', shape (n_samples, n_blocks, block_len).
         programs: list of Program objects with .params and .compile_model().
         save_path: file path to save the figure.
         losses: per-program loss, defaults to program.program_losses.discover.final.
@@ -48,74 +63,73 @@ def plot_model_fits(
     if params is None:
         params = [p.params for p in programs]
 
-    sample, block = 0, 0
-    truth = np.asarray(data["x"])[sample, block]  # (n_cells, block_len)
-    vmax = float(np.abs(truth).max())
-    kw = dict(aspect="auto", origin="lower", vmin=-vmax, vmax=vmax, cmap="RdBu_r")
+    x = np.asarray(data["x"])
+    n_samples = x.shape[0]
+    cells = _trace_cells(programs, n_samples)
+    block = 0
 
-    # target time of prediction (start s, horizon h) is s + 1 + h
-    starts = np.arange(MAX_LENGTH - 1, truth.shape[1] - ROLLOUT_STEPS)
-    t_first = starts + 1
-    t_last = starts + ROLLOUT_STEPS
+    # every program's predictions, once
+    preds = []
+    for program, prm in zip(programs, params):
+        p, _ = evaluate(program.compile_model(), data, prm)
+        preds.append(np.asarray(p)[:, block])  # (n_samples, block_len - M)
 
-    n_rows = 1 + len(programs)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(11, 2.6 * n_rows), squeeze=False)
+    block_len = x.shape[2]
+    t_pred = np.arange(M, block_len)
 
-    im = axes[0, 0].imshow(truth, **kw)
-    axes[0, 0].set(title="data (one recording block)", ylabel="cell", xlabel="time")
-    for c in TRACE_CELLS:
-        axes[0, 0].axhline(c, color="k", lw=0.6, ls=":")
-    fig.colorbar(im, ax=axes[0, 0], label="activity")
+    fig, axes = plt.subplots(
+        len(cells), 2, figsize=(13, 2.5 * len(cells)), squeeze=False
+    )
 
-    ax = axes[0, 1]
-    for i, c in enumerate(TRACE_CELLS):
-        ax.plot(truth[c], color=f"C{i}", label=f"cell {c}")
-    ax.set(title="activity of the three marked cells", xlabel="time", ylabel="activity")
-    ax.legend(fontsize=7)
+    for row, cell in enumerate(cells):
+        truth = x[cell, block]
 
-    for row, program in enumerate(programs, start=1):
-        model_fn = program.compile_model()
-        preds, targets = evaluate(model_fn, data, params[row - 1])
-        preds = np.asarray(preds)[sample, block]  # (n_starts, horizon, n_cells)
-        targets = np.asarray(targets)[sample, block]
-        residual = preds - targets
-
-        label = f"model_{row}"
-
-        im = axes[row, 0].imshow(preds[:, ROLLOUT_STEPS - 1].T, **kw)
-        axes[row, 0].set(
-            title=f"{label}: prediction, {ROLLOUT_STEPS} steps ahead"
-            f"  (loss {losses[row - 1]:.4g})",
-            ylabel="cell",
-            xlabel="time",
+        ax = axes[row, 0]
+        ax.axvspan(0, M, color="0.9", zorder=0)
+        ax.text(
+            M / 2,
+            1.0,
+            "not predicted",
+            transform=ax.get_xaxis_transform(),  # x in data coords, y in axes coords
+            ha="center",
+            va="bottom",
+            fontsize=6,
+            color="0.4",
         )
-        fig.colorbar(im, ax=axes[row, 0], label="activity")
+        ax.plot(np.arange(block_len), truth, color="k", lw=1.6, label="data", zorder=3)
+        for i, pred in enumerate(preds):
+            ax.plot(
+                t_pred,
+                pred[cell],
+                color=f"C{i}",
+                lw=1.0,
+                alpha=0.9,
+                label=f"model_{i + 1}",
+            )
+        ax.set(title=f"cell {cell}: activity", xlabel="time", ylabel="activity")
+        ax.legend(fontsize=6, ncol=len(preds) + 1)
 
         ax = axes[row, 1]
         ax.axhline(0, color="k", lw=0.6)
-        for i, c in enumerate(TRACE_CELLS):
+        for i, pred in enumerate(preds):
             ax.plot(
-                t_first,
-                residual[:, 0, c],
+                t_pred,
+                pred[cell] - truth[M:],
                 color=f"C{i}",
                 lw=1.0,
-                label=f"cell {c}, 1 step",
-            )
-            ax.plot(
-                t_last,
-                residual[:, ROLLOUT_STEPS - 1, c],
-                color=f"C{i}",
-                lw=1.4,
-                ls="--",
-                label=f"cell {c}, {ROLLOUT_STEPS} steps",
+                label=f"model_{i + 1}",
             )
         ax.set(
-            title=f"{label}: residual (prediction - data)",
+            title=f"cell {cell}: residual (prediction - data)",
             xlabel="time",
             ylabel="residual",
         )
-        ax.legend(fontsize=6, ncol=3)
+        ax.legend(fontsize=6, ncol=len(preds))
 
-    fig.tight_layout()
+    titles = "   ".join(
+        f"model_{i + 1}: loss {loss:.4g}" for i, loss in enumerate(losses)
+    )
+    fig.suptitle(titles, fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(save_path, dpi=110)
     plt.close(fig)

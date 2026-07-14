@@ -12,19 +12,19 @@ evolution:
   topology: [1, 2, 3, 4, 5, 6, 7, 0]
 
 scoring:
-  # The default (0.01) is catastrophic for this project: parameters are counted
-  # elementwise, and our losses run 1e-4 (correct model) to 4e-2 (do nothing), so a
-  # 6-parameter model would pay 0.06 — more than the entire loss scale — and the
-  # trivial persistence model would win. Calibrated in journal/2026-07-13_calibrate_penalty.py.
-  param_penalty_weight: 1.0e-5
+  # Parameters are counted elementwise, so the penalty has to sit well below the loss
+  # scale or it selects on parameter count rather than on the science. Losses here run
+  # from 2.5e-5 (the true 3-parameter equation, at the noise floor) to 4e-1 (an affine
+  # AR(1)). At 1e-6 the truth pays 3e-6 and a 10-parameter polynomial pays 1e-5 —
+  # negligible against its 3e-3 loss — so the penalty only breaks near-ties.
+  param_penalty_weight: 1.0e-6
 
 project_params:
   n_cells: 32
-  n_times: 250
-  n_recordings: 16
-  dt: 0.1
+  n_times: 500
+  burn_in: 200
   process_noise: 0.005
   obs_noise: 0.0
-  block_len: 50
+  block_len: 100
   random_seed: 0
   n_eval_samples: 4

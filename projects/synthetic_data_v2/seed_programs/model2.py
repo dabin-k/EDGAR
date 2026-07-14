@@ -1,18 +1,17 @@
 def model(data, params):
     """
-    Leaky decay: each cell decays towards zero at a single shared rate, with no
-    interaction between cells.
+    Leaky decay: the cell's activity decays towards zero at a constant rate.
 
-    data['x'] = recent activity, shape (n_cells, max_length).
-        Column -1 is the most recent step, column -2 the one before it.
+    data['x'] = recent activity of one cell, shape (max_length,).
+        Index -1 is the most recent step, index -2 the one before it.
 
     params:
         decay: Fraction of the current activity retained at the next step.
 
     Returns:
-        np.ndarray: predicted activity at the next step, shape (n_cells,).
+        float: predicted activity at the next step.
     """
-    return params["decay"] * data["x"][:, -1]
+    return params["decay"] * data["x"][-1]
 
 
 model.DEFAULT_PARAMS = {"decay": 0.9}
