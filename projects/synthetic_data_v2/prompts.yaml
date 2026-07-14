@@ -70,9 +70,6 @@ parameter_estimator:
     * Import any packages you use. Do not include any text other than the code.
     * Function signature must be `def parameter_estimator(data):`, where `data['x']` has shape `(n_blocks, block_len)` as described above.
     * Return a dict whose keys exactly match the model's `params` keys, with every value a float. Mismatched keys or non-float values are rejected.
-    * If a parameter enters the model **non-linearly** — a rate inside an exponential, a frequency inside a sine — there is no such closed form, and a linear solve will not find it. 
-    Estimate it from a *summary statistic of the data that it controls*: the scale of x it acts on, the range x covers, how many times the relationship between x(t) and x(t+1) turns over that range, the spacing of the zero crossings. A coarse scan over a small grid of candidate values, scoring each by one-step residual, is also acceptable and is not iterative fitting. Getting the order of magnitude right is what matters.
-    * Wrap the solve in `try` / `except np.linalg.LinAlgError` and fall back to sensible constants. Always return finite floats: a NaN or an inf makes the model unscoreable.
     * Do not fit with {swear_words}. We need a fast initial estimate, not an optimizer.
     * Do not call the model function — you will not have access to it.
     * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
