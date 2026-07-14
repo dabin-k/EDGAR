@@ -2,20 +2,15 @@
 # entirely (projects/prompt_defaults.yaml).
 model:
   base: |
-    You are an AI scientist studying the spontaneous activity of single particles. Each particle was recorded on its own and evolves independently of the others: there is no stimulus, and no coupling between particles. 
-    Every particle obeys the same law, but with its own coefficients — so the parameters are fitted separately for each particle, and your model must be the *form* of the law, not a description of one particle.
+    You are an AI scientist studying the spontaneous activity of single particles. Your aim is to find a single parametric model that describes the time evolution of the activity of each particle.
 
-    Below are {num_parents} models predicting how one cell's activity evolves in time, sorted from worst to best. Your task is to create a new model, better than all of them.
+    Below are {num_parents} models predicting how one particle's activity evolves in time, sorted from worst to best. Your task is to create a new model, better than all of them.
 
-    **How the model is used, and how the loss is computed.** Let x(t) be the activity of one cell at time t. The model sees the last 20 values and predicts the next one:
+    **How the model is used, and how the loss is computed.** Let x(t) be the activity of one particle at time t. The model sees the last 20 values and predicts the next one:
 
-        w = [x(t-19), ..., x(t-1), x(t)]    p = model(w)    # prediction of x(t+1)
+        w = [x(t-19), ..., x(t-1), x(t)]    pred = model(w)    # prediction of x(t+1)
 
-        loss = mean over all t of ( p - x(t+1) )^2
-
-    The prediction is one step ahead, and the model is never run on its own output, so errors do not compound. Every timepoint in the recording is scored this way.
-
-    The activity does not settle down and it does not decay away — it keeps moving, over a bounded range, indefinitely. So predicting that nothing changes is poor, and predicting a decay towards zero is poor. Note also that x(t+1) is a *weak* linear function of x(t): a straight-line fit leaves most of the variance unexplained. The law is worth taking seriously as a shape, not as a coefficient.
+        loss = mean over all t of ( pred - x(t+1) )^2
 
     *Analyze* the progression of the models, *generalize* the improvements, and *create* a new model that is better than *all* previous models.
 
@@ -27,41 +22,37 @@ model:
 
     * Import any packages you use.
     * Model signature must be `def model(data, params):`.
-    * `data['x']` is the window for a single cell: a **one-dimensional** array of shape (20,). `data['x'][-1]` is the most recent step, `data['x'][-2]` the one before it. This is the only information you get: no stimulus, no sight of the other cells, and no sight of the step you are predicting.
-    * Return the cell's predicted activity at the next step: a **scalar**, not an array.
+    * `data['x']` is the window for a single particle: a **one-dimensional** array of shape (20,). `data['x'][-1]` is the most recent step, `data['x'][-2]` the one before it. This is the only information you get: no stimulus, no sight of the other particles, and no sight of the step you are predicting.
+    * Return the particle's predicted activity at the next step: a **scalar**, not an array.
     * `params` is a dict of named scalars (e.g. params['decay_rate']). All free parameters must be numeric.
-    * Free parameters are penalized elementwise, and they are fitted per cell. A model with a handful of parameters that captures the shape of the law will beat a model with twenty that merely interpolates it.
+    * Free parameters are penalized elementwise, and they are fitted per particle. A model with a handful of parameters that captures the shape of the law will beat a model with twenty that merely interpolates it.
     * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
     * Ensure all string values in function call arguments are properly JSON-escaped.
     * Also provide `default_params`: sensible initial float values for every key in `params`, with exactly matching keys.
   image_analysis_instructions: |
     **Image Analysis Instructions:**
 
-    The attached figure has one row per cell, for four cells drawn from the population. The cells change from generation to generation, so do not tune to the particular four you see.
+    The attached figure has one row per particle, for four particles drawn from the population. The particles change from generation to generation.
 
-    *Left.* The cell's true activity in black, over one block of the recording, with each model's one-step-ahead prediction overlaid in colour. The shaded region at the start is the first few timepoints, which have no window behind them and so are never predicted.
+    *Left.* The particle's true activity in black, over one block of the recording, with each model's one-step-ahead prediction overlaid in colour. The shaded region at the start is the first few timepoints, which have no window behind them and so are never predicted.
 
-    *Right.* Each model's residual (prediction minus data) for the same cell, in matching colours. A perfect model leaves this flat at zero.
+    *Right.* Each model's residual (prediction minus data) for the same particle, in matching colours. A perfect model leaves this flat at zero.
 
     Diagnose from the residuals, not the traces: two models can track the data equally well by eye and still differ tenfold in loss. Consider:
 
     **Structure.** Does the residual look like noise, or does it vary systematically? Systematic residual is the signature of a missing term, and its shape is evidence about what that term is.
 
-    **Amplitude dependence.** Is the residual large when the activity is large, or small, or near zero? A model whose error grows with |x| has the wrong curvature. A model that is fine near zero but wrong at the extremes is missing a saturating or oscillating component.
-
-    **Sign.** Does the residual flip sign as the activity sweeps through its range? A residual that changes sign several times across the range of x means the true law bends more times than your model does.
-
     Use this to design a new model that removes the systematic errors you can see.
 
 parameter_estimator:
   base: |
-    You are an AI scientist studying the spontaneous activity of single cells. Your task is to write a `parameter_estimator` for the new model shown last below: a direct, closed-form estimate of its free parameters from data, using statistical principles rather than iterative fitting.
+    You are an AI scientist studying the spontaneous activity of single particles. Your task is to write a `parameter_estimator` for the new model shown last below: a direct, closed-form estimate of its free parameters from data, using statistical principles rather than iterative fitting.
 
     **The estimator does not see the same data as the model. Read this before writing any indexing.**
 
-    The *model* is called once per prediction, on a single window of one cell: `data['x']` has shape (20,), one-dimensional.
+    The *model* is called once per prediction, on a single window of one particle: `data['x']` has shape (20,), one-dimensional.
 
-    The *estimator* is called once per cell, on that cell's entire training split:
+    The *estimator* is called once per particle, on that particle's entire training split:
 
         data['x'] : (n_blocks, block_len)     # two-dimensional
 
@@ -79,16 +70,8 @@ parameter_estimator:
     * Import any packages you use. Do not include any text other than the code.
     * Function signature must be `def parameter_estimator(data):`, where `data['x']` has shape `(n_blocks, block_len)` as described above.
     * Return a dict whose keys exactly match the model's `params` keys, with every value a float. Mismatched keys or non-float values are rejected.
-    * If the model is **linear in a set of coefficients**, estimate them *jointly*: build one design matrix over every (block, time) pair and solve the normal equations. Fitting each coefficient on its own with `np.sum(y * f) / np.sum(f * f)` ignores the correlation between features, and successive lags and powers of x are always strongly correlated — done that way the weights come out badly biased. For example:
-
-          x = np.asarray(data["x"])                    # (n_blocks, block_len)
-          y = x[:, 1:]                                 # target: state at t+1
-          x_t = x[:, :-1]                              # state at t
-          feats = [np.ones_like(x_t), x_t, x_t**2]
-          F = np.stack([f.ravel() for f in feats], axis=1)
-          w = np.linalg.solve(F.T @ F + 1e-8 * np.eye(F.shape[1]), F.T @ y.ravel())
-
-    * If a parameter enters the model **non-linearly** — a rate inside an exponential, a frequency inside a sine — there is no such closed form, and a linear solve will not find it. Estimate it from a *summary statistic of the data that it controls*: the scale of x it acts on, the range x covers, how many times the relationship between x(t) and x(t+1) turns over that range, the spacing of the zero crossings. A coarse scan over a small grid of candidate values, scoring each by one-step residual, is also acceptable and is not iterative fitting. Getting the order of magnitude right is what matters.
+    * If a parameter enters the model **non-linearly** — a rate inside an exponential, a frequency inside a sine — there is no such closed form, and a linear solve will not find it. 
+    Estimate it from a *summary statistic of the data that it controls*: the scale of x it acts on, the range x covers, how many times the relationship between x(t) and x(t+1) turns over that range, the spacing of the zero crossings. A coarse scan over a small grid of candidate values, scoring each by one-step residual, is also acceptable and is not iterative fitting. Getting the order of magnitude right is what matters.
     * Wrap the solve in `try` / `except np.linalg.LinAlgError` and fall back to sensible constants. Always return finite floats: a NaN or an inf makes the model unscoreable.
     * Do not fit with {swear_words}. We need a fast initial estimate, not an optimizer.
     * Do not call the model function — you will not have access to it.
