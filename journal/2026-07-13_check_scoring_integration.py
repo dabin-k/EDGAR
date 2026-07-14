@@ -58,10 +58,14 @@ def main():
 
     # plot_fn imports the project's evaluate.py via __file__, so it only loads if
     # task_spec binds the source path into the namespace.
+    # run.py passes X_discover[1] -- the *test* blocks -- with params fitted on train,
+    # so the LLM is shown generalisation error, not training fit. Mirror that here.
     assert spec.plot_fn is not None, "plot_fn failed to load"
     out = "journal/2026-07-13_synthetic_data_v2_feedback.png"
-    spec.plot_fn(X_disc[0], [population[i] for i in range(len(population))], save_path=out)
-    print(f"plot_fn rendered {out}")
+    spec.plot_fn(
+        X_disc[1], [population[i] for i in range(len(population))], save_path=out
+    )
+    print(f"plot_fn rendered {out}  (test blocks, train-fitted params)")
 
     print("\nscoring integration OK")
 
