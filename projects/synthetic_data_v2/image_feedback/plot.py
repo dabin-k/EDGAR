@@ -29,13 +29,15 @@ def plot_model_fits(
     time at the first and last rollout step, so a model that is right one step ahead but
     drifts over the rollout is visibly different from one that is biased from the start.
 
+    Programs are titled model_1, model_2, ... in the order given.
+    
     Args:
         data: X_disc_train dict with key 'x', shape (n_samples, n_blocks, n_cells, block_len).
         programs: list of Program objects with .params and .compile_model().
         save_path: file path to save the figure.
         losses: per-program loss, defaults to program.program_losses.discover.final.
         sample_losses: per-program array over samples, defaults to program.sample_losses.
-        program_names: defaults to program.name.
+        program_names: unused; programs are labelled by position.
         params: per-program fitted params, defaults to program.params.
     """
     if not save_path:
@@ -43,8 +45,6 @@ def plot_model_fits(
 
     if losses is None:
         losses = [p.program_losses.discover.final for p in programs]
-    if program_names is None:
-        program_names = [p.name for p in programs]
     if params is None:
         params = [p.params for p in programs]
 
@@ -80,9 +80,11 @@ def plot_model_fits(
         targets = np.asarray(targets)[sample, block]
         residual = preds - targets
 
+        label = f"model_{row}"
+
         im = axes[row, 0].imshow(preds[:, ROLLOUT_STEPS - 1].T, **kw)
         axes[row, 0].set(
-            title=f"{program_names[row - 1]}: prediction, {ROLLOUT_STEPS} steps ahead"
+            title=f"{label}: prediction, {ROLLOUT_STEPS} steps ahead"
             f"  (loss {losses[row - 1]:.4g})",
             ylabel="cell",
             xlabel="time",
@@ -108,7 +110,7 @@ def plot_model_fits(
                 label=f"cell {c}, {ROLLOUT_STEPS} steps",
             )
         ax.set(
-            title=f"{program_names[row - 1]}: residual (prediction - data)",
+            title=f"{label}: residual (prediction - data)",
             xlabel="time",
             ylabel="residual",
         )
