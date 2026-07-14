@@ -385,7 +385,7 @@ def validate_project(task: str) -> int:
     for path, fn_name in required_fns:
         if not path.exists():
             continue  # already reported as missing
-        if load_function_from_source(path.read_text(), fn_name) is None:
+        if load_function_from_source(path.read_text(), fn_name, path) is None:
             errors.append(
                 f"Missing function '{fn_name}' in {path.relative_to(task_path)}"
             )
