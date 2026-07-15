@@ -26,6 +26,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import time
+from typing import NamedTuple
 
 import traceback
 import cloudpickle
@@ -86,6 +87,71 @@ def _get_params(param_est_fn, default_params, data_train):
         return jax.tree_util.tree_map(lambda x: jnp.stack([x] * n), default_params)
 
 
+class _IDBDState(NamedTuple):
+    """State for the IDBD optimizer: per-parameter log step-size and trace."""
+
+    beta: jax.Array  # log step-size per parameter; alpha = exp(beta)
+    h: jax.Array  # decaying memory trace per parameter
+
+
+def _idbd(learning_rate, meta_learning_rate):
+    """Incremental Delta-Bar-Delta optimizer (Sutton, 1992) as an optax transform.
+
+    IDBD adapts a separate step-size per parameter online: each step-size grows
+    when consecutive gradients agree in sign and shrinks when they oscillate.
+    The original algorithm is defined for linear LMS; the per-parameter curvature
+    term `x_i**2` in the trace update is here approximated by the squared gradient
+    `g_i**2`, which needs no extra JAX passes.
+
+    Log step-sizes start at `log(learning_rate)`, so a fresh IDBD run initially
+    behaves like plain SGD at `learning_rate`.
+
+    Args:
+        learning_rate: Initial per-parameter step-size (before adaptation).
+        meta_learning_rate: Meta step-size `theta` governing how fast the
+            per-parameter step-sizes themselves adapt.
+
+    Returns:
+        An `optax.GradientTransformation` implementing IDBD.
+    """
+    log_lr = jnp.log(learning_rate)
+
+    def init_fn(params):
+        return _IDBDState(
+            beta=jnp.full_like(params, log_lr),
+            h=jnp.zeros_like(params),
+        )
+
+    def update_fn(updates, state, params=None):
+        g = updates
+        beta = state.beta - meta_learning_rate * g * state.h
+        alpha = jnp.exp(beta)
+        new_updates = -alpha * g
+        decay = jnp.maximum(0.0, 1.0 - alpha * g**2)
+        h = state.h * decay - alpha * g
+        return new_updates, _IDBDState(beta=beta, h=h)
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+def _make_optimizer(gd_config):
+    """Builds the optax optimizer selected by `gd_config['optimizer']`.
+
+    Defaults to Adam when unset so existing configs are unaffected.
+    """
+    name = gd_config.get("optimizer", "adam")
+    if name == "adam":
+        return optax.adam(gd_config["learning_rate"])
+    if name == "idbd":
+        meta_lr = gd_config.get("meta_learning_rate")
+        if meta_lr is None:
+            raise ValueError(
+                "optimizer='idbd' requires gradient_descent.meta_learning_rate to be set"
+            )
+        return _idbd(gd_config["learning_rate"], meta_lr)
+    raise ValueError(f"Unknown optimizer {name!r} (expected 'adam' or 'idbd')")
+
+
 def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
     """Performs gradient descent to optimize model parameters.
 
@@ -116,7 +182,7 @@ def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
         return jnp.mean(loss_fn(output, data_train))
 
     loss_and_grad = jax.jit(jax.value_and_grad(total_loss))
-    opt = optax.adam(gd_config["learning_rate"])
+    opt = _make_optimizer(gd_config)
     opt_state = opt.init(flat)
     best_loss, best_flat = float("inf"), flat
 

@@ -77,3 +77,11 @@ scoring:
 
     # Parameter optimizer learning rate.
     learning_rate: 0.003
+
+    # Optimizer: "adam" (default) or "idbd" (Incremental Delta-Bar-Delta,
+    # Sutton 1992 — adapts a per-parameter step-size online).
+    optimizer: adam
+
+    # Meta step-size for IDBD (how fast per-parameter step-sizes adapt).
+    # Required when optimizer is "idbd"; leave unset for adam.
+    meta_learning_rate: null

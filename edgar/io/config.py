@@ -280,10 +280,17 @@ class GradientDescentConfig(_LaxModel):
     Attributes:
         max_iter: The maximum number of iterations for the gradient descent algorithm.
         learning_rate: The learning rate used by the optimizer.
+        optimizer: Which optimizer to use, ``"adam"`` (default) or ``"idbd"``
+            (Incremental Delta-Bar-Delta, Sutton 1992).
+        meta_learning_rate: Meta step-size for IDBD, controlling how fast the
+            per-parameter step-sizes adapt. Required when ``optimizer="idbd"``;
+            ignored when ``optimizer="adam"``.
     """
 
     max_iter: int
     learning_rate: float
+    optimizer: str = "adam"
+    meta_learning_rate: float | None = None
 
 
 class ScoringConfig(_LaxModel):
