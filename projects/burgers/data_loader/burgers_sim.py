@@ -172,9 +172,14 @@ def simulate(
 
     Returns dict with u (Lx, Tsim), x (Lx,), and all parameters needed to
     reproduce the field and the forcing (for downstream EDGAR forcing terms).
+    
+    If forcing_seed = None, apply no forcing (f=0) and return the unforced Burgers field.
     """
     x = np.linspace(0, L, Lx)
-    A, w, phi, l = draw_forcing(N=N, seed=forcing_seed)
+    if forcing_seed is None:
+        A = np.zeros(N); w = np.zeros(N); phi = np.zeros(N); l = np.zeros(N)
+    else:
+        A, w, phi, l = draw_forcing(N=N, seed=forcing_seed)
     u, phase = _burgers_rk3(Tsim, Lx, x, D, dt, A, w, phi, l, L)
     return {
         "u": u, "x": x, "L": L, "D": D, "dt": dt, "Lx": Lx, "Tsim": Tsim,
