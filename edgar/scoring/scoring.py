@@ -152,7 +152,7 @@ def _make_optimizer(gd_config):
     raise ValueError(f"Unknown optimizer {name!r} (expected 'adam' or 'idbd')")
 
 
-def _optimize(model_fn, loss_fn, params_init, data_train, gd_config):
+def _optimize(model_fn, loss_fn, evaluate_fn, params_init, data_train, gd_config):
     """Performs gradient descent to optimize model parameters.
 
     This function uses the Optax library and JAX to perform gradient-based
