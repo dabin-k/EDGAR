@@ -53,11 +53,20 @@ the model from 4→6 active terms. Figure: `sindy_recovery.png`.
 - `bench/sindy/coarsening_diagnostic.py` — regenerates the fine field and runs the ladder.
 - `sindy_recovery.png` — coefficient recovery vs grid coarseness and noise.
 
+## UPDATE 2026-07-20 — see 2026-07-20_weak_sindy.md
+
+- **WeakPDELibrary (integral SINDy) stretch is now DONE** (`bench/sindy/weak_vs_strong.py`,
+  figure `weak_sindy_comparison.png`). Result: the integral form fixes the **noise**
+  problem decisively (holds −1.0 u u_x to σ=0.1 where strong collapses by σ=0.01) but does
+  **NOT** rescue coarse-graining (a closure failure, not a derivative-noise failure).
+- **Correction to the coarse-graining claim below:** the catastrophic Nx=64 failure is
+  specific to the *continuously forced* benchmark field, not coarse-graining in general —
+  a *decaying* field coarsens gracefully to Nx=64 (breaks only at Nx=32). Mechanism: the
+  residual ‖(u_t − f) − N(u)‖ climbs 0.17→0.71 over Nx 256→64 because persistent forcing
+  sustains under-resolved shocks the coarse stencils can't represent. See the other note.
+
 ## Open / next
 
-- **WeakPDELibrary (integral SINDy) stretch** not yet run — worth checking whether the
-  integral formulation buys back the coarse-grid recovery (it is the noise remedy the
-  Champion paper cites, and previews the lesson EDGAR borrows). Wired into `runner.py`
-  behind `--weak`.
 - Forecast-MSE (integrate the recovered PDE forward, compare to clean field) not yet
   added — needed for the Step-4 head-to-head vs STENCIL-NET on the shared metric.
+- Weak SINDy on the *forced* benchmark field needs a weak-form forcing term (open item).
