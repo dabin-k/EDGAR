@@ -1,0 +1,6 @@
+# Generated data bundles — regenerate per machine with data_loader/regenerate.py
+*.npz
+
+# Run outputs (trained models, predictions, per-run JSON) — produced on the GPU box
+bench/**/results/
+bench/**/results_smoke/
