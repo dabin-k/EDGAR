@@ -25,15 +25,14 @@ notes 2026-07-20 + 2026-07-20_weak_sindy.md):
     and u u_x drops to ~ -0.14. The WEAK form is dramatically more robust: it holds
     ~ 0.02 u_xx - 1.0 u u_x all the way to sigma=0.1. => use --weak as the noise-robust
     SINDy baseline in the Step-4 head-to-head.
-  * COARSE-GRAINING: this is a *closure* failure, not a derivative-noise failure, so the
-    weak form does NOT rescue it -- strong and weak track each other as the grid coarsens.
-    Nuance worth keeping: coarsening a *decaying* (unforced) field is forgiving (recovery
-    stays near -1.0 down to Nx=64; both break only at Nx=32). The catastrophic Nx=64
-    failure is specific to the *continuously forced* benchmark field: the persistent
-    forcing sustains under-resolved shock structure everywhere, and the relative residual
-    ||(u_t - f) - N(u)|| on the coarse grid climbs 0.17 (Nx=256) -> 0.71 (Nx=64). The
-    forcing modes themselves are low (l_k in {2,3,4}), so it is not forcing
-    under-resolution -- it is the coarse u u_x / u_xx stencils failing on sustained shocks.
+  * COARSE-GRAINING: the closure gap is real, but part of the earlier *catastrophic*
+    Nx=64 failure of STRONG SINDy on the forced field was the noise-amplifying
+    finite-difference u_t estimate, not closure alone. With the weak-form forcing term
+    (fit_pdefind now handles forcing in BOTH paths), weak SINDy on the forced coarse grid
+    (Nx=64) recovers ~0.02 u_xx - 1.0 u u_x + small spurious terms -- the collapse is gone,
+    though residual closure error remains. The relative residual ||(u_t - f) - N(u)|| on
+    the coarse grid still climbs 0.17 (Nx=256) -> 0.71 (Nx=64); the forcing modes are low
+    (l_k in {2,3,4}), so it is not forcing under-resolution.
 
 CLI:
     python runner.py --noise 0.0            # strong fit on shared coarse bundle
@@ -72,52 +71,104 @@ def forcing_field(A, w, phi, l, N, L, xg, dt, nt):
 
 
 def fit_pdefind(u, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
-                poly_degree=2, deriv_order=2, weak=False):
-    """Fit PDE-FIND to a (Nx, Nt) field. Returns the fitted pysindy model.
+                poly_degree=2, deriv_order=2, weak=False, K=500):
+    """Fit PDE-FIND to a (Nx, Nt) field. Returns a dict {equation, names, coefs}.
 
-    forcing : (Nx, Nt) array or None. If given, subtracted from u_t (known-input case).
-              NOTE: only the STRONG path honours this. WeakPDELibrary builds its own
-              weak-form u_t (integrated against test functions) and IGNORES x_dot, so
-              forcing subtraction cannot be applied in the weak path -- see the warning
-              below. The weak-form results in the journal were therefore obtained on
-              *unforced* fields, which isolates the noise/coarsening question cleanly.
-              Fitting weak SINDy on the forced benchmark field without forcing handling
-              would be corrupted by the forcing (a known open item for Step 4).
+    Both the strong and weak paths honour a known forcing f(x,t):
+
+    forcing : (Nx, Nt) array or None. If given, it is removed so SINDy fits the
+              homogeneous operator u_t - f = N(u, u_x, u_xx, ...). This is the fair
+              known-input setup (STENCIL-NET is *given* the same forcing).
+              * STRONG path: subtract f from the finite-difference u_t before regression.
+              * WEAK path: WeakPDELibrary computes a weak-form target <u_t, phi> and does
+                NOT accept an x_dot argument. But the weak equation is
+                    <u_t, phi> = sum_j Xi_j <theta_j(u), phi> + <f, phi>,
+                and <f, phi> = <F_t, phi> for F the time-antiderivative of f, so by the
+                linearity of convert_u_dot_integral we can move it to the LHS:
+                    target = convert_u_dot_integral(u) - convert_u_dot_integral(F).
+                We assemble the weak regression by hand (pysindy's Optimizer.fit rejects
+                the raw 2D weak target via its AxesArray bookkeeping) with a small STLSQ.
     weak    : if True, use WeakPDELibrary (integral formulation) -- the noise-robust
-              "integral SINDy" variant the Champion paper cites (benchmark stretch).
+              "integral SINDy" variant the Champion paper cites. Validated: with the
+              forcing correction it recovers 0.02 u_xx - 1.0 u u_x on the FORCED fine
+              grid, and stays robust to sigma=0.1 (see journal 2026-07-20_weak_sindy.md).
     """
+    if weak:
+        return _fit_weak(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order, K)
+    return _fit_strong(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order)
+
+
+def _model_to_dict(model):
+    names = list(model.get_feature_names())
+    coefs = np.asarray(model.coefficients()).ravel().tolist()
+    return {"equation": model.equations()[0], "names": names, "coefs": coefs}
+
+
+def _fit_strong(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order):
     U = u[:, :, None]
-    if weak and forcing is not None:
-        import warnings
-        warnings.warn(
-            "fit_pdefind(weak=True): WeakPDELibrary builds its own weak-form u_t and "
-            "ignores x_dot, so the supplied forcing is NOT subtracted. On the forced "
-            "benchmark field this fit will be corrupted by the forcing. Use weak SINDy "
-            "on unforced data, or add a weak-form forcing term (open item for Step 4).",
-            RuntimeWarning, stacklevel=2,
-        )
-    if forcing is not None and not weak:
+    if forcing is not None:
         ut = FiniteDifference(axis=1)._differentiate(u, dt)
         x_dot = (ut - forcing)[:, :, None]
     else:
         x_dot = None  # let pysindy estimate u_t itself
-    if weak:
-        from pysindy.feature_library import WeakPDELibrary
-        lib = WeakPDELibrary(
-            function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
-            derivative_order=deriv_order,
-            spatiotemporal_grid=_spatiotemporal_grid(xg, dt, u.shape[1]),
-            include_bias=True, is_uniform=True, periodic=True, K=500,
-        )
-    else:
-        lib = PDELibrary(
-            function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
-            derivative_order=deriv_order, spatial_grid=xg,
-            include_bias=True, is_uniform=True, periodic=True,
-        )
+    lib = PDELibrary(
+        function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
+        derivative_order=deriv_order, spatial_grid=xg,
+        include_bias=True, is_uniform=True, periodic=True,
+    )
     model = ps.SINDy(feature_library=lib, optimizer=ps.STLSQ(threshold=threshold, alpha=alpha))
     model.fit(U, t=dt, x_dot=x_dot, feature_names=["u"])
-    return model
+    return _model_to_dict(model)
+
+
+def _fit_weak(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order, K):
+    from pysindy.feature_library import WeakPDELibrary
+    from pysindy.utils import AxesArray
+    lib = WeakPDELibrary(
+        function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
+        derivative_order=deriv_order,
+        spatiotemporal_grid=_spatiotemporal_grid(xg, dt, u.shape[1]),
+        include_bias=True, is_uniform=True, periodic=True, K=K,
+    )
+    axes = {"ax_spatial": [0], "ax_time": 1, "ax_coord": [2]}
+    U = AxesArray(u[:, :, None], axes)
+    lib.fit([U])
+    Theta = np.array(lib.transform([U])[0], subok=False, dtype=float)          # (K, n_feat)
+    ydot = np.array(lib.convert_u_dot_integral(U), subok=False, dtype=float).ravel()
+    if forcing is not None:
+        # F = time-antiderivative of f (cumulative trapezoid along time), so <f,phi>=<F_t,phi>
+        F = np.zeros_like(forcing)
+        F[:, 1:] = np.cumsum(0.5 * (forcing[:, 1:] + forcing[:, :-1]) * dt, axis=1)
+        Fa = AxesArray(F[:, :, None], axes)
+        ydot = ydot - np.array(lib.convert_u_dot_integral(Fa), subok=False, dtype=float).ravel()
+    xi = _stlsq(Theta, ydot, threshold, alpha)
+    names = list(lib.get_feature_names(["u"]))
+    terms = [f"{c:.3f} {n}" for n, c in zip(names, xi) if abs(c) > 0]
+    eqn = " + ".join(terms) if terms else "0"
+    return {"equation": eqn, "names": names, "coefs": xi.tolist()}
+
+
+def _stlsq(Theta, y, threshold=0.02, alpha=1e-5, n_iter=20):
+    """Sequentially-thresholded ridge least squares (PDE-FIND's STLSQ), plain-numpy."""
+    Theta = np.asarray(Theta, float); y = np.asarray(y, float).ravel()
+    n_feat = Theta.shape[1]
+
+    def ridge(X, yy):
+        return np.linalg.solve(X.T @ X + alpha * np.eye(X.shape[1]), X.T @ yy)
+
+    xi = np.zeros(n_feat)
+    big = np.ones(n_feat, bool)
+    xi[big] = ridge(Theta, y)
+    for _ in range(n_iter):
+        small = np.abs(xi) < threshold
+        if np.array_equal(small, ~big):  # converged (support unchanged)
+            pass
+        xi[small] = 0.0
+        big = ~small
+        if big.sum() == 0:
+            break
+        xi[big] = ridge(Theta[:, big], y)
+    return xi
 
 
 def _spatiotemporal_grid(xg, dt, nt):
@@ -133,15 +184,12 @@ def run(noise_level=0.0, threshold=0.05, weak=False, out_dir=None):
     u = ld.noise_field(b, noise_level)
     xg = b["x_coarse"].astype(float); dt = b["dtc"]
     F = forcing_field(b["A"], b["w"], b["phi"], b["l"], b["N"], b["L"], xg, dt, u.shape[1])
-    model = fit_pdefind(u, xg, dt, forcing=F, threshold=threshold, weak=weak)
-    eqn = model.equations()[0]
-    coefs = model.coefficients().tolist()
-    names = model.get_feature_names()
+    fit = fit_pdefind(u, xg, dt, forcing=F, threshold=threshold, weak=weak)
     result = {
         "method": "sindy_weak" if weak else "sindy",
         "noise_level": noise_level, "threshold": threshold, "grid": "coarse_s4",
-        "n_x": int(u.shape[0]), "equation": eqn,
-        "feature_names": names, "coefficients": coefs,
+        "n_x": int(u.shape[0]), "equation": fit["equation"],
+        "feature_names": fit["names"], "coefficients": fit["coefs"],
     }
     tag = ("weak_" if weak else "") + f"noise{noise_level}"
     with open(os.path.join(out_dir, f"sindy_{tag}.json"), "w") as fh:
