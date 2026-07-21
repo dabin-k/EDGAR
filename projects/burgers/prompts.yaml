@@ -1,0 +1,105 @@
+# Overrides for the sensor-array autoregressive setting. String fields replace
+# the default entirely (projects/prompt_defaults.yaml).
+#
+# Neutral framing by design: the data is presented only as displacement measured
+# at a row of evenly-spaced sensors. No physical interpretation is given to the
+# model.
+model:
+  base: |
+    You are an AI scientist studying the motion of a population of particles. The particles move along a line, and their displacement is measured at a row of evenly-spaced sensors. The sensors wrap around, so the last sensor is a neighbour of the first, and the data is ordered by sensor position.
+
+    Below are {num_parents} models predicting how the measured displacements evolve in time, sorted from worst to best. Your task is to create a new model, better than all of them.
+
+    **How the model is used, and how the loss is computed.** Let x(s) be the displacement at all sensors at time s. For every start time t:
+
+        w1 = [x(t-1), x(t)]    p1 = model(w1)    # prediction of x(t+1)
+        w2 = [x(t),   p1   ]   p2 = model(w2)    # prediction of x(t+2)
+        ...
+        each step feeds the model its own previous prediction, for 5 steps
+
+        loss = mean over all t, all horizons h in 1..5, and all sensors of ( ph - x(t+h) )^2
+
+    After the first step the model runs on its own output, so errors compound. A model that is plausible one step ahead but has the dynamics wrong will drift over the rollout and be punished. Predicting that nothing changes is poor: the displacements move appreciably over five steps.
+
+    A single most-recent step is not enough to predict the next one exactly — the measurement is a coarse, incomplete view of a finer underlying system, so some of what drives the next step is not visible in the last step alone. Looking back more than one step can recover part of that missing information.
+
+    *Analyze* the progression of the models, *generalize* the improvements, and *create* a new model that is better than *all* previous models.
+
+  explore: |
+    Be *creative* and *invent* something new. Which features in the models below correlate with lower loss? Interpret these features more broadly and creatively, and experiment with novel ways to implement these features.
+
+  code_guidelines: |
+    **Code Generation Guidelines:**
+
+    * Import any packages you use.
+    * Model signature must be `def model(data, params):`.
+    * `data['x']` is the window, shape (n_sensors, max_length). Column -1 is the most recent step, column -2 the one before. This is the only information you get: no external input, and no sight of the step you are predicting.
+    * Sensors wrap around (periodic). Reach a neighbour with `np.roll(u, 1)` (left) or `np.roll(u, -1)` (right); there is no boundary special case. Work in sensor-index units — any physical spacing is absorbed into your free parameters.
+    * Return the predicted displacement at every sensor at the next step: shape (n_sensors,).
+    * `params` is a dict of named arrays/scalars (e.g. params['decay_rate']). All free parameters must be numeric.
+    * Free parameters are penalized elementwise: an (n_sensors, n_sensors) matrix of couplings costs n_sensors^2. Prefer structure over free parameters.
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
+    * Ensure all string values in function call arguments are properly JSON-escaped.
+    * Also provide `default_params`: sensible initial float values for every key in `params`, with exactly matching keys.
+  image_analysis_instructions: |
+    **Image Analysis Instructions:**
+
+    The attached figure has one row per model, above a row showing the data.
+
+    *Left, heatmaps.* Sensors (in position order) by time, for one block. Red is positive displacement, blue negative, white zero; all heatmaps share one colour scale, so they are directly comparable. The top panel is the data. Each panel below is that model's prediction of the same block five steps ahead, i.e. after five steps of running on its own output.
+
+    *Right, line plots.* The top panel shows the true displacement of three sensors, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three sensors, in matching colours. Thin solid = residual one step ahead; thick dashed = five steps ahead. A perfect model leaves both flat at zero.
+
+    Diagnose from the residuals, not the heatmaps: a mediocre and a good model have similar heatmaps but different residuals. Consider:
+
+    **Growth with horizon.** How much larger is the five-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds. This matters most.
+
+    **Structure.** Does the residual vary smoothly with time, or look like noise? Smooth variation is a systematic failure, and its shape is evidence about what the model is missing.
+
+    **Which sensors.** Is the residual large for some sensors and small for others, and does that depend on where they sit in the row?
+
+    Use this to design a new model that removes the systematic errors you can see.
+
+parameter_estimator:
+  base: |
+    You are an AI scientist studying the motion of a population of particles measured at a row of evenly-spaced, periodic sensors. Your task is to write a `parameter_estimator` for the new model shown last below: a direct, closed-form estimate of its free parameters from data, using statistical principles rather than iterative fitting.
+
+    **The estimator does not see the same data as the model. Read this before writing any indexing.**
+
+    The *model* is called once per prediction step, on a short window: `data['x']` has shape `(n_sensors, max_length)`.
+
+    The *estimator* is called once per recording, on that recording's entire training split:
+
+        data['x'] : (n_blocks, n_sensors, block_len)     # three-dimensional
+
+        axis 0 - block. Independent segments of the recording. Blocks are NOT contiguous
+                 in time: never take a difference, lag or shift along axis 0.
+        axis 1 - sensor. Position in the row; neighbouring indices are neighbouring sensors,
+                 and the row wraps. `np.roll(x, 1, axis=1)` is the left-neighbour.
+        axis 2 - time. Consecutive steps within a block. `x[:, :, :-1]` and `x[:, :, 1:]`
+                 are the (state, next state) pairs.
+
+    Your estimate is the starting point for gradient descent on the true multi-step loss. It must be finite and in the right regime; it does not have to be the perfect one-step fit. Index every axis explicitly.
+
+    *Analyze* the progression of the parameter estimators below, *generalize* the improvements, and *create* a new parameter estimator that is better than *all* previous estimators.
+  code_guidelines: |
+    **Code Generation Guidelines:**
+
+    * Import any packages you use. Do not include any text other than the code.
+    * Function signature must be `def parameter_estimator(data):`, where `data['x']` has shape `(n_blocks, n_sensors, block_len)` as described above.
+    * Return a dict whose keys exactly match the model's `params` keys, with every value a float. Mismatched keys or non-float values are rejected.
+    * Estimate all coefficients *jointly*, by building one design matrix over every (block, sensor, time) triple and solving the normal equations. Fitting each coefficient on its own with `np.sum(y * f) / np.sum(f * f)` ignores the correlation between features, and neighbouring sensors and successive lags are always strongly correlated — done that way the weights come out badly biased and typically sum to far more than one, which is explosive when the model is rolled forward. For example:
+
+          x = np.asarray(data["x"])                    # (n_blocks, n_sensors, block_len)
+          y = x[:, :, 2:]                              # target: state at t+1
+          x_t, x_tm1 = x[:, :, 1:-1], x[:, :, :-2]     # state at t and t-1
+          feats = [x_t, np.roll(x_t, 1, axis=1), np.roll(x_t, -1, axis=1), x_tm1]
+          F = np.stack([f.ravel() for f in feats], axis=1)
+          w = np.linalg.solve(F.T @ F + 1e-8 * np.eye(F.shape[1]), F.T @ y.ravel())
+
+    * Wrap the solve in `try` / `except np.linalg.LinAlgError` and fall back to sensible constants. Always return finite floats: a NaN or an inf makes the model unscoreable.
+    * Do not fit with {swear_words}. We need a fast initial estimate, not an optimizer.
+    * Do not call the model function — you will not have access to it.
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
+    * Ensure all string values in function call arguments are properly JSON-escaped.
+    * Your response **must** be less than {max_lines} lines including imports, or it will be rejected.

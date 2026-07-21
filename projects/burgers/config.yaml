@@ -1,0 +1,39 @@
+# Burgers benchmark — EDGAR control (plan Step 5).
+#
+# Discover a discrete autoregressive map x(t) = f(x(t-1), ..., x(t-m)) for the
+# UNFORCED (autonomous) coarse field. This is the temporal-lag CONTROL: no
+# spatial-stencil structure is imposed, so it measures how well raw
+# autoregressive fitting does before the Step-6 spatial hybrid reintroduces
+# structure. See projects/burgers/README.md for the reference scoreboard.
+#
+# The field is generated deterministically by the loader (data_loader/load_data.py),
+# so data_path stays empty and launch-gcp skips the data upload.
+io:
+  data_path: ""
+
+evolution:
+  n_generations: 12
+  n_islands: 8
+  batch_size: 6
+  critical_population_size: 12
+  n_migrants: 2
+  topology: [1, 2, 3, 4, 5, 6, 7, 0]
+
+scoring:
+  # Loss scale on this field (5-step rollout MSE, measured in journal):
+  #   do-nothing (persistence)          ~1.5e-4
+  #   naive one-step surrogate          ~6.8e-6
+  #   best-achievable AR map (LS floor) ~2.7e-6
+  # Parameters are counted elementwise. At 1e-7, a 5-parameter model costs 5e-7 —
+  # enough to break ties between equally-accurate models, small enough to stay
+  # well below the ~1e-5 loss gaps that separate good models from mediocre ones.
+  # (Same reasoning as synthetic_data_v3, rescaled to this loss scale.)
+  param_penalty_weight: 1.0e-7
+
+project_params:
+  s_factor: 4         # spatial coarsening (256 -> 64 sensors)
+  t_factor: 20        # temporal coarsening (dt 0.002 -> 0.04)
+  block_len: 100      # time-block length; blocks dealt round-robin into 4 splits
+  train_frac: 0.5     # kept for API symmetry (split is round-robin)
+  n_eval_samples: 4   # blocks shown in image-feedback figure
+  random_seed: 0
