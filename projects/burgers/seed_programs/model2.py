@@ -1,26 +1,25 @@
-import numpy as np
-
-
 def model(data, params):
     """
-    Local smoothing with linear temporal extrapolation.
+    Linear-relaxation RHS integrated with 2-step Adams-Bashforth.
 
-    Averages each sensor with its two ring neighbours (a smoothing kernel that
-    reflects the strong correlation between neighbouring sensors), then adds a
-    fraction of the last observed step-to-step change as a velocity term. Both
-    the smoothing weight and the velocity weight are free scalars.
+      * RHS: linear relaxation du/dt = -k u 
 
-    data['x'] : (n_sensors, max_length); column -1 most recent, sensors periodic.
+      * Integrator: Adams-Bashforth 2 (AB2), a second-order *two-lag* stepper,
+            u(t) = u(t-1) + 1.5 * RHS(u(t-1)) - 0.5 * RHS(u(t-2))
+            The step dt is folded into k.
+
+    data['x'] : (n_sensors, max_length); column -1 most recent, -2 previous, periodic.
 
     Returns:
-        np.ndarray: predicted activity at the next step, (n_sensors,).
+        np.ndarray: predicted field at the next step, (n_sensors,).
     """
     u0 = data["x"][:, -1]
     u1 = data["x"][:, -2]
-    smooth = (1.0 - params["blend"]) * u0 + params["blend"] * 0.5 * (
-        np.roll(u0, 1) + np.roll(u0, -1)
-    )
-    return smooth + params["velocity"] * (u0 - u1)
+
+    def rhs(u):
+        return -params["k"] * u
+
+    return u0 + 1.5 * rhs(u0) - 0.5 * rhs(u1)
 
 
-model.DEFAULT_PARAMS = {"blend": 0.3, "velocity": 0.5}
+model.DEFAULT_PARAMS = {"k": 0.1}

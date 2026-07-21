@@ -3,29 +3,26 @@ import numpy as np
 
 def parameter_estimator(data):
     """
-    Closed-form least-squares estimate of the smoothing and velocity weights.
+    Closed-form least-squares estimate of the relaxation rate k for du/dt = -k u
+    under a 2-step Adams-Bashforth step.
 
-    Builds one design matrix over every (block, sensor, time) triple and solves
-    the normal equations jointly, so the two correlated features do not fight.
+    AB2 gives u(t+1) - u(t) = 1.5 RHS(u(t)) - 0.5 RHS(u(t-1)) = -k (1.5 u(t) - 0.5 u(t-1)),
+    so k is the single-feature least-squares slope of the increment on
+    -(1.5 u(t) - 0.5 u(t-1)) over every (block, sensor, time) triple.
 
-    data['x'] : (n_blocks, n_sensors, block_len). Axis 0 is block (never
-    differenced across), axis 1 is sensor (periodic; np.roll(., axis=1)), axis 2
-    is time (consecutive steps).
+    data['x'] : (n_blocks, n_sensors, block_len). Axis 0 block (never differenced
+    across), axis 1 sensor (periodic), axis 2 time (consecutive steps).
+
+    Returns:
+        dict: {'k': relaxation rate}.
     """
     x = np.asarray(data["x"])
-    y = x[:, :, 2:]                                  # target: state at t+1
-    u0, u1 = x[:, :, 1:-1], x[:, :, :-2]             # state at t and t-1
-    lap = 0.5 * (np.roll(u0, 1, axis=1) + np.roll(u0, -1, axis=1)) - u0
-    vel = u0 - u1
-    try:
-        F = np.stack([(y - u0).ravel() * 0 + lap.ravel(), vel.ravel()], axis=1)
-        rhs = (y - u0).ravel()
-        w = np.linalg.solve(F.T @ F + 1e-8 * np.eye(2), F.T @ rhs)
-        blend, velocity = float(w[0]), float(w[1])
-    except np.linalg.LinAlgError:
-        blend, velocity = 0.3, 0.5
-    if not np.isfinite(blend):
-        blend = 0.3
-    if not np.isfinite(velocity):
-        velocity = 0.5
-    return {"blend": blend, "velocity": velocity}
+    y = x[:, :, 2:]                          # state at t+1
+    u0, u1 = x[:, :, 1:-1], x[:, :, :-2]     # state at t and t-1
+    f = -(1.5 * u0 - 0.5 * u1).ravel()
+    target = (y - u0).ravel()
+    denom = float(f @ f)
+    k = float(f @ target / denom) if denom > 0 else 0.1
+    if not np.isfinite(k):
+        k = 0.1
+    return {"k": k}
