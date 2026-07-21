@@ -109,17 +109,18 @@ def _forcing_at(A, w, phi, l, L, x, t):
     return f
 
 
-def _burgers_rk3(Tsim, Lx, x, D, dt, A, w, phi, l, L):
+def _burgers_rk3(Tsim, Lx, x, D, dt, A, w, phi, l, L, u0=None):
     """Integrate forced Burgers with SSP-RK3; verbatim structure from the reference.
 
     Returns (u, phase): u is (Lx, Tsim); phase is the RHS diffusion-minus-advection
     term stored per step (kept for parity with the reference; not needed downstream).
+    `u0` overrides the initial condition; None uses the reference Gaussian bump.
     """
     dx = x[1] - x[0]
     N = len(A)
     u = np.zeros((Lx, Tsim))
     phase = np.zeros((Lx, Tsim))
-    u[:, 0] = np.exp(-((x - 3) ** 2))  # reference initial condition
+    u[:, 0] = np.exp(-((x - 3) ** 2)) if u0 is None else u0  # reference initial condition
     t = 0.0
     for j in range(0, Tsim - 1):
         forcing = _forcing_at(A, w, phi, l, L, x, t)
@@ -159,6 +160,23 @@ def draw_forcing(N=20, Al=-0.1, Ar=0.1, wl=-0.4, wr=0.4, seed=0):
     return A, w, phi, l
 
 
+def draw_ic(x, L, seed, n_modes=4):
+    """Draw a random smooth periodic initial condition u0(x).
+
+    A sum of the first `n_modes` Fourier modes with seeded random amplitudes and
+    phases, normalised to unit peak amplitude so it sits in the same range as the
+    reference bump. Used to give the validate split a genuinely independent
+    initial condition while staying on the same attractor (see load_data).
+    """
+    rng = np.random.RandomState(seed)
+    u0 = np.zeros_like(x)
+    for k in range(1, n_modes + 1):
+        a = rng.uniform(-1.0, 1.0)
+        ph = 2.0 * np.pi * rng.rand()
+        u0 += a * np.sin(2.0 * np.pi * k * x / L + ph)
+    return u0 / (np.max(np.abs(u0)) + 1e-12)
+
+
 def simulate(
     Lx=256,
     L=2.0 * np.pi,
@@ -167,23 +185,28 @@ def simulate(
     Tsim=80001,
     N=20,
     forcing_seed=0,
+    ic_seed=None,
 ):
     """Simulate the fine-grid forced-Burgers reference field.
 
     Returns dict with u (Lx, Tsim), x (Lx,), and all parameters needed to
     reproduce the field and the forcing (for downstream EDGAR forcing terms).
-    
+
     If forcing_seed = None, apply no forcing (f=0) and return the unforced Burgers field.
+    If ic_seed is not None, use a random smooth initial condition (draw_ic) instead
+    of the reference Gaussian bump.
     """
     x = np.linspace(0, L, Lx)
     if forcing_seed is None:
         A = np.zeros(N); w = np.zeros(N); phi = np.zeros(N); l = np.zeros(N)
     else:
         A, w, phi, l = draw_forcing(N=N, seed=forcing_seed)
-    u, phase = _burgers_rk3(Tsim, Lx, x, D, dt, A, w, phi, l, L)
+    u0 = None if ic_seed is None else draw_ic(x, L, ic_seed)
+    u, phase = _burgers_rk3(Tsim, Lx, x, D, dt, A, w, phi, l, L, u0=u0)
     return {
         "u": u, "x": x, "L": L, "D": D, "dt": dt, "Lx": Lx, "Tsim": Tsim,
         "A": A, "w": w, "phi": phi, "l": l, "N": N, "forcing_seed": forcing_seed,
+        "ic_seed": ic_seed,
     }
 
 
