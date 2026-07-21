@@ -105,7 +105,7 @@ def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
 #
 # EDGAR control task (plan Step 5): fit a discrete autoregressive map
 #
-#     x(t) = f( x(t-1), ..., x(t-m) )                         [m = evaluate.MAX_LENGTH]
+#     x(t) = f( x(t-1), ..., x(t-m) )                  [m = input_sequence_length]
 #
 # to the UNFORCED (autonomous) field. There is no exogenous input, so the map is
 # well-posed in the observed variable alone. Note there is NO exact closed-form
@@ -126,29 +126,45 @@ def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
 
 import jax.numpy as jnp
 
-_UNFORCED_CACHE = os.path.join(_HERE, "burgers_unforced_coarse.npz")
-
-
-def _unforced_coarse_field(s_factor: int, t_factor: int, seed_note: str = "forcing_seed=None"):
+def _unforced_coarse_field(s_factor: int, t_factor: int, ic_seed: int | None = None):
     """Simulate the autonomous (unforced) Burgers field and coarsen it.
 
-    Cached to `burgers_unforced_coarse.npz` next to this file, because the fine
-    simulation takes ~70 s. Delete that file to force regeneration (e.g. after
-    changing the simulator).
-    """
-    from . import burgers_sim as bs  # local import; heavy (jax-free) numpy sim
+    `ic_seed=None` uses the reference Gaussian-bump initial condition; an integer
+    seed draws a random smooth IC (burgers_sim.draw_ic) — this is how the discover
+    and validate splits get independent trajectories on the same attractor.
 
-    if os.path.exists(_UNFORCED_CACHE):
-        with np.load(_UNFORCED_CACHE) as z:
+    Cached next to this file (one `.npz` per IC), because the fine simulation
+    takes ~70 s. Delete the cache to force regeneration (e.g. after changing the
+    simulator).
+    """
+    # File-based import: this module is exec'd from source by EDGAR (no package
+    # context, so `from . import` would fail), but also imported normally by the
+    # benchmark scripts. Loading by path works in both.
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "burgers_sim", os.path.join(_HERE, "burgers_sim.py")
+    )
+    bs = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(bs)
+
+    cache = os.path.join(
+        _HERE,
+        "burgers_unforced_coarse.npz"
+        if ic_seed is None
+        else f"burgers_unforced_coarse_ic{ic_seed}.npz",
+    )
+    if os.path.exists(cache):
+        with np.load(cache) as z:
             if int(z["s_factor"]) == s_factor and int(z["t_factor"]) == t_factor:
                 return z["u_coarse"], float(z["dxc"]), float(z["dtc"])
 
-    sim = bs.simulate(forcing_seed=None)  # autonomous field
+    sim = bs.simulate(forcing_seed=None, ic_seed=ic_seed)  # autonomous field
     u_coarse = np.asarray(bs.coarsen(sim, s_factor=s_factor, t_factor=t_factor)["u_coarse"])
     dxc = sim["L"] / u_coarse.shape[0]
     dtc = sim["dt"] * t_factor
     np.savez(
-        _UNFORCED_CACHE,
+        cache,
         u_coarse=u_coarse, dxc=dxc, dtc=dtc,
         s_factor=s_factor, t_factor=t_factor,
     )
@@ -159,58 +175,83 @@ def load_data(
     data_path: str = "",
     s_factor: int = 4,
     t_factor: int = 20,
-    block_len: int = 100,
-    train_frac: float = 0.5,   # kept for API symmetry; split is round-robin below
+    block_len: int = 500,
+    train_frac: float = 0.5,   # kept for API symmetry; split is deterministic below
     n_eval_samples: int = 4,
     random_seed: int = 0,
+    n_recordings: int = 4,
+    ic_seed_base: int = 0,
 ):
-    """Build EDGAR's sample tensors from the unforced coarse field.
+    """Build EDGAR's sample tensors from N independent unforced coarse fields.
 
-    A *sample* is the whole field; parameters are fitted once per field (one
-    global map). The time axis is cut into non-overlapping `block_len` blocks and
-    the blocks are dealt round-robin into four bins:
+    Each *recording* is a full autonomous trajectory with its own initial
+    condition; it becomes one EDGAR *sample* with its own independently-fitted
+    parameters, while every sample shares the same evolved model. The first
+    `n_recordings // 2` recordings form the discover samples, the rest the
+    validate samples, so validate is a genuine generalisation test: unseen
+    realisations of the same dynamics, not just other time-slices of a trajectory
+    discover already saw.
 
-        block i -> [disc_train, disc_test, val_train, val_test][i % 4]
+    Recording 0 keeps the reference Gaussian-bump IC (so the README scoreboard
+    posts stay comparable); recordings 1.. use random smooth ICs
+    (burgers_sim.draw_ic, seed = ic_seed_base + i).
 
-    so every split spans the whole trajectory (no split is only-transient or
-    only-steady-state), and no block is shared between splits. Autoregressive
-    windows never cross a block boundary, so no test step is reachable from a
-    train window.
+    Within each recording the time axis is cut into non-overlapping `block_len`
+    blocks and alternate blocks are dealt to train / test (leak-free:
+    autoregressive windows never cross a block boundary, so no test step is
+    reachable from a train window, and no recording is shared across splits).
+    Both train and test span the whole trajectory, so neither is only-transient
+    or only-steady-state.
 
-    `data_path` is unused: the field is generated deterministically by the
-    simulator (autonomous, so no seed variation is needed).
+    `data_path` is unused: the fields are generated deterministically by the
+    simulator (autonomous; the only seeds that matter are the per-recording ICs).
 
     Returns:
         (X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval
-        each dict has key 'x' of shape (n_samples=1, n_blocks, n_sensors, block_len).
+        each dict has key 'x' of shape (n_samples, n_blocks, n_sensors, block_len),
+        n_samples = n_recordings // 2.
     """
-    u_coarse, _dxc, _dtc = _unforced_coarse_field(s_factor, t_factor)
-    n_sensors, n_times = u_coarse.shape
 
-    n_blocks = n_times // block_len
-    field = u_coarse[:, : n_blocks * block_len]
-    # (n_sensors, n_blocks, block_len) -> (n_blocks, n_sensors, block_len)
-    blocks = field.reshape(n_sensors, n_blocks, block_len).transpose(1, 0, 2)
+    def to_blocks(u):
+        n_sensors, n_times = u.shape
+        n_blocks = n_times // block_len
+        field = u[:, : n_blocks * block_len]
+        # (n_sensors, n_blocks, block_len) -> (n_blocks, n_sensors, block_len)
+        return field.reshape(n_sensors, n_blocks, block_len).transpose(1, 0, 2)
 
-    bins = [np.arange(i, n_blocks, 4) for i in range(4)]  # disc_tr, disc_te, val_tr, val_te
+    recordings = [
+        to_blocks(
+            _unforced_coarse_field(
+                s_factor, t_factor, ic_seed=None if i == 0 else ic_seed_base + i
+            )[0]
+        )
+        for i in range(n_recordings)
+    ]
 
-    def pack(idx):
-        # leading n_samples axis of 1: one global field / one param set
-        return {"x": blocks[idx][None, ...]}
+    n_disc = n_recordings // 2
+    disc_recs, val_recs = recordings[:n_disc], recordings[n_disc:]
 
-    X_disc_train = pack(bins[0])
-    X_disc_test = pack(bins[1])
-    X_val_train = pack(bins[2])
-    X_val_test = pack(bins[3])
+    def split(recs, start):
+        # stack recordings on the sample axis; alternate blocks -> train (start=0)
+        # / test (start=1), so each sample's params are fit and scored on disjoint
+        # leak-free blocks. All recordings share n_blocks, so the stack is regular.
+        return {"x": np.stack([r[np.arange(start, r.shape[0], 2)] for r in recs])}
 
-    # X_eval: a few discover-train blocks for image feedback (as its own samples)
+    X_disc_train = split(disc_recs, 0)
+    X_disc_test = split(disc_recs, 1)
+    X_val_train = split(val_recs, 0)
+    X_val_test = split(val_recs, 1)
+
+    # X_eval: a few discover-train blocks per discover sample, for fingerprinting
+    # and image feedback. _sample_indices maps each eval sample to its discover
+    # sample's fitted params.
     rng = np.random.default_rng(random_seed)
     n_dt_blocks = X_disc_train["x"].shape[1]
     k = min(n_eval_samples, n_dt_blocks)
     eval_blocks = np.sort(rng.choice(n_dt_blocks, k, replace=False))
     X_eval = {
         "x": X_disc_train["x"][:, eval_blocks],
-        "_sample_indices": np.zeros(1, dtype=int),
+        "_sample_indices": np.arange(n_disc, dtype=int),
     }
 
     def to_jax(d):
