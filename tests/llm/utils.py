@@ -18,11 +18,11 @@ def make_fake_spec(output_dir: str | None = None) -> SimpleNamespace:
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
 
-    def plot_fn(data, parents, save_path):
+    def plot_fn(data, parents, save_path, *, evaluate_fn=None):
         with open(save_path, "wb") as f:
             f.write(generate_image_bytes())
 
-    return SimpleNamespace(plot_fn=plot_fn, output_dir=output_dir)
+    return SimpleNamespace(plot_fn=plot_fn, output_dir=output_dir, evaluate_fn=None)
 
 
 def run_model_code(code: str, data: dict, params: dict):

@@ -349,6 +349,7 @@ class Config(BaseModel):
     llms: LLMsConfig
     scoring: ScoringConfig
     run: RunConfig
+    evaluate: dict # Not checked for types since project-specific
     project_params: dict  # Not checked for types or otherwise as project-specific
     prompts: PromptsConfig
 
@@ -404,6 +405,7 @@ class Config(BaseModel):
         evolution = config.pop("evolution", {})
         llms = config.pop("llms", {})
         scoring = config.pop("scoring", {})
+        evaluate = config.pop("evaluate", {})
         project_params = config.pop("project_params", {})
         run = config.pop("run", {})
         if config:
@@ -420,6 +422,7 @@ class Config(BaseModel):
             llms=llms,
             scoring=scoring,
             run=run,
+            evaluate=evaluate,
             project_params=project_params,
             prompts=prompts,
         )
@@ -459,6 +462,7 @@ class Config(BaseModel):
             evolution=record.get("evolution", {}),
             llms=record.get("llms", {}),
             scoring=record.get("scoring", {}),
+            evaluate=record.get("evaluate", {}),
             project_params=record.get("project_params", {}),
             run=record.get("run", {}),
             prompts=prompts,

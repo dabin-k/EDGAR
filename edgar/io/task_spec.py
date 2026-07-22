@@ -22,6 +22,8 @@ Example usage:
 
 from __future__ import annotations
 
+import functools
+import inspect
 import os
 import stat
 from collections import namedtuple
@@ -113,6 +115,9 @@ class TaskSpec:
             gradient descent settings or complexity penalties.
         run (dict): Dictionary of general run-time configuration parameters,
             including the random seed.
+        evaluate (dict): Configuration for the project's `evaluate` function (e.g.
+            `input_sequence_length`, `rollout_steps`), bound to it as keyword
+            arguments and merged into `flat_config` for prompt templating.
         project_params (dict): Dictionary of project-specific parameters passed to
             functions like `load_data_fn`.
         model_prompt_schema (PromptSchema): Schema defining the prompt structure for
@@ -163,6 +168,8 @@ class TaskSpec:
     scoring: dict
 
     run: dict
+
+    evaluate: dict
 
     project_params: dict
 
@@ -245,6 +252,7 @@ class TaskSpec:
             raise ValueError(f"{data_loader_path} must define callable loss_fn()")
 
         evaluate_path = config.project_dir / "evaluate" / "evaluate.py"
+        evaluate_cfg = config.evaluate
         evaluate_fn = (
             load_function_from_source(
                 evaluate_path.read_text(), "evaluate", evaluate_path
@@ -252,6 +260,21 @@ class TaskSpec:
             if evaluate_path.exists()
             else None
         )
+        if evaluate_fn is not None and evaluate_cfg:
+            params = inspect.signature(evaluate_fn).parameters
+            accepts_var_kw = any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            if not accepts_var_kw:
+                unexpected = sorted(set(evaluate_cfg) - set(params))
+                if unexpected:
+                    raise ValueError(
+                        f"The `evaluate` section of config.yaml has key(s) "
+                        f"{unexpected} that evaluate() in {evaluate_path} does not "
+                        f"accept. Its parameters are {list(params)}. Rename the config "
+                        f"key or add the parameter to evaluate()."
+                    )
+            evaluate_fn = functools.partial(evaluate_fn, **evaluate_cfg)
 
         plot_path = config.project_dir / "image_feedback" / "plot.py"
         plot_fn = (
@@ -327,6 +350,7 @@ class TaskSpec:
             evolution=config.evolution.model_dump(),
             llms=config.llms.model_dump(),
             scoring=config.scoring.model_dump(),
+            evaluate=evaluate_cfg,
             run=config.run.model_dump(),
             project_params=config.project_params,
             model_prompt_schema=config.prompts.model,
@@ -375,6 +399,7 @@ class TaskSpec:
             "llms": self.llms,
             "scoring": self.scoring,
             "run": self.run,
+            "evaluate": self.evaluate,
             "project_params": self.project_params,
             "seed_programs": [
                 {

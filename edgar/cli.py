@@ -181,18 +181,21 @@ SPEC_TEMPLATE_PLOT = dedent(
     import matplotlib.pyplot as plt
 
 
-    def plot_model_fits(data, parent_programs, save_path=""):
+    def plot_model_fits(data, parent_programs, save_path="", *, evaluate_fn):
         """
         Optional. Plot model predictions vs data.
 
         Args:
             data: X_disc_train dict of JAX arrays, shape (n_samples, n_trials).
             parent_programs: list of Program objects. Each has:
-                - .compile() -> (model_fn, param_est_fn)
+                - .compile_model() -> model_fn
                 - .params: dict of per-sample params, each value shape (n_samples, ...)
                 - .sample_losses: per-sample losses, shape (n_samples,), or None
                 - .program_losses.discover.final: scalar overall loss
             save_path: file path (not directory) to save the figure.
+            evaluate_fn: the harness evaluator; call
+                `preds, _ = evaluate_fn(program.compile_model(), data, program.params)`
+                to run a model when the model is not applied to the whole sample at once (e.g. autoregressive models).
         """
         pass
     '''
