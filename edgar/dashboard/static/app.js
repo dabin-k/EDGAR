@@ -148,11 +148,8 @@ function dashboard() {
     },
 
     // ── helpers ──
-    fmt(v, p = 3) {
-      if (v === null || v === undefined || Number.isNaN(v)) return '-';
-      if (typeof v !== 'number') return String(v);
-      if (Math.abs(v) >= 1000) return v.toFixed(0);
-      return v.toFixed(p);
+    fmt(v, sig = 3) {
+      return fmtN(v, sig);
     },
     fmtDuration(s) {
       if (s === null || s === undefined) return '-';
@@ -617,10 +614,16 @@ function escapeHtml(s) {
   })[c]);
 }
 
-function fmtN(v) {
-  if (v === null || v === undefined) return '-';
+// Losses span many orders of magnitude, so show significant figures rather than
+// fixed decimals (0.000359 → "3.59e-4", not "0.000").
+function fmtN(v, sig = 3) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '-';
   if (typeof v !== 'number') return String(v);
-  return v.toFixed(3);
+  if (!Number.isFinite(v)) return v > 0 ? '∞' : '-∞';
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a >= 1e5 || a < 1e-3) return v.toExponential(sig - 1);
+  return String(Number(v.toPrecision(sig)));
 }
 
 const ISLAND_PALETTE = [
