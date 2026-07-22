@@ -16,6 +16,8 @@ tools:
   - mcp_edgar_analyzer_get_run_specs
   - mcp_edgar_analyzer_get_top_models
   - mcp_edgar_analyzer_inspect_model
+  - mcp_edgar_analyzer_filter_models_by_parameters
+  - mcp_edgar_analyzer_compare_model_syntax_trees
 mcp_servers:
   edgar_analyzer:
     command: "uv"
