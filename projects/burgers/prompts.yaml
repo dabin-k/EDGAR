@@ -24,9 +24,9 @@ model:
         w1 = [x(t-1), x(t)]    p1 = model(w1)    # prediction of x(t+1)
         w2 = [x(t),   p1   ]   p2 = model(w2)    # prediction of x(t+2)
         ...
-        each step feeds the model its own previous prediction, for {rollout_steps} steps
+        each step feeds the model its own previous prediction, for 2 steps
 
-        loss = mean over all t, all horizons h in 1..{rollout_steps}, and all sensors of ( ph - x(t+h) )^2
+        loss = mean over all t, all horizons h in 1..2, and all sensors of ( ph - x(t+h) )^2
 
     After the first step the model runs on its own output, so errors compound. A model that is plausible one step ahead but has the dynamics wrong will drift over the rollout and be punished. 
 
@@ -54,13 +54,13 @@ model:
 
     The attached figure has one row per model, above a row showing the data.
 
-    *Left, heatmaps.* Sensors (in position order) by time, for one block. Red is positive displacement, blue negative, white zero; all heatmaps share one colour scale, so they are directly comparable. The top panel is the data. Each panel below is that model's prediction of the same block {rollout_steps} steps ahead, i.e. after {rollout_steps} steps of running on its own output.
+    *Left, heatmaps.* Sensors (in position order) by time, for one block. Red is positive displacement, blue negative, white zero; all heatmaps share one colour scale, so they are directly comparable. The top panel is the data. Each panel below is that model's prediction of the same block 2 steps ahead, i.e. after 2 steps of running on its own output.
 
-    *Right, line plots.* The top panel shows the true displacement of three sensors, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three sensors, in matching colours. Thin solid = residual one step ahead; thick dashed = {rollout_steps} steps ahead. A perfect model leaves both flat at zero.
+    *Right, line plots.* The top panel shows the true displacement of three sensors, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three sensors, in matching colours. Thin solid = residual one step ahead; thick dashed = 2 steps ahead. A perfect model leaves both flat at zero.
 
     Consider:
 
-    **Growth with horizon.** How much larger is the {rollout_steps}-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds.
+    **Growth with horizon.** How much larger is the 2-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds.
 
     **Structure.** Does the residual vary smoothly with time, or look like noise? Smooth variation is a systematic failure, and its shape is evidence about what the model is missing.
 

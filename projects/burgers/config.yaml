@@ -9,15 +9,15 @@
 # The field is generated deterministically by the loader (data_loader/load_data.py),
 # so data_path stays empty and launch-gcp skips the data upload.
 io:
-  data_path: ""
+  data_path: "burgers"
 
 evolution:
-  n_generations: 12
-  n_islands: 8
-  batch_size: 6
+  n_generations: 6
+  n_islands: 5
+  batch_size: 3
   critical_population_size: 12
   n_migrants: 2
-  topology: [1, 2, 3, 4, 5, 6, 7, 0]
+  topology: [1, 2, 3, 4, 0]
 
 scoring:
   # Loss scale on this field (5-step rollout MSE, measured in journal):
@@ -33,7 +33,12 @@ scoring:
 project_params:
   s_factor: 4         # spatial coarsening (256 -> 64 sensors)
   t_factor: 20        # temporal coarsening (dt 0.002 -> 0.04)
-  block_len: 100      # time-block length; blocks dealt round-robin into 4 splits
-  train_frac: 0.5     # kept for API symmetry (split is round-robin)
+  block_len: 500      # time-block length; alternate blocks -> train/test per recording
+  train_frac: 0.5     # kept for API symmetry (split is deterministic)
   n_eval_samples: 4   # blocks shown in image-feedback figure
   random_seed: 0
+  n_recordings: 4     # independent IC trajectories; first N/2 -> discover, rest -> validate
+
+evaluate:
+  input_sequence_length: 2  # lags visible to the model (window width); fed to evaluate + prompts
+  rollout_steps: 2          # steps rolled on the model's own predictions before scoring
