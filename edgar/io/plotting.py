@@ -53,16 +53,10 @@ def generate_feedback_image(
         "image.png",
     )
     os.makedirs(os.path.dirname(img_path), exist_ok=True)
+    extra = {} if spec.evaluate_fn is None else {"evaluate_fn": spec.evaluate_fn}
     try:
-        if spec.evaluate_fn is None: 
-            spec.plot_fn(data, parents, save_path=img_path)
-            program.image_path = img_path
-        else:
-            spec.plot_fn(
-                data, parents, save_path=img_path,
-                evaluate_fn=spec.evaluate_fn,
-            )
-            program.image_path = img_path
+        spec.plot_fn(data, parents, save_path=img_path, **extra)
+        program.image_path = img_path
         return open(img_path, "rb").read()
     except Exception as e:
         warnings.warn(f"[plotting] plot_fn failed for program #{program.idx}: {e}")
@@ -95,39 +89,27 @@ def generate_program_fits(
     plot_dir = Path(spec.output_dir) / "image_fits"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
+    extra = {} if spec.evaluate_fn is None else {"evaluate_fn": spec.evaluate_fn}
+
     for p in programs:
         if p.params_init is None or p.params is None:
             continue
 
         save_path = plot_dir / f"P{p.idx:04d}.png"
         try:
-            if evaluate_fn is None:            
-                spec.plot_fn(
-                    data,
-                    [p, p],
-                    save_path=str(save_path),
-                    losses=[
-                        p.program_losses.discover.init,
-                        p.program_losses.discover.final,
-                    ],
-                    sample_losses=[p.sample_losses_init, p.sample_losses],
-                    program_names=[f"{p.name} (Init)", f"{p.name} (Final)"],
-                    params=[p.params_init, p.params],
-                )
-            else: 
-                spec.plot_fn(
-                    data,
-                    [p, p],
-                    save_path=str(save_path),
-                    losses=[
-                        p.program_losses.discover.init,
-                        p.program_losses.discover.final,
-                    ],
-                    sample_losses=[p.sample_losses_init, p.sample_losses],
-                    program_names=[f"{p.name} (Init)", f"{p.name} (Final)"],
-                    params=[p.params_init, p.params],
-                    evaluate_fn=evaluate_fn,
-                )
+            spec.plot_fn(
+                data,
+                [p, p],
+                save_path=str(save_path),
+                losses=[
+                    p.program_losses.discover.init,
+                    p.program_losses.discover.final,
+                ],
+                sample_losses=[p.sample_losses_init, p.sample_losses],
+                program_names=[f"{p.name} (Init)", f"{p.name} (Final)"],
+                params=[p.params_init, p.params],
+                **extra,
+            )
             p.fit_image_path = str(save_path)
         except Exception as e:
             warnings.warn(f"[plotting] failed to generate fit plot for P#{p.idx}: {e}")
