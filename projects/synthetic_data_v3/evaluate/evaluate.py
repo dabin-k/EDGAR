@@ -27,11 +27,7 @@ import jax
 import jax.numpy as jnp
 
 
-MAX_LENGTH = 2  # lags visible to the model
-ROLLOUT_STEPS = 3  # H: steps rolled on the model's own predictions
-
-
-def evaluate(model_fn, data, params):
+def evaluate(model_fn, data, params, input_sequence_length, rollout_steps):
     """Run `model_fn` autoregressively over every sample.
 
     Args:
@@ -40,32 +36,39 @@ def evaluate(model_fn, data, params):
         params: batched params pytree, leading axis n_samples.
 
     Returns:
-        (preds, targets), both (n_samples, n_blocks, n_starts, ROLLOUT_STEPS, n_cells).
+        (preds, targets), both (n_samples, n_blocks, n_starts, rollout_steps, n_cells).
     """
 
     def per_sample(sample, sample_params):
-        return jax.vmap(partial(_rollout_block, model_fn, sample_params))(sample["x"])
+        predict = partial(
+                    _rollout_block,
+                    model_fn,
+                    sample_params,
+                    input_sequence_length=input_sequence_length,
+                    rollout_steps=rollout_steps,
+                )
+        return jax.vmap(predict)(sample["x"])
 
     return jax.vmap(per_sample)(data, params)
 
 
-def _rollout_block(model_fn, params, block):
+def _rollout_block(model_fn, params, block, input_sequence_length, rollout_steps):
     """Teacher-forced restarts within one block. block: (n_cells, block_len)."""
     n_cells, block_len = block.shape
     # start s: needs history [s-MAX_LENGTH+1 .. s] and targets [s+1 .. s+ROLLOUT_STEPS]
-    starts = jnp.arange(MAX_LENGTH - 1, block_len - ROLLOUT_STEPS)
+    starts = jnp.arange(input_sequence_length - 1, block_len - rollout_steps)
 
     def rollout_from(s):
         window = jax.lax.dynamic_slice(
-            block, (0, s - MAX_LENGTH + 1), (n_cells, MAX_LENGTH)
+            block, (0, s - input_sequence_length + 1), (n_cells, input_sequence_length)
         )
 
         def step(w, _):
             pred = model_fn({"x": w}, params)
             return jnp.concatenate([w[:, 1:], pred[:, None]], axis=1), pred
 
-        _, preds = jax.lax.scan(step, window, None, length=ROLLOUT_STEPS)
-        targets = jax.lax.dynamic_slice(block, (0, s + 1), (n_cells, ROLLOUT_STEPS)).T
-        return preds, targets  # both (ROLLOUT_STEPS, n_cells)
+        _, preds = jax.lax.scan(step, window, None, length=rollout_steps)
+        targets = jax.lax.dynamic_slice(block, (0, s + 1), (n_cells, rollout_steps)).T
+        return preds, targets  # both (rollout_steps, n_cells)
 
     return jax.vmap(rollout_from)(starts)

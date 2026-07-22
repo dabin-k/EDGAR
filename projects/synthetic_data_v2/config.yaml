@@ -28,3 +28,6 @@ project_params:
   block_len: 100
   random_seed: 0
   n_eval_samples: 4
+
+evaluate:
+  input_sequence_length: 20

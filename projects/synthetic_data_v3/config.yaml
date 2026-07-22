@@ -28,3 +28,7 @@ project_params:
   block_len: 50
   random_seed: 0
   n_eval_samples: 4
+
+evaluate:
+  input_sequence_length: 2  # lags visible to the model
+  rollout_steps: 3  # H: steps rolled on the model's own predictions

@@ -4,10 +4,6 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evaluate"))
-from evaluate import MAX_LENGTH, ROLLOUT_STEPS, evaluate  # noqa: E402
-
-
 TRACE_CELLS = (4, 14, 24)  # three cells spread around the ring
 
 
@@ -19,6 +15,8 @@ def plot_model_fits(
     sample_losses=None,
     program_names=None,
     params=None,
+    *,
+    evaluate_fn,
 ):
     """
     Plot observed population activity against each program's autoregressive prediction.
@@ -54,10 +52,6 @@ def plot_model_fits(
     kw = dict(aspect="auto", origin="lower", vmin=-vmax, vmax=vmax, cmap="RdBu_r")
 
     # target time of prediction (start s, horizon h) is s + 1 + h
-    starts = np.arange(MAX_LENGTH - 1, truth.shape[1] - ROLLOUT_STEPS)
-    t_first = starts + 1
-    t_last = starts + ROLLOUT_STEPS
-
     n_rows = 1 + len(programs)
     fig, axes = plt.subplots(n_rows, 2, figsize=(11, 2.6 * n_rows), squeeze=False)
 
@@ -75,16 +69,19 @@ def plot_model_fits(
 
     for row, program in enumerate(programs, start=1):
         model_fn = program.compile_model()
-        preds, targets = evaluate(model_fn, data, params[row - 1])
+        preds, targets = evaluate_fn(model_fn, data, params[row - 1])
         preds = np.asarray(preds)[sample, block]  # (n_starts, horizon, n_cells)
         targets = np.asarray(targets)[sample, block]
         residual = preds - targets
+        t_first = np.arange(preds.shape[0])
+        t_last = np.arange(preds.shape[0])
+        rollout_steps = preds.shape[1]
 
         label = f"model_{row}"
 
-        im = axes[row, 0].imshow(preds[:, ROLLOUT_STEPS - 1].T, **kw)
+        im = axes[row, 0].imshow(preds[:, rollout_steps - 1].T, **kw)
         axes[row, 0].set(
-            title=f"{label}: prediction, {ROLLOUT_STEPS} steps ahead"
+            title=f"{label}: prediction, {rollout_steps} steps ahead"
             f"  (loss {losses[row - 1]:.4g})",
             ylabel="cell",
             xlabel="time",
@@ -103,11 +100,11 @@ def plot_model_fits(
             )
             ax.plot(
                 t_last,
-                residual[:, ROLLOUT_STEPS - 1, c],
+                residual[:, rollout_steps - 1, c],
                 color=f"C{i}",
                 lw=1.4,
                 ls="--",
-                label=f"cell {c}, {ROLLOUT_STEPS} steps",
+                label=f"cell {c}, {rollout_steps} steps",
             )
         ax.set(
             title=f"{label}: residual (prediction - data)",

@@ -28,10 +28,7 @@ import jax
 import jax.numpy as jnp
 
 
-M = 20  # lags visible to the model
-
-
-def evaluate(model_fn, data, params):
+def evaluate(model_fn, data, params, input_sequence_length):
     """Run `model_fn` over every window of every block of every sample.
 
     Args:
@@ -40,21 +37,26 @@ def evaluate(model_fn, data, params):
         params: batched params pytree, leading axis n_samples.
 
     Returns:
-        (preds, targets), both (n_samples, n_blocks, block_len - M).
+        (preds, targets), both (n_samples, n_blocks, block_len - input_sequence_length).
     """
 
     def per_sample(sample, sample_params):
-        return jax.vmap(partial(_predict_block, model_fn, sample_params))(sample["x"])
-
+        predict = partial(
+                    _predict_block,
+                    model_fn,
+                    sample_params,
+                    input_sequence_length=input_sequence_length,
+                )
+        return jax.vmap(predict)(sample["x"])
     return jax.vmap(per_sample)(data, params)
 
 
-def _predict_block(model_fn, params, block):
+def _predict_block(model_fn, params, block, input_sequence_length):
     """One-step predictions within one block. block: (block_len,)."""
-    n_windows = block.shape[0] - M
+    n_windows = block.shape[0] - input_sequence_length
     # row i is [x(i), ..., x(i+M-1)] and predicts x(i+M)
-    idx = jnp.arange(n_windows)[:, None] + jnp.arange(M)[None, :]
+    idx = jnp.arange(n_windows)[:, None] + jnp.arange(input_sequence_length)[None, :]
     windows = block[idx]
 
     preds = jax.vmap(lambda w: model_fn({"x": w}, params))(windows)
-    return preds, block[M:]
+    return preds, block[input_sequence_length:]

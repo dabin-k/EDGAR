@@ -4,10 +4,6 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evaluate"))
-from evaluate import M, evaluate  # noqa: E402
-
-
 N_TRACE_CELLS = 4
 
 
@@ -31,6 +27,8 @@ def plot_model_fits(
     sample_losses=None,
     program_names=None,
     params=None,
+    *,
+    evaluate_fn,
 ):
     """
     Plot each cell's observed activity against every program's one-step prediction.
@@ -71,10 +69,11 @@ def plot_model_fits(
     # every program's predictions, once
     preds = []
     for program, prm in zip(programs, params):
-        p, _ = evaluate(program.compile_model(), data, prm)
+        p, _ = evaluate_fn(program.compile_model(), data, prm)
         preds.append(np.asarray(p)[:, block])  # (n_samples, block_len - M)
 
     block_len = x.shape[2]
+    M = block_len - preds[0].shape[1]
     t_pred = np.arange(M, block_len)
 
     fig, axes = plt.subplots(
