@@ -30,23 +30,20 @@ def forward_rk3_error(net, target, dt, m, wd, fc=None, fc_0p5=None, fc_p1=None):
     res    = torch.zeros_like(pred[0:-m,:])
     p_old  = pred[0:-m,:].clone()
     
-    for j in range(m-1):
-        k1    = dt*(net(p_old) + fc[j:-m+j,:])        # dt*f(t,y^n)
-        temp  = p_old + 0.5*k1                           # y^n + 0.5*k1
-        k2    = dt*(net(temp) + fc_0p5[j:-m+j,:])     # dt*f(t+0.5*dt, y^n + 0.5*k1)
-        temp  = p_old - k1 + 2.0*k2                      # y^n - k1 + 2.0*k2
-        k3    = dt*(net(temp) + fc_p1[j:-m+j,:])      # dt*f(t+dt, y^n - k1 + 2.0*k2)
-        p_new = p_old + (1./6.)*(k1 + 4.0*k2 + k3)       # y^n + (1./6.)*(k1 + 4.0*k2 + k3)
-        res   = res + wd[j+1]*((target[j+1:-m+j+1,:] - (p_new + noise[j+1:-m+j+1,:]))**2)
+    # One uniform loop over all m rollout steps (was: loop of m-1 + a duplicated
+    # trailing step that reused the leftover `j`). The old trailing block crashed at
+    # m=1 (empty loop -> unbound `j`) and applied the final step's forcing one index
+    # stale; iterating range(m) with a per-step forcing index fixes both.
+    B = p_old.shape[0]                                # rollout anchors: T - m
+    for j in range(m):
+        k1    = dt*(net(p_old) + fc[j:j+B,:])         # dt*f(t, y^n)
+        temp  = p_old + 0.5*k1                         # y^n + 0.5*k1
+        k2    = dt*(net(temp) + fc_0p5[j:j+B,:])      # dt*f(t+0.5*dt, y^n + 0.5*k1)
+        temp  = p_old - k1 + 2.0*k2                    # y^n - k1 + 2.0*k2
+        k3    = dt*(net(temp) + fc_p1[j:j+B,:])       # dt*f(t+dt, y^n - k1 + 2.0*k2)
+        p_new = p_old + (1./6.)*(k1 + 4.0*k2 + k3)     # y^n + (1./6.)*(k1 + 4.0*k2 + k3)
+        res   = res + wd[j+1]*((target[j+1:j+1+B,:] - (p_new + noise[j+1:j+1+B,:]))**2)
         p_old = p_new
-        
-    k1    = dt*(net(p_old) + fc[j:-m+j,:])        
-    temp  = p_old + 0.5*k1                           
-    k2    = dt*(net(temp) + fc_0p5[j:-m+j,:])     
-    temp  = p_old - k1 + 2.0*k2                      
-    k3    = dt*(net(temp) + fc_p1[j:-m+j,:])      
-    p_new = p_old + (1./6.)*(k1 + 4.0*k2 + k3)
-    res   = res +  wd[m]*((target[m:,:] - (p_new + noise[m:,:]))**2)
     
     return torch.mean(res)
 

@@ -10,22 +10,24 @@ The two methods produce different objects, so we report two complementary views:
      recovered coefficients of the two true Burgers terms (0.02 u_xx, -1.0 u u_x)
      are to truth. STENCIL-NET has no symbolic form, so it has no entry here.
 
-  2. FORECAST MSE (shared, all methods): free-run the model forward from the
-     clean initial condition with the KNOWN forcing and score vs the clean field.
-       * STENCIL-NET learns a discrete propagator directly and free-runs it (its
-         numbers come from its own runner, read from results/stencilnet_*.json).
-       * SINDy recovers a continuous PDE u_t = N(u; Xi) + f, which we integrate
-         with a shock-capturing Lax-Friedrichs flux for the advective (order-1)
-         terms + central differences for diffusion + RK3 in time -- the same time
-         stepper and known forcing STENCIL-NET uses. A recovered PDE that is
-         inaccurate or carries spurious anti-diffusive terms (e.g. u^2 u_xx) can
-         blow up when integrated; we flag that (stable=False) and cap the MSE.
-         This instability is a genuine, reportable SINDy weakness -- it is exactly
-         the failure mode the benchmark set out to probe.
+  2. FORECAST MSE (shared, all methods): teacher-forced RK3 restarts scored vs the
+     clean field with the KNOWN forcing -- the SAME protocol EDGAR is graded on
+     (load_data.teacher_forced_forecast / evaluate.py): from every true state, roll
+     `rollout_steps` on the model's own predictions and score every step.
+       * STENCIL-NET's numbers come from its own runner (read from
+         results/stencilnet_*.json), which uses the identical shared scorer.
+       * SINDy recovers a continuous PDE u_t = N(u; Xi) + f, integrated with a
+         shock-capturing Lax-Friedrichs flux for the advective (order-1) terms +
+         central differences for diffusion + RK3 in time -- the same stepper and
+         known forcing STENCIL-NET uses. A recovered PDE that is inaccurate or
+         carries spurious anti-diffusive terms (e.g. u^2 u_xx) can still blow up
+         within a rollout window; we flag that (stable=False) and cap the MSE.
+         This instability is a genuine, reportable SINDy weakness -- exactly the
+         failure mode the benchmark set out to probe.
 
-  An ORACLE line (free-run of the TRUE 0.02 u_xx - 1.0 u u_x with the same
-  integrator) is included as the forecast-MSE floor: it shows how much error is
-  the coarse-grid integrator itself vs the recovered dynamics.
+  An ORACLE line (the TRUE 0.02 u_xx - 1.0 u u_x scored with the same restarts and
+  integrator) is the forecast-MSE floor: it shows how much error is the coarse-grid
+  integrator itself vs the recovered dynamics.
 
 Usage:
     python compare_sindy_stencilnet.py                      # default sweep + plot
@@ -98,8 +100,11 @@ def make_rhs(names, coefs, dx):
         p, d = parse_term(n)
         (react if d == 0 else flux if d == 1 else diff).append((c, p))
 
+    # np.roll on axis=-1 (the spatial axis) so N works on both a single field (Lx,)
+    # and a batch of restart states (n_starts, Lx) — teacher_forced_forecast steps
+    # all restarts at once. alpha (local wave speed) is per-row via keepdims.
     def dx2(v):
-        return (np.roll(v, -1) - 2 * v + np.roll(v, 1)) / dx ** 2
+        return (np.roll(v, -1, axis=-1) - 2 * v + np.roll(v, 1, axis=-1)) / dx ** 2
 
     def N(v):
         out = np.zeros_like(v)
@@ -109,48 +114,37 @@ def make_rhs(names, coefs, dx):
             out += c * (v ** p) * dx2(v)
         if flux:
             f = -sum(c / (p + 1) * v ** (p + 1) for c, p in flux)  # u_t = -f_x
-            alpha = np.max(np.abs(sum(c * v ** p for c, p in flux))) + 1e-12
-            Fp = 0.5 * (f + np.roll(f, -1)) - 0.5 * alpha * (np.roll(v, -1) - v)
-            out += -(Fp - np.roll(Fp, 1)) / dx
+            alpha = np.max(np.abs(sum(c * v ** p for c, p in flux)), axis=-1, keepdims=True) + 1e-12
+            Fp = 0.5 * (f + np.roll(f, -1, axis=-1)) - 0.5 * alpha * (np.roll(v, -1, axis=-1) - v)
+            out += -(Fp - np.roll(Fp, 1, axis=-1)) / dx
         return out
     return N
 
 
-def free_run(N, u0, forcing_fn, dtc, nsteps):
-    """SSP-RK3 free-run with known forcing added to the RHS (matches STENCIL-NET)."""
-    Nx = u0.shape[0]
-    out = np.zeros((Nx, nsteps + 1))
-    out[:, 0] = u0
-    t = 0.0
-    for j in range(nsteps):
-        k1 = dtc * (N(out[:, j]) + forcing_fn(t))
-        k2 = dtc * (N(out[:, j] + 0.5 * k1) + forcing_fn(t + 0.5 * dtc))
-        k3 = dtc * (N(out[:, j] - k1 + 2 * k2) + forcing_fn(t + dtc))
-        out[:, j + 1] = out[:, j] + (1.0 / 6.0) * (k1 + 4 * k2 + k3)
-        if not np.all(np.isfinite(out[:, j + 1])):
-            out[:, j + 1:] = np.nan
-            break
-    return out
-
-
 # ----------------------------------------------------------------------------
-def sindy_sweep(levels, threshold, weak, bundle, forcing_fn, F, train_cols, MSE_CAP=1e3):
+def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
+                rollout_steps, MSE_CAP=1e3):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
     u_clean = bundle["u_coarse"]
-    nsteps = u_clean.shape[1] - 1
     rows = []
     for nl in levels:
         u = ld.noise_field(bundle, nl)
-        fit = sindy_runner.fit_pdefind(u, xg, dtc, forcing=F, threshold=threshold, weak=weak)
+        fit = sindy_runner.fit_pdefind([u], xg, dtc, forcing=[F], threshold=threshold, weak=weak)
         cmap = dict(zip(fit["names"], fit["coefs"]))
         N = make_rhs(fit["names"], fit["coefs"], dx)
-        pred = free_run(N, u_clean[:, 0], forcing_fn, dtc, nsteps)
-        stable = bool(np.all(np.isfinite(pred)))
-        pred_g = np.nan_to_num(pred, nan=1e30, posinf=1e30, neginf=-1e30)
-        mse_full = min(ld.forecast_mse(pred_g, u_clean), MSE_CAP)
-        mse_hld = min(ld.forecast_mse(pred_g[:, train_cols:], u_clean[:, train_cols:]), MSE_CAP)
+        # teacher-forced restarts, identical to STENCIL-NET and EDGAR. A recovered
+        # PDE with spurious anti-diffusive terms can still blow up within a rollout
+        # window (stable=False); we cap the MSE, but re-anchoring keeps one bad
+        # window from NaN-ing the whole forecast.
+        rhs = lambda state, t: N(state) + forcing_batched(t)  # noqa: E731
+        preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+        stable = bool(np.all(np.isfinite(preds)))
+        preds_g = np.nan_to_num(preds, nan=1e30, posinf=1e30, neginf=-1e30)
+        heldout = np.arange(preds.shape[0]) >= train_cols
+        mse_full = min(ld.forecast_mse(preds_g, targets), MSE_CAP)
+        mse_hld = min(ld.forecast_mse(preds_g[heldout], targets[heldout]), MSE_CAP)
         rows.append({
             "method": "sindy_weak" if weak else "sindy_strong",
             "noise_level": nl, "threshold": threshold,
@@ -163,17 +157,19 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_fn, F, train_cols, MSE_
     return rows
 
 
-def oracle_row(bundle, forcing_fn, F, train_cols):
+def oracle_row(bundle, forcing_batched, rollout_steps, train_cols):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
     u_clean = bundle["u_coarse"]
     N = make_rhs(["u_11", "uu_1"], [TRUE["u_11"], TRUE["uu_1"]], dx)
-    pred = free_run(N, u_clean[:, 0], forcing_fn, dtc, u_clean.shape[1] - 1)
+    rhs = lambda state, t: N(state) + forcing_batched(t)  # noqa: E731
+    preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+    heldout = np.arange(preds.shape[0]) >= train_cols
     return {
-        "forecast_mse_full": ld.forecast_mse(pred, u_clean),
-        "forecast_mse_heldout": ld.forecast_mse(pred[:, train_cols:], u_clean[:, train_cols:]),
-        "stable": bool(np.all(np.isfinite(pred))),
+        "forecast_mse_full": ld.forecast_mse(preds, targets),
+        "forecast_mse_heldout": ld.forecast_mse(preds[heldout], targets[heldout]),
+        "stable": bool(np.all(np.isfinite(preds))),
     }
 
 
@@ -256,14 +252,18 @@ def main(levels, threshold):
     A, w, phi, l, N, L = b["A"], b["w"], b["phi"], b["l"], int(b["N"]), b["L"]
     F = sindy_runner.forcing_field(A, w, phi, l, N, L, xg, dtc, b["u_coarse"].shape[1])
 
-    def forcing_fn(tt):
-        return sum(A[k] * np.sin(w[k] * tt + 2 * np.pi * l[k] * (xg / L) + phi[k]) for k in range(N))
+    def forcing_batched(t_arr):
+        """Known forcing at physical times t_arr (n_starts,) -> (n_starts, Lx)."""
+        tt = np.asarray(t_arr)[:, None]
+        return sum(A[k] * np.sin(w[k] * tt + 2 * np.pi * l[k] * (xg[None, :] / L) + phi[k])
+                   for k in range(N))
 
     train_cols = 1001  # matches STENCIL-NET training window
+    rollout_steps = ld.benchmark_rollout_steps()  # same horizon as EDGAR + STENCIL-NET
 
-    sindy_s = sindy_sweep(levels, threshold, False, b, forcing_fn, F, train_cols)
-    sindy_w = sindy_sweep(levels, threshold, True, b, forcing_fn, F, train_cols)
-    oracle = oracle_row(b, forcing_fn, F, train_cols)
+    sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F, train_cols, rollout_steps)
+    sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F, train_cols, rollout_steps)
+    oracle = oracle_row(b, forcing_batched, rollout_steps, train_cols)
     sn_rows = load_stencilnet()
 
     results = {"threshold": threshold, "levels": list(levels), "oracle": oracle,

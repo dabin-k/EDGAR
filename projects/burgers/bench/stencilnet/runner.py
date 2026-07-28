@@ -6,14 +6,18 @@ shared forecast metric. All the physics/architecture is theirs; this file only:
 
   1. loads the shared data bundle (data_loader.load_data),
   2. builds their MLPConv [fs,64,64,64,1] + forcing terms,
-  3. trains with their forward+backward RK3 loss (clean case) or the TVD-RK3
-     loss + latent-noise regularization (noisy case),
-  4. free-runs the trained propagator with RK3 to produce a forecast field,
-  5. scores forecast MSE against the CLEAN field on held-out time.
+  3. trains with their forcing-aware forward+backward RK3 loss; the noisy case
+     adds a learnable latent-noise field (net.noise) + its regularization, which
+     the same error functions handle (noise-as-latent denoising),
+  4. scores forecast MSE against the CLEAN field using teacher-forced RK3
+     restarts (data_loader.teacher_forced_forecast) — the SAME protocol EDGAR is
+     graded on (evaluate.py), not a single full-horizon free-run.
 
 Training recipe mirrors ForcedBurgersSimulation.ipynb (clean) and
 ForcedBurgersNoiseDecomposition.ipynb (noisy): Adam lr=1e-3, ExponentialLR(.9998)
-after 15k epochs, m=4 rollout, decay 0.9, l_wd=1e-7, l_n=1e-5.
+after 15k epochs, decay 0.9, l_wd=1e-7, l_n=1e-5. Training and scoring share one
+rollout horizon (config evaluate.rollout_steps), so the net is trained over the
+same number of steps it is graded on (was a fixed m=4 in the reference).
 
 CLI:
     python runner.py --noise 0.0 --epochs 30000
@@ -43,7 +47,6 @@ sys.path.insert(0, os.path.join(_HERE, "..", "..", "data_loader"))
 from network import MLPConv  # noqa: E402  (vendored)
 from timestepping import (  # noqa: E402  (vendored)
     forward_rk3_error, backward_rk3_error,
-    forward_rk3_tvd_error, backward_rk3_tvd_error,
 )
 import load_data as ld  # noqa: E402
 import burgers_sim as bs  # noqa: E402
@@ -70,29 +73,14 @@ def _forcing_terms(A, w, phi, l, L, Lxc, Ltc, dtc, N):
     return field(0.0), field(0.5 * dtc), field(dtc), field(-0.5 * dtc), field(-dtc)
 
 
-def _free_run(net, u0, forcing_fn, dtc, nsteps, device):
-    """Free-run the trained net forward with RK3 + known forcing (ref cell 17)."""
-    Lxc = u0.shape[0]
-    out = np.zeros((Lxc, nsteps + 1)); out[:, 0] = u0
-    t = 0.0
-    for j in range(nsteps):
-        def rhs(vec, tt):
-            tens = torch.tensor(vec.reshape(1, Lxc), dtype=torch.float, device=device)
-            return net(tens).cpu().data.numpy() + forcing_fn(tt)
-        k1 = dtc * rhs(out[:, j], t)
-        tmp = out[:, j] + 0.5 * k1
-        k2 = dtc * rhs(tmp, t + 0.5 * dtc)
-        tmp = out[:, j] - k1 + 2.0 * k2
-        k3 = dtc * rhs(tmp, t + dtc)
-        out[:, j + 1] = out[:, j] + (1.0 / 6.0) * (k1 + 4.0 * k2 + k3)
-        t += dtc
-    return out
-
-
-def run(noise_level=0.0, epochs=30000, seed=1, train_cols=1001, fs=7, m=4,
-        neurons=64, device=None, out_dir=None, quick=False):
+def run(noise_level=0.0, epochs=30000, seed=1, train_cols=1001, fs=7,
+        neurons=64, device=None, out_dir=None, rollout_steps=None):
     out_dir = out_dir or os.path.join(_HERE, "results")
     os.makedirs(out_dir, exist_ok=True)
+    # One rollout horizon for both training and scoring (default: config).
+    if rollout_steps is None:
+        rollout_steps = ld.benchmark_rollout_steps()
+    rollout_steps = int(rollout_steps)
     # device=None -> auto-detect (CUDA if present, else MPS, else CPU) so the same
     # runner is portable between this CPU box and a GPU machine.
     if device is None:
@@ -134,19 +122,22 @@ def run(noise_level=0.0, epochs=30000, seed=1, train_cols=1001, fs=7, m=4,
 
     optimizer = Adam([{"params": net.parameters(), "lr": 1e-3}])
     scheduler = ExponentialLR(optimizer, 0.9998)
-    wd = torch.tensor([0.9 ** j for j in range(m + 1)], dtype=torch.float32, device=device)
+    wd = torch.tensor([0.9 ** j for j in range(rollout_steps + 1)], dtype=torch.float32, device=device)
     l_wd, l_n = 1e-7, 1e-5
 
     t0 = time.time()
     loss_hist = []
     for epoch in range(epochs):
         optimizer.zero_grad()
-        if noisy:
-            fwd = forward_rk3_tvd_error(net, u_train, dtc, m, wd)
-            bwd = backward_rk3_tvd_error(net, u_train, dtc, m, wd)
-        else:
-            fwd = forward_rk3_error(net, u_train, dtc, m, wd, fc=fc, fc_0p5=fc_0p5, fc_p1=fc_p1)
-            bwd = backward_rk3_error(net, u_train, dtc, m, wd, fc=fc, fc_0m5=fc_0m5, fc_m1=fc_m1)
+        # Forcing-aware forward/backward RK3 loss for BOTH clean and noisy. These
+        # error fns read net.noise (the latent-noise field, set only in the noisy
+        # case) and take the known forcing fc, so the net learns the UNFORCED
+        # operator N(u) with forcing supplied separately -- matching the scoring
+        # convention (rhs = net(u) + f). The vendored TVD variants are the
+        # reference's *unforced* denoising path: with no fc they force the net to
+        # absorb the forcing, which is then added again at score time (double-count).
+        fwd = forward_rk3_error(net, u_train, dtc, rollout_steps, wd, fc=fc, fc_0p5=fc_0p5, fc_p1=fc_p1)
+        bwd = backward_rk3_error(net, u_train, dtc, rollout_steps, wd, fc=fc, fc_0m5=fc_0m5, fc_m1=fc_m1)
         res_w = 0
         for layer in net.layer:
             W = layer.weight.view(layer.weight.shape[0] * layer.weight.shape[1], -1)
@@ -164,25 +155,30 @@ def run(noise_level=0.0, epochs=30000, seed=1, train_cols=1001, fs=7, m=4,
             loss_hist.append((epoch, float(loss.item())))
     train_s = time.time() - t0
 
-    # free-run forecast over the full field horizon, score vs CLEAN
-    def forcing_fn_factory():
-        xg = np.linspace(0, L, Lxc)
-        def f(tt):
-            out = np.zeros(Lxc)
-            for k in range(N):
-                out = out + A[k] * np.sin(w[k] * tt + 2.0 * np.pi * l[k] * (xg / L) + phi[k])
-            return out
-        return f
-    nsteps = u_clean.shape[1] - 1
-    pred = _free_run(net, u_clean[:, 0], forcing_fn_factory(), dtc, nsteps, device)
+    # teacher-forced restart forecast, scored vs CLEAN on the same protocol as
+    # EDGAR (projects/burgers/evaluate/evaluate.py): from every true state, RK3-roll
+    # `rollout_steps` on the net's own predictions and score against the clean field.
+    # The batched rhs is net(u) + known forcing at each restart's physical time.
+    xg = np.linspace(0, L, Lxc)
 
-    mse_full = ld.forecast_mse(pred, u_clean)
-    # held-out (beyond training window) forecast MSE
-    mse_heldout = ld.forecast_mse(pred[:, train_cols:], u_clean[:, train_cols:])
+    def rhs(state, t_arr):
+        tens = torch.tensor(state, dtype=torch.float, device=device)
+        net_out = net(tens).cpu().data.numpy()          # (n_starts, Lx)
+        tt = np.asarray(t_arr)[:, None]                  # (n_starts, 1)
+        F = np.zeros((state.shape[0], Lxc))
+        for k in range(N):
+            F = F + A[k] * np.sin(w[k] * tt + 2.0 * np.pi * l[k] * (xg[None, :] / L) + phi[k])
+        return net_out + F
+
+    preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+    heldout = np.arange(preds.shape[0]) >= train_cols   # restarts seeded beyond the train window
+    mse_full = ld.forecast_mse(preds, targets)
+    mse_heldout = ld.forecast_mse(preds[heldout], targets[heldout])
 
     result = {
         "method": "stencilnet", "noise_level": noise_level, "epochs": epochs,
-        "seed": seed, "train_cols": train_cols, "fs": fs, "m": m, "neurons": neurons,
+        "seed": seed, "train_cols": train_cols, "fs": fs, "neurons": neurons,
+        "rollout_steps": rollout_steps,
         "n_params": int(sum(p.numel() for p in net.parameters() if p.requires_grad)),
         "train_seconds": round(train_s, 1),
         "forecast_mse_full": mse_full, "forecast_mse_heldout": mse_heldout,
@@ -191,8 +187,9 @@ def run(noise_level=0.0, epochs=30000, seed=1, train_cols=1001, fs=7, m=4,
     tag = f"noise{noise_level}"
     with open(os.path.join(out_dir, f"stencilnet_{tag}.json"), "w") as fh:
         json.dump(result, fh, indent=2)
+    # one-step-ahead teacher-forced field (preds[:, 0]) for visualisation
     np.savez_compressed(os.path.join(out_dir, f"stencilnet_pred_{tag}.npz"),
-                        pred=pred, u_clean=u_clean)
+                        pred_one_step=preds[:, 0].T, u_clean=u_clean)
     return result
 
 

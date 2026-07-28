@@ -95,6 +95,76 @@ def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
     return float(np.mean((u_pred - u_clean) ** 2))
 
 
+def benchmark_rollout_steps() -> int:
+    """`rollout_steps` used to score the reference methods (STENCIL-NET, SINDy).
+
+    Read from this project's own `evaluate` config so the reference-method
+    forecasts and EDGAR's teacher-forced rollout (see
+    `projects/burgers/evaluate/evaluate.py`) are graded on the SAME horizon.
+    """
+    import yaml
+
+    cfg = os.path.join(_HERE, "..", "config.yaml")
+    with open(cfg) as fh:
+        return int(yaml.safe_load(fh)["evaluate"]["rollout_steps"])
+
+
+def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps: int):
+    """Teacher-forced restart forecast for the continuous-operator reference methods.
+
+    Mirrors EDGAR's scoring protocol (`evaluate.py`): from every time column that
+    has `rollout_steps` clean steps ahead, seed a classic-RK3 rollout at the TRUE
+    state `u_clean[:, s]` and integrate `rollout_steps` steps on the model's own
+    predictions (closed-loop within the window), then score every step against the
+    clean field. Re-anchoring at each start — rather than a single full-horizon
+    free-run — is exactly how EDGAR models are graded, so the reference methods and
+    EDGAR share one protocol; it also stops a single diverging window from
+    cascading into a global NaN.
+
+    Both STENCIL-NET and SINDy learn a continuous-time RHS operator that is stepped
+    externally by RK3, so this takes the RHS as a callable and owns the integrator,
+    guaranteeing the two methods are stepped identically.
+
+    Args:
+        rhs: callable mapping a batched state `(n_starts, Lx)` and per-start
+            physical times `(n_starts,)` to du/dt `(n_starts, Lx)`. Any known
+            forcing must already be folded in by the caller.
+        u_clean: clean ground-truth field, shape `(Lx, T)`.
+        dtc: coarse timestep.
+        rollout_steps: steps rolled per restart before scoring.
+
+    Returns:
+        (preds, targets), both `(n_starts, rollout_steps, Lx)` with
+        `n_starts = T - rollout_steps`. The start of restart `i` is time column `i`.
+    """
+    u_clean = np.asarray(u_clean, dtype=float)
+    Lx, T = u_clean.shape
+    h = int(rollout_steps)
+    n_starts = T - h
+    starts = np.arange(n_starts)
+
+    state = u_clean[:, starts].T.copy()           # (n_starts, Lx) at t = starts*dtc
+    t = starts * dtc
+    preds = np.empty((n_starts, h, Lx))
+    for j in range(h):
+        # One step of Kutta's 3rd-order RK: sample the slope k = dtc*rhs at three
+        # stage points (start, midpoint, end) and combine with Simpson's-rule
+        # weights (1,4,1)/6. The k3 stage state is the method's prescribed
+        # end-of-interval extrapolation (y - k1 + 2*k2), not a typo. This is the
+        # identical integrator the reference free-runs used, so switching to
+        # teacher-forced restarts changes only the anchoring, not the stepping.
+        k1 = dtc * rhs(state, t)
+        k2 = dtc * rhs(state + 0.5 * k1, t + 0.5 * dtc)
+        k3 = dtc * rhs(state - k1 + 2.0 * k2, t + dtc)
+        state = state + (1.0 / 6.0) * (k1 + 4.0 * k2 + k3)
+        preds[:, j] = state
+        t = t + dtc
+
+    idx = starts[:, None] + 1 + np.arange(h)[None, :]   # (n_starts, h)
+    targets = u_clean.T[idx]                            # (n_starts, h, Lx)
+    return preds, targets
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # EDGAR entry points
 # ------------------------------------------------------------------------------
@@ -126,12 +196,23 @@ def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
 
 import jax.numpy as jnp
 
-def _unforced_coarse_field(s_factor: int, t_factor: int, ic_seed: int | None = None):
+def _unforced_coarse_field(
+    s_factor: int,
+    t_factor: int,
+    ic_seed: int | None = None,
+    noise_level: float = 0.0,
+    noise_seed: int = 0,
+):
     """Simulate the autonomous (unforced) Burgers field and coarsen it.
 
     `ic_seed=None` uses the reference Gaussian-bump initial condition; an integer
     seed draws a random smooth IC (burgers_sim.draw_ic) — this is how the discover
     and validate splits get independent trajectories on the same attractor.
+
+    `noise_level` adds the reference observation noise
+    (noise_level * std(field) * N(0, 1)) to the coarse field. It is applied after
+    the cache, not baked into it: the cached field is always the clean ground
+    truth, so changing the noise level costs nothing and never invalidates a cache.
 
     Cached next to this file (one `.npz` per IC), because the fine simulation
     takes ~70 s. Delete the cache to force regeneration (e.g. after changing the
@@ -157,7 +238,10 @@ def _unforced_coarse_field(s_factor: int, t_factor: int, ic_seed: int | None = N
     if os.path.exists(cache):
         with np.load(cache) as z:
             if int(z["s_factor"]) == s_factor and int(z["t_factor"]) == t_factor:
-                return z["u_coarse"], float(z["dxc"]), float(z["dtc"])
+                u_coarse, dxc, dtc = z["u_coarse"], float(z["dxc"]), float(z["dtc"])
+                if noise_level:
+                    u_coarse = bs.add_noise(u_coarse, noise_level, seed=noise_seed)
+                return u_coarse, dxc, dtc
 
     sim = bs.simulate(forcing_seed=None, ic_seed=ic_seed)  # autonomous field
     u_coarse = np.asarray(bs.coarsen(sim, s_factor=s_factor, t_factor=t_factor)["u_coarse"])
@@ -168,6 +252,8 @@ def _unforced_coarse_field(s_factor: int, t_factor: int, ic_seed: int | None = N
         u_coarse=u_coarse, dxc=dxc, dtc=dtc,
         s_factor=s_factor, t_factor=t_factor,
     )
+    if noise_level:
+        u_coarse = bs.add_noise(u_coarse, noise_level, seed=noise_seed)
     return u_coarse, dxc, dtc
 
 
@@ -181,6 +267,8 @@ def load_data(
     random_seed: int = 0,
     n_recordings: int = 4,
     ic_seed_base: int = 0,
+    noise_level: float = 0.0,
+    noise_seed: int = 0,
 ):
     """Build EDGAR's sample tensors from N independent unforced coarse fields.
 
@@ -203,8 +291,16 @@ def load_data(
     Both train and test span the whole trajectory, so neither is only-transient
     or only-steady-state.
 
+    `noise_level` is a fraction of each field's own standard deviation (the
+    reference observation model, see burgers_sim.add_noise) and is applied to the
+    whole field — train, test and eval blocks alike. Targets are therefore noisy
+    too, so the achievable loss floor rises with noise_level: absolute losses are
+    NOT comparable across noise levels, nor to the zero-noise scoreboard posts in
+    the README.
+
     `data_path` is unused: the fields are generated deterministically by the
-    simulator (autonomous; the only seeds that matter are the per-recording ICs).
+    simulator (autonomous; the only seeds that matter are the per-recording ICs
+    and, when noise is on, `noise_seed`).
 
     Returns:
         (X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval
@@ -222,7 +318,13 @@ def load_data(
     recordings = [
         to_blocks(
             _unforced_coarse_field(
-                s_factor, t_factor, ic_seed=None if i == 0 else ic_seed_base + i
+                s_factor,
+                t_factor,
+                ic_seed=None if i == 0 else ic_seed_base + i,
+                noise_level=noise_level,
+                # distinct realisation per recording, else every sample sees the
+                # same noise field and the map can fit the noise itself
+                noise_seed=noise_seed + i,
             )[0]
         )
         for i in range(n_recordings)

@@ -9,10 +9,10 @@
 # The field is generated deterministically by the loader (data_loader/load_data.py),
 # so data_path stays empty and launch-gcp skips the data upload.
 io:
-  data_path: "burgers"
+  data_path: ""
 
 evolution:
-  n_generations: 6
+  n_generations: 4
   n_islands: 5
   batch_size: 3
   critical_population_size: 12
@@ -28,7 +28,7 @@ scoring:
   # enough to break ties between equally-accurate models, small enough to stay
   # well below the ~1e-5 loss gaps that separate good models from mediocre ones.
   # (Same reasoning as synthetic_data_v3, rescaled to this loss scale.)
-  param_penalty_weight: 1.0e-7
+  param_penalty_weight: 1.0e-9
 
 project_params:
   s_factor: 4         # spatial coarsening (256 -> 64 sensors)
@@ -38,6 +38,8 @@ project_params:
   n_eval_samples: 4   # blocks shown in image-feedback figure
   random_seed: 0
   n_recordings: 4     # independent IC trajectories; first N/2 -> discover, rest -> validate
+  noise_level: 0.01    # observation noise as a fraction of std(field); 0.0 = clean
+  noise_seed: 0       # per-recording seeds are noise_seed + recording index
 
 evaluate:
   input_sequence_length: 2  # lags visible to the model (window width); fed to evaluate + prompts
