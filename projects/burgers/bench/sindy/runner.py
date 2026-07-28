@@ -69,16 +69,24 @@ def forcing_field(A, w, phi, l, N, L, xg, dt, nt):
         F += A[k] * np.sin(w[k] * TT + 2.0 * np.pi * l[k] * (XX / L) + phi[k])
     return F
 
-
-def fit_pdefind(u, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
+def fit_pdefind(blocks, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
                 poly_degree=2, deriv_order=2, weak=False, K=500):
-    """Fit PDE-FIND to a (Nx, Nt) field. Returns a dict {equation, names, coefs}.
+    """Fit PDE-FIND jointly over a list of time-blocks. Returns {equation, names, coefs}.
+
+    blocks : a list of (Nx, nt_b) contiguous time-blocks (a single field is just a
+        length-1 list). All blocks are fit JOINTLY -- one equation for all of them --
+        by stacking each block's regression rows (u_t / weak-form target and library
+        columns) and running a single sparse regression. Derivatives are estimated PER
+        BLOCK so no finite difference / weak-integral window straddles a block boundary;
+        this is how SINDy is cross-validated on the leak-free alternating blocks of
+        load_data.block_split (fit on train blocks, score on test blocks).
 
     Both the strong and weak paths honour a known forcing f(x,t):
 
-    forcing : (Nx, Nt) array or None. If given, it is removed so SINDy fits the
-              homogeneous operator u_t - f = N(u, u_x, u_xx, ...). This is the fair
-              known-input setup (STENCIL-NET is *given* the same forcing).
+    forcing : a list of per-block (Nx, nt_b) arrays matching `blocks`, or None. If given,
+              it is removed so SINDy fits the homogeneous operator
+              u_t - f = N(u, u_x, u_xx, ...). This is the fair known-input setup
+              (STENCIL-NET is *given* the same forcing).
               * STRONG path: subtract f from the finite-difference u_t before regression.
               * WEAK path: WeakPDELibrary computes a weak-form target <u_t, phi> and does
                 NOT accept an x_dot argument. But the weak equation is
@@ -86,16 +94,23 @@ def fit_pdefind(u, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
                 and <f, phi> = <F_t, phi> for F the time-antiderivative of f, so by the
                 linearity of convert_u_dot_integral we can move it to the LHS:
                     target = convert_u_dot_integral(u) - convert_u_dot_integral(F).
-                We assemble the weak regression by hand (pysindy's Optimizer.fit rejects
-                the raw 2D weak target via its AxesArray bookkeeping) with a small STLSQ.
+                F is a per-block cumulative-trapezoid antiderivative; its arbitrary additive
+                constant is annihilated by <1, phi_t> = 0, so restarting it at each block is
+                exact. We assemble the weak regression by hand (pysindy's Optimizer.fit
+                rejects the raw 2D weak target via its AxesArray bookkeeping) with a small STLSQ.
     weak    : if True, use WeakPDELibrary (integral formulation) -- the noise-robust
               "integral SINDy" variant the Champion paper cites. Validated: with the
               forcing correction it recovers 0.02 u_xx - 1.0 u u_x on the FORCED fine
               grid, and stays robust to sigma=0.1 (see journal 2026-07-20_weak_sindy.md).
     """
+    if not isinstance(blocks, (list, tuple)):
+        raise TypeError("blocks must be a list of (Nx, nt_b) time-blocks (use [field] for one)")
+    fblocks = [None] * len(blocks) if forcing is None else list(forcing)
+    if len(fblocks) != len(blocks):
+        raise ValueError(f"forcing has {len(fblocks)} blocks but blocks has {len(blocks)}")
     if weak:
-        return _fit_weak(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order, K)
-    return _fit_strong(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order)
+        return _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order, K)
+    return _fit_strong(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order)
 
 
 def _model_to_dict(model):
@@ -104,43 +119,60 @@ def _model_to_dict(model):
     return {"equation": model.equations()[0], "names": names, "coefs": coefs}
 
 
-def _fit_strong(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order):
-    U = u[:, :, None]
-    if forcing is not None:
-        ut = FiniteDifference(axis=1)._differentiate(u, dt)
-        x_dot = (ut - forcing)[:, :, None]
-    else:
-        x_dot = None  # let pysindy estimate u_t itself
+def _fit_strong(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order):
+    # One (Nx, nt_b, 1) trajectory per block; u_t is finite-differenced within each
+    # block (never across a boundary) then forcing-corrected. pysindy stacks the
+    # per-trajectory library rows and solves a single STLSQ over all blocks.
+    Us, Xdots = [], []
+    for u, f in zip(blocks, fblocks):
+        Us.append(u[:, :, None])
+        if f is not None:
+            ut = FiniteDifference(axis=1)._differentiate(u, dt)
+            Xdots.append((ut - f)[:, :, None])
+        else:
+            Xdots.append(None)
+    x_dot = Xdots if all(x is not None for x in Xdots) else None  # else pysindy estimates u_t
     lib = PDELibrary(
         function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
         derivative_order=deriv_order, spatial_grid=xg,
         include_bias=True, is_uniform=True, periodic=True,
     )
     model = ps.SINDy(feature_library=lib, optimizer=ps.STLSQ(threshold=threshold, alpha=alpha))
-    model.fit(U, t=dt, x_dot=x_dot, feature_names=["u"])
+    model.fit(Us, t=dt, x_dot=x_dot, feature_names=["u"])
     return _model_to_dict(model)
 
 
-def _fit_weak(u, xg, dt, forcing, threshold, alpha, poly_degree, deriv_order, K):
+def _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order, K):
     from pysindy.feature_library import WeakPDELibrary
     from pysindy.utils import AxesArray
+    nt = blocks[0].shape[1]
+    # All blocks share one grid, so build the weak library once (its K random
+    # spatiotemporal integration subdomains are fixed at construction) and push every
+    # block through the SAME subdomains, then stack the K rows per block.
     lib = WeakPDELibrary(
         function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
         derivative_order=deriv_order,
-        spatiotemporal_grid=_spatiotemporal_grid(xg, dt, u.shape[1]),
+        spatiotemporal_grid=_spatiotemporal_grid(xg, dt, nt),
         include_bias=True, is_uniform=True, periodic=True, K=K,
     )
     axes = {"ax_spatial": [0], "ax_time": 1, "ax_coord": [2]}
-    U = AxesArray(u[:, :, None], axes)
-    lib.fit([U])
-    Theta = np.array(lib.transform([U])[0], subok=False, dtype=float)          # (K, n_feat)
-    ydot = np.array(lib.convert_u_dot_integral(U), subok=False, dtype=float).ravel()
-    if forcing is not None:
-        # F = time-antiderivative of f (cumulative trapezoid along time), so <f,phi>=<F_t,phi>
-        F = np.zeros_like(forcing)
-        F[:, 1:] = np.cumsum(0.5 * (forcing[:, 1:] + forcing[:, :-1]) * dt, axis=1)
-        Fa = AxesArray(F[:, :, None], axes)
-        ydot = ydot - np.array(lib.convert_u_dot_integral(Fa), subok=False, dtype=float).ravel()
+    lib.fit([AxesArray(blocks[0][:, :, None], axes)])
+    Thetas, ydots = [], []
+    for u, f in zip(blocks, fblocks):
+        if u.shape[1] != nt:
+            raise ValueError("weak SINDy blocks must share block_len (one shared grid)")
+        U = AxesArray(u[:, :, None], axes)
+        Thetas.append(np.array(lib.transform([U])[0], subok=False, dtype=float))   # (K, n_feat)
+        yd = np.array(lib.convert_u_dot_integral(U), subok=False, dtype=float).ravel()
+        if f is not None:
+            # F = per-block time-antiderivative of f (cumulative trapezoid), so <f,phi>=<F_t,phi>
+            F = np.zeros_like(f)
+            F[:, 1:] = np.cumsum(0.5 * (f[:, 1:] + f[:, :-1]) * dt, axis=1)
+            Fa = AxesArray(F[:, :, None], axes)
+            yd = yd - np.array(lib.convert_u_dot_integral(Fa), subok=False, dtype=float).ravel()
+        ydots.append(yd)
+    Theta = np.vstack(Thetas)
+    ydot = np.concatenate(ydots)
     xi = _stlsq(Theta, ydot, threshold, alpha)
     names = list(lib.get_feature_names(["u"]))
     terms = [f"{c:.3f} {n}" for n, c in zip(names, xi) if abs(c) > 0]
@@ -184,7 +216,7 @@ def run(noise_level=0.0, threshold=0.05, weak=False, out_dir=None):
     u = ld.noise_field(b, noise_level)
     xg = b["x_coarse"].astype(float); dt = b["dtc"]
     F = forcing_field(b["A"], b["w"], b["phi"], b["l"], b["N"], b["L"], xg, dt, u.shape[1])
-    fit = fit_pdefind(u, xg, dt, forcing=F, threshold=threshold, weak=weak)
+    fit = fit_pdefind([u], xg, dt, forcing=[F], threshold=threshold, weak=weak)
     result = {
         "method": "sindy_weak" if weak else "sindy",
         "noise_level": noise_level, "threshold": threshold, "grid": "coarse_s4",

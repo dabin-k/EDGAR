@@ -58,12 +58,55 @@ _SINDY = os.path.join(_HERE, "sindy")
 _SN_RESULTS = os.path.join(_HERE, "stencilnet", "results")
 _OUT = os.path.join(_HERE, "results")
 
+sys.path.insert(0, _HERE)
 sys.path.insert(0, _SINDY)
 sys.path.insert(0, os.path.join(_HERE, "..", "data_loader"))
 import load_data as ld  # noqa: E402
 import runner as sindy_runner  # noqa: E402  (bench/sindy/runner.py)
 
 TRUE = {"u_11": 0.02, "uu_1": -1.0}  # target Burgers operator (D=0.02)
+BLOCK_LEN = 200
+
+def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
+    """Split `field[:, cols]` back into its maximal runs of consecutive columns.
+
+    `block_split` returns the train (or test) columns as one concatenated index
+    array; this recovers the individual contiguous time-blocks, so a per-block
+    consumer (SINDy's joint fit, STENCIL-NET's rollout loss) never forms a
+    finite-difference / rollout window that straddles a block boundary.
+    """
+    cols = np.asarray(cols, int)
+    if cols.size == 0:
+        return []
+    breaks = np.where(np.diff(cols) != 1)[0] + 1
+    return [field[:, run] for run in np.split(cols, breaks)]
+
+
+def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
+    """Leak-free train/test masks over the teacher-forced restarts.
+
+    `teacher_forced_forecast` produces `n_starts = n_times - rollout_steps` restarts;
+    restart `i` seeds at column `i` and is scored against columns `i+1 … i+rollout_steps`,
+    so its whole window is `{i, …, i+rollout_steps}`. A restart is a *train* (resp.
+    *test*) restart only if that entire window lies in `train_cols` (resp. `test_cols`);
+    windows straddling a block boundary belong to neither, so no scored forecast crosses
+    the split. Both SINDy and STENCIL-NET score with these identical masks.
+
+    Returns:
+        (train_mask, test_mask), each a boolean array of length `n_starts`.
+    """
+    h = int(rollout_steps)
+    n_starts = n_times - h
+    is_tr = np.zeros(n_times, bool); is_tr[np.asarray(train_cols, int)] = True
+    is_te = np.zeros(n_times, bool); is_te[np.asarray(test_cols, int)] = True
+
+    def window_all(flag):
+        m = np.ones(n_starts, bool)
+        for k in range(h + 1):
+            m &= flag[k : k + n_starts]
+        return m
+
+    return window_all(is_tr), window_all(is_te)
 
 
 # ----------------------------------------------------------------------------
@@ -123,7 +166,7 @@ def make_rhs(names, coefs, dx):
 
 # ----------------------------------------------------------------------------
 def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
-                rollout_steps, MSE_CAP=1e3):
+                train_mask, test_mask, rollout_steps, MSE_CAP=1e3):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
@@ -131,7 +174,13 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
     rows = []
     for nl in levels:
         u = ld.noise_field(bundle, nl)
-        fit = sindy_runner.fit_pdefind([u], xg, dtc, forcing=[F], threshold=threshold, weak=weak)
+        # Cross-validated fit: SINDy sees only the TRAIN blocks, as a list of contiguous
+        # sub-fields (one joint equation; derivatives stay within a block). Then it is
+        # scored on the disjoint TEST blocks it never saw.
+        u_blocks = contiguous_blocks(u, train_cols)
+        F_blocks = contiguous_blocks(F, train_cols)
+        fit = sindy_runner.fit_pdefind(u_blocks, xg, dtc, forcing=F_blocks,
+                                       threshold=threshold, weak=weak)
         cmap = dict(zip(fit["names"], fit["coefs"]))
         N = make_rhs(fit["names"], fit["coefs"], dx)
         # teacher-forced restarts, identical to STENCIL-NET and EDGAR. A recovered
@@ -142,22 +191,21 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
         preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
         stable = bool(np.all(np.isfinite(preds)))
         preds_g = np.nan_to_num(preds, nan=1e30, posinf=1e30, neginf=-1e30)
-        heldout = np.arange(preds.shape[0]) >= train_cols
-        mse_full = min(ld.forecast_mse(preds_g, targets), MSE_CAP)
-        mse_hld = min(ld.forecast_mse(preds_g[heldout], targets[heldout]), MSE_CAP)
+        mse_tr = min(ld.forecast_mse(preds_g[train_mask], targets[train_mask]), MSE_CAP)
+        mse_te = min(ld.forecast_mse(preds_g[test_mask], targets[test_mask]), MSE_CAP)
         rows.append({
             "method": "sindy_weak" if weak else "sindy_strong",
             "noise_level": nl, "threshold": threshold,
             "equation": fit["equation"],
             "coef_u_xx": float(cmap.get("u_11", 0.0)),
             "coef_uu_x": float(cmap.get("uu_1", 0.0)),
-            "forecast_mse_full": mse_full, "forecast_mse_heldout": mse_hld,
+            "forecast_mse_train": mse_tr, "forecast_mse_test": mse_te,
             "stable": stable,
         })
     return rows
 
 
-def oracle_row(bundle, forcing_batched, rollout_steps, train_cols):
+def oracle_row(bundle, forcing_batched, rollout_steps, train_mask, test_mask):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
@@ -165,17 +213,18 @@ def oracle_row(bundle, forcing_batched, rollout_steps, train_cols):
     N = make_rhs(["u_11", "uu_1"], [TRUE["u_11"], TRUE["uu_1"]], dx)
     rhs = lambda state, t: N(state) + forcing_batched(t)  # noqa: E731
     preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
-    heldout = np.arange(preds.shape[0]) >= train_cols
     return {
-        "forecast_mse_full": ld.forecast_mse(preds, targets),
-        "forecast_mse_heldout": ld.forecast_mse(preds[heldout], targets[heldout]),
+        "forecast_mse_train": ld.forecast_mse(preds[train_mask], targets[train_mask]),
+        "forecast_mse_test": ld.forecast_mse(preds[test_mask], targets[test_mask]),
         "stable": bool(np.all(np.isfinite(preds))),
     }
 
 
 def load_stencilnet(min_epochs=30000):
     """Read converged STENCIL-NET runs from the GPU box. Un-converged smoke runs
-    (epochs < min_epochs) are skipped so a partial run does not pollute the plot."""
+    (epochs < min_epochs) are skipped so a partial run does not pollute the plot.
+    The runner must score on the SAME block split (forecast_mse_test); rows missing
+    that key are pre-CV runs and are skipped."""
     rows = []
     for path in sorted(glob.glob(os.path.join(_SN_RESULTS, "stencilnet_noise*.json"))):
         with open(path) as fh:
@@ -184,10 +233,14 @@ def load_stencilnet(min_epochs=30000):
             print(f"  [skip] {os.path.basename(path)}: epochs={r.get('epochs')} "
                   f"< {min_epochs} (not converged)")
             continue
+        if "forecast_mse_test" not in r:
+            print(f"  [skip] {os.path.basename(path)}: no forecast_mse_test "
+                  f"(pre-CV run; re-run stencilnet/runner.py)")
+            continue
         rows.append({
             "method": "stencilnet", "noise_level": r["noise_level"],
-            "forecast_mse_full": r.get("forecast_mse_full"),
-            "forecast_mse_heldout": r.get("forecast_mse_heldout"),
+            "forecast_mse_train": r.get("forecast_mse_train"),
+            "forecast_mse_test": r.get("forecast_mse_test"),
         })
     return rows
 
@@ -213,17 +266,17 @@ def make_plot(sindy_s, sindy_w, sn_rows, oracle, out_path):
     ax0.set_title("A. SINDy coefficient recovery")
     ax0.legend(fontsize=7, ncol=2)
 
-    # panel B: forecast MSE (shared metric)
+    # panel B: held-out forecast MSE (shared metric, cross-validated on TEST blocks)
     def _plot(ax, rows, style, label, color):
         xs = [r["noise_level"] for r in rows]
-        ys = [r["forecast_mse_full"] for r in rows]
+        ys = [r["forecast_mse_test"] for r in rows]
         ax.plot(xs, ys, style, color=color, label=label)
         for r in rows:  # mark unstable SINDy fits
             if not r.get("stable", True):
-                ax.plot(r["noise_level"], r["forecast_mse_full"], "x", color="red", ms=9, mew=2)
+                ax.plot(r["noise_level"], r["forecast_mse_test"], "x", color="red", ms=9, mew=2)
 
-    ax1.axhline(oracle["forecast_mse_full"], ls="--", c="0.5", lw=1,
-                label=f"oracle floor ({oracle['forecast_mse_full']:.2e})")
+    ax1.axhline(oracle["forecast_mse_test"], ls="--", c="0.5", lw=1,
+                label=f"oracle floor ({oracle['forecast_mse_test']:.2e})")
     _plot(ax1, sindy_s, "o-", "SINDy strong", "C0")
     _plot(ax1, sindy_w, "s-", "SINDy weak", "C1")
     if sn_rows:
@@ -232,8 +285,8 @@ def make_plot(sindy_s, sindy_w, sn_rows, oracle, out_path):
         ax1.plot([], [], "^-", color="C2", label="STENCIL-NET (pending GPU run)")
     ax1.set_yscale("log")
     ax1.set_xlabel("noise level σ (fraction of u_std)")
-    ax1.set_ylabel("forecast MSE vs clean field")
-    ax1.set_title("B. Forecast MSE (shared metric)")
+    ax1.set_ylabel("held-out forecast MSE vs clean field")
+    ax1.set_title("B. Held-out forecast MSE (shared metric)")
     ax1.legend(fontsize=7)
     ax1.text(0.02, 0.02, "red × = unstable integration (capped)", transform=ax1.transAxes,
              fontsize=6.5, color="red", va="bottom")
@@ -258,33 +311,43 @@ def main(levels, threshold):
         return sum(A[k] * np.sin(w[k] * tt + 2 * np.pi * l[k] * (xg[None, :] / L) + phi[k])
                    for k in range(N))
 
-    train_cols = 1001  # matches STENCIL-NET training window
+    # Shared leak-free CV split: SINDy and STENCIL-NET fit/train and score on the SAME
+    # alternating train/test blocks rollout_steps stays tied to EDGAR's horizon via load_data.
+    T = b["u_coarse"].shape[1]
     rollout_steps = ld.benchmark_rollout_steps()  # same horizon as EDGAR + STENCIL-NET
+    train_cols, test_cols = ld.block_split(T, block_len=BLOCK_LEN)
+    train_mask, test_mask = split_start_masks(train_cols, test_cols, T, rollout_steps)
 
-    sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F, train_cols, rollout_steps)
-    sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F, train_cols, rollout_steps)
-    oracle = oracle_row(b, forcing_batched, rollout_steps, train_cols)
+    sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F,
+                          train_cols, train_mask, test_mask, rollout_steps)
+    sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F,
+                          train_cols, train_mask, test_mask, rollout_steps)
+    oracle = oracle_row(b, forcing_batched, rollout_steps, train_mask, test_mask)
     sn_rows = load_stencilnet()
 
     results = {"threshold": threshold, "levels": list(levels), "oracle": oracle,
+               "split": {"block_len": BLOCK_LEN, "rollout_steps": rollout_steps,
+                         "n_train_starts": int(train_mask.sum()),
+                         "n_test_starts": int(test_mask.sum())},
                "sindy_strong": sindy_s, "sindy_weak": sindy_w, "stencilnet": sn_rows}
     with open(os.path.join(_OUT, "compare_results.json"), "w") as fh:
         json.dump(results, fh, indent=2)
 
     png = make_plot(sindy_s, sindy_w, sn_rows, oracle, os.path.join(_OUT, "sindy_vs_stencilnet.png"))
 
-    # console summary table
-    print(f"\nForecast MSE vs clean (threshold={threshold}), oracle floor="
-          f"{oracle['forecast_mse_full']:.3e}")
+    # console summary table — held-out (TEST-block) forecast MSE, the cross-validated metric
+    print(f"\nHeld-out forecast MSE vs clean (threshold={threshold}), oracle floor="
+          f"{oracle['forecast_mse_test']:.3e}  "
+          f"[{int(train_mask.sum())} train / {int(test_mask.sum())} test restarts]")
     hdr = f"{'noise':>6} | {'strong':>11} {'st?':>3} | {'weak':>11} {'st?':>3} | {'STENCIL-NET':>12}"
     print(hdr); print("-" * len(hdr))
     sn_by = {r["noise_level"]: r for r in sn_rows}
     for rs, rw in zip(sindy_s, sindy_w):
         nl = rs["noise_level"]
-        sn = sn_by.get(nl, {}).get("forecast_mse_full")
+        sn = sn_by.get(nl, {}).get("forecast_mse_test")
         sn_s = f"{sn:12.3e}" if sn is not None else f"{'pending':>12}"
-        print(f"{nl:6.3f} | {rs['forecast_mse_full']:11.3e} "
-              f"{'Y' if rs['stable'] else 'N':>3} | {rw['forecast_mse_full']:11.3e} "
+        print(f"{nl:6.3f} | {rs['forecast_mse_test']:11.3e} "
+              f"{'Y' if rs['stable'] else 'N':>3} | {rw['forecast_mse_test']:11.3e} "
               f"{'Y' if rw['stable'] else 'N':>3} | {sn_s}")
     print(f"\nwrote {_OUT}/compare_results.json and {png}")
     return results

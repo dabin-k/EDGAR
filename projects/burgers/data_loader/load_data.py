@@ -60,25 +60,21 @@ def noise_field(bundle: dict, noise_level: float) -> np.ndarray:
     return bundle[key]
 
 
-def block_split(n_times: int, block_len: int = 200, train_frac: float = 0.6, seed: int = 0):
-    """Leak-free train/test split by contiguous time blocks.
+def block_split(n_times: int, block_len: int = 200):
+    """Leak-free train/test split by contiguous time blocks, dealt alternately.
 
-    Chops the time axis into `block_len`-column blocks and assigns whole blocks
-    to train or test (never splitting a block), so no training window can peek
-    across the boundary into a test window. Mirrors the alternating-block scheme
-    used by synthetic_data_v2/v3. Returns (train_cols, test_cols) as int arrays
-    of column indices into the (space, time) field.
+    Chops the time axis into `block_len`-column blocks and deals whole blocks to
+    train / test in strict alternation starting from train (block 0 -> train,
+    block 1 -> test, block 2 -> train, ...), never splitting a block, so no training
+    window can peek across a boundary into a test window. With an odd block count
+    train keeps the extra block. Returns (train_cols, test_cols) as int arrays of 
+    column indices into the (space, time) field.
     """
     n_blocks = n_times // block_len
-    rng = np.random.RandomState(seed)
-    block_ids = np.arange(n_blocks)
-    rng.shuffle(block_ids)
-    n_train = max(1, int(round(train_frac * n_blocks)))
-    train_blocks = set(block_ids[:n_train].tolist())
     train_cols, test_cols = [], []
     for b in range(n_blocks):
         cols = np.arange(b * block_len, (b + 1) * block_len)
-        (train_cols if b in train_blocks else test_cols).append(cols)
+        (train_cols if b % 2 == 0 else test_cols).append(cols)
     train_cols = np.concatenate(train_cols) if train_cols else np.array([], int)
     test_cols = np.concatenate(test_cols) if test_cols else np.array([], int)
     return train_cols, test_cols
