@@ -82,31 +82,7 @@ def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
     return [field[:, run] for run in np.split(cols, breaks)]
 
 
-def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
-    """Leak-free train/test masks over the teacher-forced restarts.
-
-    `teacher_forced_forecast` produces `n_starts = n_times - rollout_steps` restarts;
-    restart `i` seeds at column `i` and is scored against columns `i+1 … i+rollout_steps`,
-    so its whole window is `{i, …, i+rollout_steps}`. A restart is a *train* (resp.
-    *test*) restart only if that entire window lies in `train_cols` (resp. `test_cols`);
-    windows straddling a block boundary belong to neither, so no scored forecast crosses
-    the split. Both SINDy and STENCIL-NET score with these identical masks.
-
-    Returns:
-        (train_mask, test_mask), each a boolean array of length `n_starts`.
-    """
-    h = int(rollout_steps)
-    n_starts = n_times - h
-    is_tr = np.zeros(n_times, bool); is_tr[np.asarray(train_cols, int)] = True
-    is_te = np.zeros(n_times, bool); is_te[np.asarray(test_cols, int)] = True
-
-    def window_all(flag):
-        m = np.ones(n_starts, bool)
-        for k in range(h + 1):
-            m &= flag[k : k + n_starts]
-        return m
-
-    return window_all(is_tr), window_all(is_te)
+split_start_masks = ld.split_start_masks   # shared with the STENCIL-NET/SINDy runners
 
 
 # ----------------------------------------------------------------------------
@@ -197,6 +173,7 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
             "method": "sindy_weak" if weak else "sindy_strong",
             "noise_level": nl, "threshold": threshold,
             "equation": fit["equation"],
+            "rollout_steps": rollout_steps,
             "coef_u_xx": float(cmap.get("u_11", 0.0)),
             "coef_uu_x": float(cmap.get("uu_1", 0.0)),
             "forecast_mse_train": mse_tr, "forecast_mse_test": mse_te,
@@ -220,13 +197,13 @@ def oracle_row(bundle, forcing_batched, rollout_steps, train_mask, test_mask):
     }
 
 
-def load_stencilnet(min_epochs=30000):
+def load_stencilnet(rollout_steps, min_epochs=30000):
     """Read converged STENCIL-NET runs from the GPU box. Un-converged smoke runs
     (epochs < min_epochs) are skipped so a partial run does not pollute the plot.
     The runner must score on the SAME block split (forecast_mse_test); rows missing
     that key are pre-CV runs and are skipped."""
     rows = []
-    for path in sorted(glob.glob(os.path.join(_SN_RESULTS, "stencilnet_noise*.json"))):
+    for path in sorted(glob.glob(os.path.join(_SN_RESULTS, f"rollout{rollout_steps}/stencilnet_noise*.json"))):
         with open(path) as fh:
             r = json.load(fh)
         if r.get("epochs", 0) < min_epochs:
@@ -238,7 +215,7 @@ def load_stencilnet(min_epochs=30000):
                   f"(pre-CV run; re-run stencilnet/runner.py)")
             continue
         rows.append({
-            "method": "stencilnet", "noise_level": r["noise_level"],
+            "method": "stencilnet", "noise_level": r["noise_level"], "rollout_steps": rollout_steps,
             "forecast_mse_train": r.get("forecast_mse_train"),
             "forecast_mse_test": r.get("forecast_mse_test"),
         })
@@ -246,6 +223,77 @@ def load_stencilnet(min_epochs=30000):
 
 
 # ----------------------------------------------------------------------------
+def make_sindy_coefficients_plot(sindy_s, sindy_w, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(6, 5))
+
+    # panel A: coefficient recovery (SINDy only)
+    levs = [r["noise_level"] for r in sindy_s]
+    plt.axhline(TRUE["uu_1"], ls="--", c="0.6", lw=1, label="true u·u_x (-1.0)")
+    plt.axhline(TRUE["u_11"], ls=":", c="0.6", lw=1, label="true u_xx (0.02)")
+    plt.plot(levs, [r["coef_uu_x"] for r in sindy_s], "o-", c="C0", label="strong: u·u_x")
+    plt.plot(levs, [r["coef_uu_x"] for r in sindy_w], "s-", c="C1", label="weak: u·u_x")
+    plt.plot(levs, [r["coef_u_xx"] for r in sindy_s], "o--", c="C0", alpha=0.5, label="strong: u_xx")
+    plt.plot(levs, [r["coef_u_xx"] for r in sindy_w], "s--", c="C1", alpha=0.5, label="weak: u_xx")
+    plt.xlabel("noise level σ (fraction of u_std)")
+    plt.ylabel("recovered coefficient")
+    plt.title("SINDy coefficient recovery")
+    plt.legend(fontsize=7, ncol=2)
+
+    plt.savefig(out_path, dpi=150)
+    return out_path
+
+
+def make_mse_plot(results_list, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_rollouts = len(results_list)
+    fig, axs = plt.subplots(1, n_rollouts, figsize=(16, 4.2))
+
+    # panel B: held-out forecast MSE (shared metric, cross-validated on TEST blocks)
+    def _plot(ax, rows, style, label, color):
+        xs = [r["noise_level"] for r in rows]
+        ys = [r["forecast_mse_test"] for r in rows]
+        ax.plot(xs, ys, style, color=color, label=label)
+        for r in rows:  # mark unstable SINDy fits
+            if not r.get("stable", True):
+                ax.plot(r["noise_level"], r["forecast_mse_test"], "x", color="red", ms=9, mew=2)
+    
+    for i, results in enumerate(results_list):
+        rollout_steps = results["rollout_steps"]
+        sindy_s = results["sindy_strong"]
+        sindy_w = results["sindy_weak"]
+        sn_rows = results.get("stencilnet", [])
+        oracle = results["oracle"]
+
+        ax = axs[i]
+        ax.set_title(f"Rollout Steps: {rollout_steps}")
+        ax.axhline(oracle["forecast_mse_test"], ls="--", c="0.5", lw=1,
+                    label=f"oracle floor ({oracle['forecast_mse_test']:.2e})")
+        _plot(ax, sindy_s, "o-", "SINDy strong", "C0")
+        _plot(ax, sindy_w, "s-", "SINDy weak", "C1")
+        if sn_rows:
+            _plot(ax, sorted(sn_rows, key=lambda r: r["noise_level"]), "^-", "STENCIL-NET", "C2")
+        else:
+            ax.plot([], [], "^-", color="C2", label="STENCIL-NET (pending GPU run)")
+        ax.set_yscale("log")
+        ax.set_xlabel("noise level σ (fraction of u_std)")
+        ax.set_ylabel("held-out forecast MSE vs clean field")
+        ax.set_title(f"Rollout steps {rollout_steps}")
+        ax.legend(fontsize=7)
+        ax.text(0.02, 0.02, "red × = unstable integration (capped)", transform=ax.transAxes,
+                 fontsize=6.5, color="red", va="bottom")
+
+    fig.suptitle("Held-out forecast MSE for different values of rollout_steps", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    return out_path
+
 def make_plot(sindy_s, sindy_w, sn_rows, oracle, out_path):
     import matplotlib
     matplotlib.use("Agg")
@@ -296,7 +344,7 @@ def make_plot(sindy_s, sindy_w, sn_rows, oracle, out_path):
     return out_path
 
 
-def main(levels, threshold):
+def main(levels, threshold, rollouts):
     warnings.filterwarnings("ignore")
     os.makedirs(_OUT, exist_ok=True)
     b = ld.load_bundle()
@@ -314,43 +362,52 @@ def main(levels, threshold):
     # Shared leak-free CV split: SINDy and STENCIL-NET fit/train and score on the SAME
     # alternating train/test blocks rollout_steps stays tied to EDGAR's horizon via load_data.
     T = b["u_coarse"].shape[1]
-    rollout_steps = ld.benchmark_rollout_steps()  # same horizon as EDGAR + STENCIL-NET
-    train_cols, test_cols = ld.block_split(T, block_len=BLOCK_LEN)
-    train_mask, test_mask = split_start_masks(train_cols, test_cols, T, rollout_steps)
+    results_list = []
+    for rollout_steps in rollouts:
+        print(f"\n=== rollout_steps={rollout_steps} ===")
+        train_cols, test_cols = ld.block_split(T, block_len=BLOCK_LEN)
+        train_mask, test_mask = split_start_masks(train_cols, test_cols, T, rollout_steps)
 
-    sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F,
-                          train_cols, train_mask, test_mask, rollout_steps)
-    sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F,
-                          train_cols, train_mask, test_mask, rollout_steps)
-    oracle = oracle_row(b, forcing_batched, rollout_steps, train_mask, test_mask)
-    sn_rows = load_stencilnet()
+        sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F,
+                            train_cols, train_mask, test_mask, rollout_steps)
+        sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F,
+                            train_cols, train_mask, test_mask, rollout_steps)
+        oracle = oracle_row(b, forcing_batched, rollout_steps, train_mask, test_mask)
+        sn_rows = load_stencilnet(rollout_steps)
 
-    results = {"threshold": threshold, "levels": list(levels), "oracle": oracle,
-               "split": {"block_len": BLOCK_LEN, "rollout_steps": rollout_steps,
-                         "n_train_starts": int(train_mask.sum()),
-                         "n_test_starts": int(test_mask.sum())},
-               "sindy_strong": sindy_s, "sindy_weak": sindy_w, "stencilnet": sn_rows}
-    with open(os.path.join(_OUT, "compare_results.json"), "w") as fh:
-        json.dump(results, fh, indent=2)
+        results = {"threshold": threshold, "levels": list(levels), "oracle": oracle, "rollout_steps": rollout_steps,
+                "split": {"block_len": BLOCK_LEN, "rollout_steps": rollout_steps,
+                            "n_train_starts": int(train_mask.sum()),
+                            "n_test_starts": int(test_mask.sum())},
+                "sindy_strong": sindy_s, "sindy_weak": sindy_w, "stencilnet": sn_rows}
+        results_list.append(results)
+        with open(os.path.join(_OUT, "compare_results.json"), "w") as fh:
+            json.dump(results_list, fh, indent=2)
 
-    png = make_plot(sindy_s, sindy_w, sn_rows, oracle, os.path.join(_OUT, "sindy_vs_stencilnet.png"))
+        # png = make_plot(sindy_s, sindy_w, sn_rows, oracle, os.path.join(_OUT, f"sindy_vs_stencilnet_n_rollout{rollout_steps}.png"))
 
-    # console summary table — held-out (TEST-block) forecast MSE, the cross-validated metric
-    print(f"\nHeld-out forecast MSE vs clean (threshold={threshold}), oracle floor="
-          f"{oracle['forecast_mse_test']:.3e}  "
-          f"[{int(train_mask.sum())} train / {int(test_mask.sum())} test restarts]")
-    hdr = f"{'noise':>6} | {'strong':>11} {'st?':>3} | {'weak':>11} {'st?':>3} | {'STENCIL-NET':>12}"
-    print(hdr); print("-" * len(hdr))
-    sn_by = {r["noise_level"]: r for r in sn_rows}
-    for rs, rw in zip(sindy_s, sindy_w):
-        nl = rs["noise_level"]
-        sn = sn_by.get(nl, {}).get("forecast_mse_test")
-        sn_s = f"{sn:12.3e}" if sn is not None else f"{'pending':>12}"
-        print(f"{nl:6.3f} | {rs['forecast_mse_test']:11.3e} "
-              f"{'Y' if rs['stable'] else 'N':>3} | {rw['forecast_mse_test']:11.3e} "
-              f"{'Y' if rw['stable'] else 'N':>3} | {sn_s}")
-    print(f"\nwrote {_OUT}/compare_results.json and {png}")
-    return results
+        # console summary table — held-out (TEST-block) forecast MSE, the cross-validated metric
+        print(f"\nHeld-out forecast MSE vs clean (threshold={threshold}), (n_rollout={rollout_steps}), oracle floor="
+            f"{oracle['forecast_mse_test']:.3e}  "
+            f"[{int(train_mask.sum())} train / {int(test_mask.sum())} test restarts]")
+        hdr = f"{'noise':>6} | {'strong':>11} {'st?':>3} | {'weak':>11} {'st?':>3} | {'STENCIL-NET':>12}"
+        print(hdr); print("-" * len(hdr))
+        sn_by = {r["noise_level"]: r for r in sn_rows}
+        for rs, rw in zip(sindy_s, sindy_w):
+            nl = rs["noise_level"]
+            sn = sn_by.get(nl, {}).get("forecast_mse_test")
+            sn_s = f"{sn:12.3e}" if sn is not None else f"{'pending':>12}"
+            print(f"{nl:6.3f} | {rs['forecast_mse_test']:11.3e} "
+                f"{'Y' if rs['stable'] else 'N':>3} | {rw['forecast_mse_test']:11.3e} "
+                f"{'Y' if rw['stable'] else 'N':>3} | {sn_s}")
+
+    # SINDy coefficinets remain the same across rollout_steps, so only plot once (the first rollout_steps)
+    png = make_sindy_coefficients_plot(sindy_s, sindy_w, os.path.join(_OUT, f"sindy_coefficients.png"))
+
+    # create rows containing noise_levels and forecast_test_mse for each method, and concatenate as a list
+    png = make_mse_plot(results_list, os.path.join(_OUT, f"sindy_vs_stencilnet_mse.png"))
+
+    return results_list
 
 
 if __name__ == "__main__":
@@ -358,5 +415,6 @@ if __name__ == "__main__":
     ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.01, 0.05, 0.1, 0.3])
     ap.add_argument("--threshold", type=float, default=0.01,
                     help="SINDy STLSQ threshold (0.01 keeps the true 0.02 u_xx term)")
+    ap.add_argument("--rollout_steps", type=int, nargs="+", default=[1, 2, 4, 8])
     args = ap.parse_args()
-    main(args.levels, args.threshold)
+    main(args.levels, args.threshold, args.rollout_steps)
