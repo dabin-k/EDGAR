@@ -49,7 +49,19 @@ def load_bundle(path: str | None = None) -> dict:
     with np.load(path) as z:
         out = {k: z[k] for k in z.files}
     # de-array 0-d scalars for ergonomics
-    for k in ("dxc", "dtc", "D", "L", "dt", "Lx", "Tsim", "N", "s_factor", "t_factor", "forcing_seed"):
+    for k in (
+        "dxc",
+        "dtc",
+        "D",
+        "L",
+        "dt",
+        "Lx",
+        "Tsim",
+        "N",
+        "s_factor",
+        "t_factor",
+        "forcing_seed",
+    ):
         if k in out:
             out[k] = out[k].item()
     return out
@@ -68,24 +80,67 @@ def noise_field(bundle: dict, noise_level: float) -> np.ndarray:
     return bundle[key]
 
 
-def block_split(n_times: int, block_len: int = 200):
-    """Leak-free train/test split by contiguous time blocks, dealt alternately.
+def train_test_blocks(n_times: int, block_len: int = 200):
+    """Which time blocks are dealt to train / test.
 
-    Chops the time axis into `block_len`-column blocks and deals whole blocks to
-    train / test in strict alternation starting from train (block 0 -> train,
-    block 1 -> test, block 2 -> train, ...), never splitting a block, so no training
-    window can peek across a boundary into a test window. With an odd block count
-    train keeps the extra block. Returns (train_cols, test_cols) as int arrays of 
-    column indices into the (space, time) field.
+    THE definition of the leak-free temporal split: the time axis is chopped into
+    `block_len`-column blocks and whole blocks are dealt to train / test in strict
+    alternation starting from train (block 0 -> train, block 1 -> test, ...), never
+    splitting a block, so no training window can peek across a boundary into a test
+    window. With an odd block count train keeps the extra block; any tail columns
+    beyond `n_blocks * block_len` are dropped.
+
+    Every consumer derives from this one function -- `block_split` for the
+    reference methods (which want columns) and `load_data` for EDGAR (which wants
+    blocks) -- so changing the split policy here changes it for all methods at once.
+
+    Args:
+        n_times: Length of the time axis.
+        block_len: Time-block length.
+
+    Returns:
+        (train_blocks, test_blocks), each an int array of block indices.
     """
-    n_blocks = n_times // block_len
-    train_cols, test_cols = [], []
-    for b in range(n_blocks):
-        cols = np.arange(b * block_len, (b + 1) * block_len)
-        (train_cols if b % 2 == 0 else test_cols).append(cols)
-    train_cols = np.concatenate(train_cols) if train_cols else np.array([], int)
-    test_cols = np.concatenate(test_cols) if test_cols else np.array([], int)
-    return train_cols, test_cols
+    blocks = np.arange(n_times // block_len)
+    return blocks[blocks % 2 == 0], blocks[blocks % 2 == 1]
+
+
+def block_split(n_times: int, block_len: int = 200):
+    """`train_test_blocks` expressed as column indices into the (space, time) field.
+
+    Returns (train_cols, test_cols) as int arrays.
+    """
+
+    def to_cols(blocks):
+        if blocks.size == 0:
+            return np.array([], int)
+        return np.concatenate(
+            [np.arange(b * block_len, (b + 1) * block_len) for b in blocks]
+        )
+
+    train_blocks, test_blocks = train_test_blocks(n_times, block_len)
+    return to_cols(train_blocks), to_cols(test_blocks)
+
+
+def discover_validate_samples(n_samples: int):
+    """Which samples of a dataset file are discover / validate.
+
+    THE definition of the sample-axis split: the first half of a file's samples are
+    discover, the rest validate. Since the samples differ only in viscosity `D`,
+    validate is a generalisation test over *unseen D*. EDGAR's `load_data` builds
+    its tensors from this, and the reference-method sweeps report their per-sample
+    scores aggregated over the same two groups, so one change here moves every
+    method's discover / validate partition together.
+
+    Args:
+        n_samples: Number of samples in the dataset file.
+
+    Returns:
+        (discover_idx, validate_idx), each an int array of sample indices.
+    """
+    n_disc = n_samples // 2
+    return np.arange(n_disc), np.arange(n_disc, n_samples)
+
 
 def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
     """Split `field[:, cols]` back into its maximal runs of consecutive columns.
@@ -100,6 +155,7 @@ def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
         return []
     breaks = np.where(np.diff(cols) != 1)[0] + 1
     return [field[:, run] for run in np.split(cols, breaks)]
+
 
 def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
     """Leak-free train/test masks over the teacher-forced restarts.
@@ -116,8 +172,10 @@ def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
     """
     h = int(rollout_steps)
     n_starts = n_times - h
-    is_tr = np.zeros(n_times, bool); is_tr[np.asarray(train_cols, int)] = True
-    is_te = np.zeros(n_times, bool); is_te[np.asarray(test_cols, int)] = True
+    is_tr = np.zeros(n_times, bool)
+    is_tr[np.asarray(train_cols, int)] = True
+    is_te = np.zeros(n_times, bool)
+    is_te[np.asarray(test_cols, int)] = True
 
     def window_all(flag):
         m = np.ones(n_starts, bool)
@@ -134,7 +192,8 @@ def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
     All methods are scored on this identical function so numbers are comparable:
     the target is always the noise-free ground truth, never the noisy observation.
     """
-    u_pred = np.asarray(u_pred); u_clean = np.asarray(u_clean)
+    u_pred = np.asarray(u_pred)
+    u_clean = np.asarray(u_clean)
     assert u_pred.shape == u_clean.shape, (u_pred.shape, u_clean.shape)
     return float(np.mean((u_pred - u_clean) ** 2))
 
@@ -187,7 +246,7 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
     n_starts = T - h
     starts = np.arange(n_starts)
 
-    state = u_clean[:, starts].T.copy()           # (n_starts, Lx) at t = starts*dtc
+    state = u_clean[:, starts].T.copy()  # (n_starts, Lx) at t = starts*dtc
     t = starts * dtc
     preds = np.empty((n_starts, h, Lx))
     for j in range(h):
@@ -204,8 +263,8 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
         preds[:, j] = state
         t = t + dtc
 
-    idx = starts[:, None] + 1 + np.arange(h)[None, :]   # (n_starts, h)
-    targets = u_clean.T[idx]                            # (n_starts, h, Lx)
+    idx = starts[:, None] + 1 + np.arange(h)[None, :]  # (n_starts, h)
+    targets = u_clean.T[idx]  # (n_starts, h, Lx)
     return preds, targets
 
 
@@ -269,8 +328,20 @@ def load_dataset(path: str) -> dict:
         )
     with np.load(path) as z:
         out = {k: z[k] for k in z.files}
-    for k in ("dxc", "dtc", "noise_level", "ic_seed", "L", "Lx", "dt", "Tsim",
-              "s_factor", "t_factor", "N", "forced"):
+    for k in (
+        "dxc",
+        "dtc",
+        "noise_level",
+        "ic_seed",
+        "L",
+        "Lx",
+        "dt",
+        "Tsim",
+        "s_factor",
+        "t_factor",
+        "N",
+        "forced",
+    ):
         if k in out:
             out[k] = out[k].item()
     return out
@@ -279,7 +350,7 @@ def load_dataset(path: str) -> dict:
 def load_data(
     data_path: str = "",
     block_len: int = 200,
-    train_frac: float = 0.5,   # kept for API symmetry; split is deterministic below
+    train_frac: float = 0.5,  # kept for API symmetry; split is deterministic below
     n_eval_samples: int = 4,
     random_seed: int = 0,
 ):
@@ -338,19 +409,25 @@ def load_data(
 
     recordings = [to_blocks(u) for u in fields]
 
-    n_disc = len(recordings) // 2
-    disc_recs, val_recs = recordings[:n_disc], recordings[n_disc:]
+    # Both splits come from the shared definitions above, so EDGAR and the
+    # reference-method sweeps partition the same data the same way.
+    disc_idx, val_idx = discover_validate_samples(len(recordings))
+    n_disc = len(disc_idx)
+    disc_recs = [recordings[i] for i in disc_idx]
+    val_recs = [recordings[i] for i in val_idx]
+    n_times = fields.shape[-1]
+    train_blocks, test_blocks = train_test_blocks(n_times, block_len)
 
-    def split(recs, start):
-        # stack recordings on the sample axis; alternate blocks -> train (start=0)
-        # / test (start=1), so each sample's params are fit and scored on disjoint
-        # leak-free blocks. All recordings share n_blocks, so the stack is regular.
-        return {"x": np.stack([r[np.arange(start, r.shape[0], 2)] for r in recs])}
+    def split(recs, blocks):
+        # stack recordings on the sample axis, keeping the train (or test) blocks,
+        # so each sample's params are fit and scored on disjoint leak-free blocks.
+        # All recordings share n_blocks, so the stack is regular.
+        return {"x": np.stack([r[blocks] for r in recs])}
 
-    X_disc_train = split(disc_recs, 0)
-    X_disc_test = split(disc_recs, 1)
-    X_val_train = split(val_recs, 0)
-    X_val_test = split(val_recs, 1)
+    X_disc_train = split(disc_recs, train_blocks)
+    X_disc_test = split(disc_recs, test_blocks)
+    X_val_train = split(val_recs, train_blocks)
+    X_val_test = split(val_recs, test_blocks)
 
     # X_eval: a few discover-train blocks per discover sample, for fingerprinting
     # and image feedback. _sample_indices maps each eval sample to its discover
@@ -365,7 +442,9 @@ def load_data(
     }
 
     def to_jax(d):
-        return {k: (jnp.array(v) if k != "_sample_indices" else v) for k, v in d.items()}
+        return {
+            k: (jnp.array(v) if k != "_sample_indices" else v) for k, v in d.items()
+        }
 
     return (
         (to_jax(X_disc_train), to_jax(X_disc_test)),
