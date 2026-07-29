@@ -160,22 +160,25 @@ def draw_forcing(N=20, Al=-0.1, Ar=0.1, wl=-0.4, wr=0.4, seed=0):
     return A, w, phi, l
 
 
-def draw_ic(x, L, seed, n_modes=4):
-    """Draw a random smooth periodic initial condition u0(x).
+def draw_ic(x, L, seed, n_modes=2):
+    # """Draw a random smooth periodic initial condition u0(x).
 
-    A sum of the first `n_modes` Fourier modes with seeded random amplitudes and
-    phases, normalised to unit peak amplitude so it sits in the same range as the
-    reference bump. Used to give the validate split a genuinely independent
-    initial condition while staying on the same attractor (see load_data).
-    """
+    # A sum of the first `n_modes` Fourier modes with seeded random amplitudes and
+    # phases, normalised to unit peak amplitude so it sits in the same range as the
+    # reference bump. Used to give the validate split a genuinely independent
+    # initial condition while staying on the same attractor (see load_data).
+    # """
+    # rng = np.random.RandomState(seed)
+    # u0 = np.zeros_like(x)
+    # for k in range(1, n_modes + 1):
+    #     a = rng.uniform(0.8, 1.1)
+    #     ph = 2.0 * np.pi * rng.rand()
+    #     u0 += a * np.sin(2.0 * np.pi * k * x / L + ph)
+    # return u0 / (np.max(np.abs(u0)) + 1e-12)
     rng = np.random.RandomState(seed)
-    u0 = np.zeros_like(x)
-    for k in range(1, n_modes + 1):
-        a = rng.uniform(-1.0, 1.0)
-        ph = 2.0 * np.pi * rng.rand()
-        u0 += a * np.sin(2.0 * np.pi * k * x / L + ph)
-    return u0 / (np.max(np.abs(u0)) + 1e-12)
-
+    center = rng.uniform(0, L)
+    amp = rng.uniform(0.7, 1.3)
+    return amp * np.exp(-((x - center) ** 2))
 
 def simulate(
     Lx=256,

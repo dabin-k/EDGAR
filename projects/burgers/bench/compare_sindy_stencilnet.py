@@ -107,10 +107,15 @@ def parse_term(name):
     return (poly, dorder)
 
 
-def make_rhs(names, coefs, dx):
+def make_rhs(names, coefs, dx, scheme="central"):
     """u_t = N(u): reaction (order0, pointwise) + advection (order1, LF flux)
        + diffusion (order2, central). Order-1 term c u^p u_x = d/dx[c/(p+1) u^(p+1)]
-       is integrated conservatively so shock-forming advection stays stable."""
+       is integrated conservatively so shock-forming advection stays stable. 'scheme' sets 
+       the interface dissipation alpha
+
+           'central' : alpha=0. No added dissipation. 
+           'lax' : Lax-Friedrichs (alpha = max wave speed) - adds dissipation to stabilize shocks.    
+    """
     react, flux, diff = [], [], []
     for n, c in zip(names, coefs):
         c = float(c)
@@ -133,7 +138,10 @@ def make_rhs(names, coefs, dx):
             out += c * (v ** p) * dx2(v)
         if flux:
             f = -sum(c / (p + 1) * v ** (p + 1) for c, p in flux)  # u_t = -f_x
-            alpha = np.max(np.abs(sum(c * v ** p for c, p in flux)), axis=-1, keepdims=True) + 1e-12
+            if scheme == "central":
+                alpha = 0.0
+            else:
+                alpha = np.max(np.abs(sum(c * v ** p for c, p in flux)), axis=-1, keepdims=True) + 1e-12
             Fp = 0.5 * (f + np.roll(f, -1, axis=-1)) - 0.5 * alpha * (np.roll(v, -1, axis=-1) - v)
             out += -(Fp - np.roll(Fp, 1, axis=-1)) / dx
         return out
@@ -142,7 +150,7 @@ def make_rhs(names, coefs, dx):
 
 # ----------------------------------------------------------------------------
 def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
-                train_mask, test_mask, rollout_steps, MSE_CAP=1e3):
+                train_mask, test_mask, rollout_steps, MSE_CAP=1e3, preds_save_outdir=None):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
@@ -165,6 +173,10 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
         # window from NaN-ing the whole forecast.
         rhs = lambda state, t: N(state) + forcing_batched(t)  # noqa: E731
         preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+        if preds_save_outdir:
+            weak_or_strong = "sindy_weak" if weak else "sindy_strong"
+            preds_save_outpath = os.path.join(preds_save_outdir, f"{weak_or_strong}_noise_level_{nl}.npz")
+            np.savez(preds_save_outpath, preds=preds, targets=targets)
         stable = bool(np.all(np.isfinite(preds)))
         preds_g = np.nan_to_num(preds, nan=1e30, posinf=1e30, neginf=-1e30)
         mse_tr = min(ld.forecast_mse(preds_g[train_mask], targets[train_mask]), MSE_CAP)
@@ -182,7 +194,7 @@ def sindy_sweep(levels, threshold, weak, bundle, forcing_batched, F, train_cols,
     return rows
 
 
-def oracle_row(bundle, forcing_batched, rollout_steps, train_mask, test_mask):
+def oracle_row(bundle, forcing_batched, rollout_steps, train_mask, test_mask, preds_save_outdir=None):
     xg = bundle["x_coarse"].astype(float)
     dtc = bundle["dtc"]
     dx = xg[1] - xg[0]
@@ -190,6 +202,9 @@ def oracle_row(bundle, forcing_batched, rollout_steps, train_mask, test_mask):
     N = make_rhs(["u_11", "uu_1"], [TRUE["u_11"], TRUE["uu_1"]], dx)
     rhs = lambda state, t: N(state) + forcing_batched(t)  # noqa: E731
     preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+    if preds_save_outdir:
+        preds_save_outpath = os.path.join(preds_save_outdir, f"oracle_preds_targets.npz")
+        np.savez(preds_save_outpath, preds=preds, targets=targets)
     return {
         "forecast_mse_train": ld.forecast_mse(preds[train_mask], targets[train_mask]),
         "forecast_mse_test": ld.forecast_mse(preds[test_mask], targets[test_mask]),
@@ -368,11 +383,13 @@ def main(levels, threshold, rollouts):
         train_cols, test_cols = ld.block_split(T, block_len=BLOCK_LEN)
         train_mask, test_mask = split_start_masks(train_cols, test_cols, T, rollout_steps)
 
+        # only save down preds if rollout_steps -- this is just to visualise the predictions for different noise levels
+        preds_save_outdir = os.path.join(_SINDY, f"results") if rollout_steps == 1 else None
         sindy_s = sindy_sweep(levels, threshold, False, b, forcing_batched, F,
-                            train_cols, train_mask, test_mask, rollout_steps)
+                            train_cols, train_mask, test_mask, rollout_steps, preds_save_outdir=preds_save_outdir)
         sindy_w = sindy_sweep(levels, threshold, True, b, forcing_batched, F,
-                            train_cols, train_mask, test_mask, rollout_steps)
-        oracle = oracle_row(b, forcing_batched, rollout_steps, train_mask, test_mask)
+                            train_cols, train_mask, test_mask, rollout_steps, preds_save_outdir=preds_save_outdir)
+        oracle = oracle_row(b, forcing_batched, rollout_steps, train_mask, test_mask, preds_save_outdir=preds_save_outdir)
         sn_rows = load_stencilnet(rollout_steps)
 
         results = {"threshold": threshold, "levels": list(levels), "oracle": oracle, "rollout_steps": rollout_steps,

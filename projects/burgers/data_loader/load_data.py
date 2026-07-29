@@ -79,6 +79,46 @@ def block_split(n_times: int, block_len: int = 200):
     test_cols = np.concatenate(test_cols) if test_cols else np.array([], int)
     return train_cols, test_cols
 
+def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
+    """Split `field[:, cols]` back into its maximal runs of consecutive columns.
+
+    `block_split` returns the train (or test) columns as one concatenated index
+    array; this recovers the individual contiguous time-blocks, so a per-block
+    consumer (SINDy's joint fit, STENCIL-NET's rollout loss) never forms a
+    finite-difference / rollout window that straddles a block boundary.
+    """
+    cols = np.asarray(cols, int)
+    if cols.size == 0:
+        return []
+    breaks = np.where(np.diff(cols) != 1)[0] + 1
+    return [field[:, run] for run in np.split(cols, breaks)]
+
+def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
+    """Leak-free train/test masks over the teacher-forced restarts.
+
+    `teacher_forced_forecast` produces `n_starts = n_times - rollout_steps` restarts;
+    restart `i` seeds at column `i` and is scored against columns `i+1 … i+rollout_steps`,
+    so its whole window is `{i, …, i+rollout_steps}`. A restart is a *train* (resp.
+    *test*) restart only if that entire window lies in `train_cols` (resp. `test_cols`);
+    windows straddling a block boundary belong to neither, so no scored forecast crosses
+    the split. Both SINDy and STENCIL-NET score with these identical masks.
+
+    Returns:
+        (train_mask, test_mask), each a boolean array of length `n_starts`.
+    """
+    h = int(rollout_steps)
+    n_starts = n_times - h
+    is_tr = np.zeros(n_times, bool); is_tr[np.asarray(train_cols, int)] = True
+    is_te = np.zeros(n_times, bool); is_te[np.asarray(test_cols, int)] = True
+
+    def window_all(flag):
+        m = np.ones(n_starts, bool)
+        for k in range(h + 1):
+            m &= flag[k : k + n_starts]
+        return m
+
+    return window_all(is_tr), window_all(is_te)
+
 
 def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
     """Shared benchmark metric: MSE of a prediction against the CLEAN field.
