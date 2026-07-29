@@ -16,9 +16,17 @@ project's own `evaluate/` builds its samples on top of this loader. Keeping the
 split here means both variants (and the two reference methods) share exactly the
 same held-out data.
 
-Regeneration: if `burgers_clean.npz` is absent, run
-`python -m projects.burgers.data_loader.regenerate` (see `regenerate.py`), or
-call `burgers_sim.simulate()/coarsen()/add_noise()` directly.
+Two dataset families live here:
+
+  * the original single-field *forced* bundle `burgers_clean.npz` (`load_bundle`,
+    `noise_field`), still consumed by the SINDy / STENCIL-NET benchmark scripts.
+    Regenerate with `python projects/burgers/data_loader/regenerate.py`.
+  * the shared *unforced* comparison datasets, one file per (initial condition,
+    noise level), each holding several samples that differ only in viscosity `D`
+    (`load_dataset`, and `load_data` on top of it). Written by
+    `python projects/burgers/data_loader/generate_datasets.py` to
+    `/home/dabin/data/burgers_simulated/ic_seed_{ic}_nl_{nl}.npz`. Noise is baked
+    into the file so EDGAR, SINDy and STENCIL-NET see the identical observations.
 """
 
 from __future__ import annotations
@@ -232,117 +240,94 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
 
 import jax.numpy as jnp
 
-def _unforced_coarse_field(
-    s_factor: int,
-    t_factor: int,
-    ic_seed: int | None = None,
-    noise_level: float = 0.0,
-    noise_seed: int = 0,
-):
-    """Simulate the autonomous (unforced) Burgers field and coarsen it.
 
-    `ic_seed=None` uses the reference Gaussian-bump initial condition; an integer
-    seed draws a random smooth IC (burgers_sim.draw_ic) — this is how the discover
-    and validate splits get independent trajectories on the same attractor.
+def load_dataset(path: str) -> dict:
+    """Load one benchmark dataset written by `generate_datasets.py`.
 
-    `noise_level` adds the reference observation noise
-    (noise_level * std(field) * N(0, 1)) to the coarse field. It is applied after
-    the cache, not baked into it: the cached field is always the clean ground
-    truth, so changing the noise level costs nothing and never invalidates a cache.
+    These are the shared unforced-Burgers files
+    (`/home/dabin/data/burgers_simulated/ic_seed_{ic}_nl_{nl}.npz`): one initial
+    condition, one noise level, and `n_samples` samples that differ only in their
+    viscosity `D`. Noise is baked in, so every method reads the identical
+    observations — that is the whole point of the file, and why nothing here
+    re-simulates or re-noises.
 
-    Cached next to this file (one `.npz` per IC), because the fine simulation
-    takes ~70 s. Delete the cache to force regeneration (e.g. after changing the
-    simulator).
+    Args:
+        path: Path to an `ic_seed_*_nl_*.npz` file.
+
+    Returns:
+        Dict of the npz contents with the 0-d metadata arrays unwrapped to
+        Python scalars. Key arrays: `u_noisy` and `u_clean`, both
+        `(n_samples, n_sensors, n_times)`, and `D`, `(n_samples,)`.
+
+    Raises:
+        FileNotFoundError: If `path` does not exist.
     """
-    # File-based import: this module is exec'd from source by EDGAR (no package
-    # context, so `from . import` would fail), but also imported normally by the
-    # benchmark scripts. Loading by path works in both.
-    import importlib.util
-
-    _spec = importlib.util.spec_from_file_location(
-        "burgers_sim", os.path.join(_HERE, "burgers_sim.py")
-    )
-    bs = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(bs)
-
-    cache = os.path.join(
-        _HERE,
-        "burgers_unforced_coarse.npz"
-        if ic_seed is None
-        else f"burgers_unforced_coarse_ic{ic_seed}.npz",
-    )
-    if os.path.exists(cache):
-        with np.load(cache) as z:
-            if int(z["s_factor"]) == s_factor and int(z["t_factor"]) == t_factor:
-                u_coarse, dxc, dtc = z["u_coarse"], float(z["dxc"]), float(z["dtc"])
-                if noise_level:
-                    u_coarse = bs.add_noise(u_coarse, noise_level, seed=noise_seed)
-                return u_coarse, dxc, dtc
-
-    sim = bs.simulate(forcing_seed=None, ic_seed=ic_seed)  # autonomous field
-    u_coarse = np.asarray(bs.coarsen(sim, s_factor=s_factor, t_factor=t_factor)["u_coarse"])
-    dxc = sim["L"] / u_coarse.shape[0]
-    dtc = sim["dt"] * t_factor
-    np.savez(
-        cache,
-        u_coarse=u_coarse, dxc=dxc, dtc=dtc,
-        s_factor=s_factor, t_factor=t_factor,
-    )
-    if noise_level:
-        u_coarse = bs.add_noise(u_coarse, noise_level, seed=noise_seed)
-    return u_coarse, dxc, dtc
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} not found. Generate the benchmark datasets with "
+            "`uv run python projects/burgers/data_loader/generate_datasets.py`."
+        )
+    with np.load(path) as z:
+        out = {k: z[k] for k in z.files}
+    for k in ("dxc", "dtc", "noise_level", "ic_seed", "L", "Lx", "dt", "Tsim",
+              "s_factor", "t_factor", "N", "forced"):
+        if k in out:
+            out[k] = out[k].item()
+    return out
 
 
 def load_data(
     data_path: str = "",
-    s_factor: int = 4,
-    t_factor: int = 20,
-    block_len: int = 500,
+    block_len: int = 200,
     train_frac: float = 0.5,   # kept for API symmetry; split is deterministic below
     n_eval_samples: int = 4,
     random_seed: int = 0,
-    n_recordings: int = 4,
-    ic_seed_base: int = 0,
-    noise_level: float = 0.0,
-    noise_seed: int = 0,
 ):
-    """Build EDGAR's sample tensors from N independent unforced coarse fields.
+    """Build EDGAR's sample tensors from one shared benchmark dataset file.
 
-    Each *recording* is a full autonomous trajectory with its own initial
-    condition; it becomes one EDGAR *sample* with its own independently-fitted
-    parameters, while every sample shares the same evolved model. The first
-    `n_recordings // 2` recordings form the discover samples, the rest the
-    validate samples, so validate is a genuine generalisation test: unseen
-    realisations of the same dynamics, not just other time-slices of a trajectory
-    discover already saw.
+    `data_path` points at an `ic_seed_*_nl_*.npz` written by
+    `generate_datasets.py`. Every sample in the file shares one initial condition
+    and one noise realisation but has its own viscosity `D`, so each becomes one
+    EDGAR *sample* with independently-fitted parameters while all samples share
+    the evolved model. The first half of the samples form the discover split and
+    the rest the validate split, so validate is a genuine generalisation test:
+    unseen viscosities, not just other time-slices of a field discover has seen.
 
-    Recording 0 keeps the reference Gaussian-bump IC (so the README scoreboard
-    posts stay comparable); recordings 1.. use random smooth ICs
-    (burgers_sim.draw_ic, seed = ic_seed_base + i).
-
-    Within each recording the time axis is cut into non-overlapping `block_len`
+    Within each sample the time axis is cut into non-overlapping `block_len`
     blocks and alternate blocks are dealt to train / test (leak-free:
     autoregressive windows never cross a block boundary, so no test step is
-    reachable from a train window, and no recording is shared across splits).
-    Both train and test span the whole trajectory, so neither is only-transient
-    or only-steady-state.
+    reachable from a train window, and no sample is shared across splits). Both
+    train and test span the whole trajectory, so neither is only-transient or
+    only-steady-state.
 
-    `noise_level` is a fraction of each field's own standard deviation (the
-    reference observation model, see burgers_sim.add_noise) and is applied to the
-    whole field — train, test and eval blocks alike. Targets are therefore noisy
-    too, so the achievable loss floor rises with noise_level: absolute losses are
-    NOT comparable across noise levels, nor to the zero-noise scoreboard posts in
-    the README.
+    The observations are the file's `u_noisy` field — noise is baked into the
+    dataset, applied to the whole field, train / test / eval blocks alike.
+    Targets are therefore noisy too, so the achievable loss floor rises with the
+    file's noise level: absolute losses are NOT comparable across noise levels,
+    nor to the zero-noise scoreboard posts in the README.
 
-    `data_path` is unused: the fields are generated deterministically by the
-    simulator (autonomous; the only seeds that matter are the per-recording ICs
-    and, when noise is on, `noise_seed`).
+    Args:
+        data_path: Path to an `ic_seed_*_nl_*.npz` dataset file.
+        block_len: Time-block length; alternate blocks go to train / test.
+        train_frac: Unused; kept for API symmetry (the split is deterministic).
+        n_eval_samples: Number of discover-train blocks in the eval tensor.
+        random_seed: Seed for choosing those eval blocks.
 
     Returns:
-        (X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval
-        each dict has key 'x' of shape (n_samples, n_blocks, n_sensors, block_len),
-        n_samples = n_recordings // 2.
+        (X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval.
+        Each dict has key 'x' of shape (n_samples, n_blocks, n_sensors, block_len),
+        with n_samples = (samples in the file) // 2.
+
+    Raises:
+        ValueError: If `data_path` is empty.
     """
+    if not data_path:
+        raise ValueError(
+            "burgers load_data requires io.data_path to point at a benchmark dataset, "
+            "e.g. /home/dabin/data/burgers_simulated/ic_seed_0_nl_0.0.npz "
+            "(write them with data_loader/generate_datasets.py)."
+        )
+    fields = load_dataset(data_path)["u_noisy"]
 
     def to_blocks(u):
         n_sensors, n_times = u.shape
@@ -351,22 +336,9 @@ def load_data(
         # (n_sensors, n_blocks, block_len) -> (n_blocks, n_sensors, block_len)
         return field.reshape(n_sensors, n_blocks, block_len).transpose(1, 0, 2)
 
-    recordings = [
-        to_blocks(
-            _unforced_coarse_field(
-                s_factor,
-                t_factor,
-                ic_seed=None if i == 0 else ic_seed_base + i,
-                noise_level=noise_level,
-                # distinct realisation per recording, else every sample sees the
-                # same noise field and the map can fit the noise itself
-                noise_seed=noise_seed + i,
-            )[0]
-        )
-        for i in range(n_recordings)
-    ]
+    recordings = [to_blocks(u) for u in fields]
 
-    n_disc = n_recordings // 2
+    n_disc = len(recordings) // 2
     disc_recs, val_recs = recordings[:n_disc], recordings[n_disc:]
 
     def split(recs, start):
