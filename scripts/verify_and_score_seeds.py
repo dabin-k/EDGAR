@@ -1,9 +1,8 @@
 import argparse
-import asyncio
 import numpy as np
 from edgar.io.config import Config
 from edgar.io.task_spec import TaskSpec
-from edgar.scoring.scoring import _get_params, _eval_loss, _optimize
+from edgar.scoring.scoring import _get_params, _eval_loss, _optimize, default_evaluate
 from pathlib import Path
 import os
 
@@ -13,7 +12,7 @@ _xla_flags = os.environ.get("XLA_FLAGS", "")
 if "--xla_gpu_enable_command_buffer=" not in _xla_flags:
     os.environ["XLA_FLAGS"] = (_xla_flags + " --xla_gpu_enable_command_buffer=").strip()
 
-async def main(project_name: str):
+def main(project_name: str):
     project_root = Path(__file__).resolve().parent.parent
     path = project_root / "projects" / project_name / "config.yaml"
 
@@ -27,7 +26,9 @@ async def main(project_name: str):
     X_discover, X_validate, X_eval = spec.load_data_fn(
         data_path=spec.io["data_path"], **spec.project_params
     )
-    
+
+    evaluate_fn = spec.evaluate_fn or default_evaluate
+
     # We will test both Seed Program 1 and Seed Program 2
     for idx, program in enumerate(spec.seed_programs):
         print("\n======================================")
@@ -37,7 +38,9 @@ async def main(project_name: str):
         # Load Python model code and translate manually for quick JAX compilation testing
         model_code = program.code.model
         
-        # Simple JAX translation rules
+        # Simple JAX translation rules. Note this is NOT the translation a real run
+        # uses: there, t_translate_seeds asks an LLM for model_jax. Substituting here
+        # keeps the script free of API calls
         model_jax_code = model_code.replace("import numpy as np", "import jax.numpy as jnp")
         model_jax_code = model_jax_code.replace("np.", "jnp.")
         program.code.model_jax = model_jax_code
@@ -61,7 +64,7 @@ async def main(project_name: str):
             params_init = _get_params(param_est_fn, program.default_params, X_discover[0])
             print("✓ Estimated initial parameters successfully")
             for k, v in params_init.items():
-                print(f"  - {k}: shape {v.shape}, mean {np.nanmean(v):.4f}")
+                print(f"  - {k}: shape {v.shape}, mean {np.nanmean(v):.4e}")
         except Exception as e:
             print(f"✗ Failed to estimate initial parameters: {e}")
             import traceback
@@ -70,8 +73,8 @@ async def main(project_name: str):
             
         # Evaluate initial loss
         try:
-            initial_loss = _eval_loss(model_fn, spec.loss_fn, params_init, X_discover[1])
-            print(f"Initial loss on discovery test split: {initial_loss:.4f}")
+            initial_loss = _eval_loss(model_fn, spec.loss_fn, evaluate_fn, params_init, X_discover[1])
+            print(f"Initial loss on discovery test split: {initial_loss:.4e}")
         except Exception as e:
             print(f"✗ Failed to evaluate initial loss: {e}")
             import traceback
@@ -83,7 +86,7 @@ async def main(project_name: str):
             print("Optimizing parameters...")
             gd_config = spec.scoring["gradient_descent"].copy()
             #gd_config["max_iter"] = 100
-            params_opt = _optimize(model_fn, spec.loss_fn, params_init, X_discover[0], gd_config)
+            params_opt = _optimize(model_fn, spec.loss_fn, evaluate_fn, params_init, X_discover[0], gd_config)
             print("✓ Optimization complete")
         except Exception as e:
             print(f"✗ Failed during optimization: {e}")
@@ -93,8 +96,8 @@ async def main(project_name: str):
             
         # Evaluate final loss
         try:
-            final_loss = _eval_loss(model_fn, spec.loss_fn, params_opt, X_discover[1])
-            print(f"Final loss on discovery test split: {final_loss:.4f}")
+            final_loss = _eval_loss(model_fn, spec.loss_fn, evaluate_fn, params_opt, X_discover[1])
+            print(f"Final loss on discovery test split: {final_loss:.4e}")
             if final_loss < initial_loss:
                 print("✓ Success: Loss decreased during optimization!")
             else:
@@ -107,4 +110,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify and score seed programs for a given project.")
     parser.add_argument("project_name", type=str, help="Name of the project directory under the projects/ directory.")
     args = parser.parse_args()
-    asyncio.run(main(args.project_name))
+    main(args.project_name)
