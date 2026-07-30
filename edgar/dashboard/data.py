@@ -81,11 +81,13 @@ def _reconstruct_model_prompt(run_dir: Path, pop: Population, idx: int) -> str:
     except Exception:
         return "(error: could not parse PromptSchema from task_spec.yaml)"
 
-    # Flatten config for build_prompt (evolution + llms + scoring)
+    # Flatten config for build_prompt. Must match TaskSpec.flat_config, or a prompt that
+    # templates a variable from one of these sections fails to render here.
     flat_config = {
         **(spec_doc.get("evolution") or {}),
         **(spec_doc.get("llms") or {}),
         **(spec_doc.get("scoring") or {}),
+        **(spec_doc.get("evaluate") or {}),
     }
 
     p = pop[idx]

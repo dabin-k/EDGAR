@@ -413,10 +413,10 @@ def _apply_overrides(config, overrides: list[str]) -> None:
     Apply dotted key=value overrides to a Config in-place.
 
     Each override must be of the form section.key=value, where section is one of
-    io, evolution, llms, scoring, project_params, run. The key may itself be dotted
-    to reach a nested config section, e.g. scoring.gradient_descent.max_iter. Values
-    are parsed as Python literals where possible (int, float, bool), otherwise kept
-    as strings.
+    io, evolution, llms, scoring, project_params, run, evaluate. The key may itself be
+    dotted to reach a nested config section, e.g. scoring.gradient_descent.max_iter.
+    Values are parsed as Python literals where possible (int, float, bool), otherwise
+    kept as strings.
 
     Example:
         _apply_overrides(config, ["evolution.n_generations=1", "io.data_path=/data/foo.npy"])
@@ -428,7 +428,17 @@ def _apply_overrides(config, overrides: list[str]) -> None:
     Raises:
         ValueError: If an override is not in the correct format or specifies an unknown section.
     """
-    sections = {"io", "evolution", "llms", "scoring", "project_params", "run"}
+    sections = {
+        "io",
+        "evolution",
+        "llms",
+        "scoring",
+        "project_params",
+        "run",
+        "evaluate",
+    }
+    # Free-form dicts on Config, so they take an item assignment rather than setattr.
+    dict_sections = {"project_params", "evaluate"}
     for override in overrides:
         if not override.startswith("--"):
             continue
@@ -453,8 +463,8 @@ def _apply_overrides(config, overrides: list[str]) -> None:
         except (ValueError, SyntaxError):
             value = value_str
 
-        if section == "project_params":
-            config.project_params[key] = value
+        if section in dict_sections:
+            getattr(config, section)[key] = value
         else:
             *nested, leaf = key.split(".")
             sub_model = getattr(config, section)

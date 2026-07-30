@@ -34,7 +34,15 @@ from ..io.config import REPO_ROOT, Config
 from .startup_script import CODE_DIR, DATA_DIR, render
 
 # Override sections accepted by edgar/cli.py:_apply_overrides (kept in sync with it).
-OVERRIDE_SECTIONS = {"io", "evolution", "llms", "scoring", "project_params", "run"}
+OVERRIDE_SECTIONS = {
+    "io",
+    "evolution",
+    "llms",
+    "scoring",
+    "project_params",
+    "run",
+    "evaluate",
+}
 
 GCP_DEFAULTS = {
     "machine_type": "g2-standard-8",
@@ -160,7 +168,13 @@ def validate_spec(spec: dict) -> dict:
     Returns:
         A dict ``{"gcp": <infra dict>, "runs": [<run dict>, ...]}`` where each run has
         ``config_rel``, ``config_path``, ``run_name``, ``n_replicas``, ``seed``,
-        ``overrides``.
+        ``overrides``, ``data_path``.
+
+    ``data_path`` is the *effective* dataset for the run: the run's own
+    ``io.data_path`` override if it sets one, else the config's. Resolving it here is
+    what lets several runs share one config while pointing at different datasets --
+    each distinct file is then staged to the bucket and the VM-side path is rewritten
+    by ``build_overrides``.
 
     Raises:
         ValueError: On missing required fields, absent configs, or bad override keys.
@@ -179,6 +193,7 @@ def validate_spec(spec: dict) -> dict:
         raise ValueError("spec must define at least one run under 'runs'")
 
     runs = []
+    config_data_paths: dict[str, str] = {}
     for i, r in enumerate(raw_runs):
         config = r.get("config")
         if not config:
@@ -189,6 +204,10 @@ def validate_spec(spec: dict) -> dict:
         config_rel = _repo_relative(config_path, "config")
         overrides = {**base_overrides, **(r.get("overrides") or {})}
         _validate_override_keys(overrides)
+        if config_rel not in config_data_paths:
+            config_data_paths[config_rel] = (
+                Config.from_yaml(config_rel).io.data_path or ""
+            )
         runs.append(
             {
                 "config_rel": config_rel,
@@ -199,6 +218,9 @@ def validate_spec(spec: dict) -> dict:
                 "n_replicas": int(r.get("n_replicas", 1)),
                 "seed": int(r.get("seed", base_seed)),
                 "overrides": overrides,
+                "data_path": str(
+                    overrides.get("io.data_path") or config_data_paths[config_rel]
+                ),
             }
         )
     return {"gcp": gcp, "runs": runs}
@@ -218,6 +240,7 @@ def flatten_runs(spec: dict) -> list[dict]:
                     "config_path": r["config_path"],
                     "seed": r["seed"] + i,
                     "overrides": r["overrides"],
+                    "data_path": r["data_path"],
                 }
             )
     names = [f["run_name"] for f in flat]
@@ -493,12 +516,18 @@ def build_overrides(flat_run: dict, data_basename: str | None) -> list[str]:
     Pins ``io.save_path`` to a unique VM-side dir (so the whole subtree is syncable),
     overrides ``io.data_path`` to the downloaded file when data is present, sets the
     per-replica seed, then appends the user overrides.
+
+    A user ``io.data_path`` override is dropped: it has already been consumed to pick
+    which dataset to stage, and its value is a *local* path that does not exist on the
+    VM. Emitting it would override the staged path and break the run.
     """
     overrides = [f"--io.save_path={CODE_DIR}/out/{flat_run['run_name']}"]
     if data_basename:
         overrides.append(f"--io.data_path={DATA_DIR}/{data_basename}")
     overrides.append(f"--run.random_seed={flat_run['seed']}")
     for key, value in flat_run["overrides"].items():
+        if key == "io.data_path":
+            continue
         overrides.append(f"--{key}={_fmt_value(value)}")
     return overrides
 
@@ -604,13 +633,14 @@ def preflight(spec: dict, dry_run: bool) -> None:
 
     for r in spec["runs"]:
         try:
-            data_path = Config.from_yaml(r["config_rel"]).io.data_path
+            Config.from_yaml(r["config_rel"])
         except Exception as e:  # noqa: BLE001
             problems.append(f"config {r['config_rel']} failed to load: {e}")
             continue
+        data_path = r["data_path"]
         if data_path and not _resolve_data_path(data_path).exists():
             problems.append(
-                f"data file not found locally: {data_path} (config {r['config_rel']})"
+                f"data file not found locally: {data_path} (run {r['run_name']})"
             )
 
     if problems:
@@ -727,20 +757,21 @@ def launch_gcp(spec_path: str, *, teardown=False, dry_run=False, fetch=False) ->
     upload_manifest(bucket, dry_run)
     secret_name = ensure_secret(gcp, dry_run)
 
-    # Upload each unique config's data file once (skip-if-present).
+    flat = flatten_runs(spec)
+
+    # Upload each distinct dataset once (skip-if-present). Keyed on the run's effective
+    # data path, not its config, so runs sharing one config can use different datasets.
     data_cache: dict[str, tuple[str | None, str | None]] = {}
-    for r in spec["runs"]:
-        cr = r["config_rel"]
-        if cr in data_cache:
+    for f in flat:
+        data_path = f["data_path"]
+        if data_path in data_cache:
             continue
-        data_path = Config.from_yaml(cr).io.data_path
-        data_cache[cr] = (
+        data_cache[data_path] = (
             ensure_data_uploaded(bucket, data_path, dry_run)
             if data_path
             else (None, None)
         )
 
-    flat = flatten_runs(spec)
     launch_id = _label(datetime.now().strftime("%Y%m%d-%H%M%S"))
     user = _label(getpass.getuser())
 
@@ -750,9 +781,8 @@ def launch_gcp(spec_path: str, *, teardown=False, dry_run=False, fetch=False) ->
 
     summary = []
     for f in flat:
-        _uri, basename = data_cache[f["config_rel"]]
+        data_uri, basename = data_cache[f["data_path"]]
         f["overrides_list"] = build_overrides(f, basename)
-        data_uri = data_cache[f["config_rel"]][0]
         vm = create_vm(gcp, f, data_uri, secret_name, launch_id, user, dry_run)
         summary.append((f["run_name"], vm, f"gs://{bucket}/results/{f['run_name']}"))
 

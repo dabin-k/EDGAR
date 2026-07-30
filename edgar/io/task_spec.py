@@ -507,16 +507,21 @@ class TaskSpec:
         """Merges relevant configuration sections into a single dictionary for prompt variable lookup.
 
         This property flattens configuration parameters from the `evolution`, `llms`,
-        and `scoring` sections into a single dictionary. This is particularly useful
-        for prompt templating, where prompts declare variables by name (e.g.,
+        `scoring` and `evaluate` sections into a single dictionary. This is particularly
+        useful for prompt templating, where prompts declare variables by name (e.g.,
         `num_parents`, `max_lines`) without needing to know which specific
         configuration section they belong to.
 
+        `evaluate` is included so a project can describe its own evaluation protocol in
+        the prompt without restating the numbers (e.g. burgers templates
+        `{input_sequence_length}` and `{rollout_steps}` into its model prompt, and they
+        then stay correct when the config changes).
+
         Returns:
             dict: A merged dictionary containing configuration parameters from the
-                `evolution`, `llms`, and `scoring` sections.
+                `evolution`, `llms`, `scoring` and `evaluate` sections.
         """
-        return {**self.evolution, **self.llms, **self.scoring}
+        return {**self.evolution, **self.llms, **self.scoring, **self.evaluate}
 
     # ── prompt schemas ──
 
