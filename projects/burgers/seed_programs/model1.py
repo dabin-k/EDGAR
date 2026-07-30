@@ -10,7 +10,8 @@ def model(data, params):
       * Integrator: forward Euler, u(t) = u(t-1) + RHS. First order, single lag
         The Euler dt is folded into c.
 
-    data['x'] : (n_sensors, max_length); column -1 most recent, sensors periodic.
+    data['x'] : (n_sensors, input_sequence_length); column -1 most recent, sensors periodic.
+    This model uses only the most recent column
 
     Returns:
         np.ndarray: predicted field at the next step, (n_sensors,).

@@ -19,14 +19,15 @@ model:
 
     Below are {num_parents} models predicting how the measured displacements evolve in time, sorted from worst to best. 
 
-    **How the model is used, and how the loss is computed.** Let x(s) be the displacement at all sensors at time s. For every start time t:
+    **How the model is used, and how the loss is computed.** Let x(s) be the displacement at all sensors at time s, and let m = {input_sequence_length} be the width of the window the model sees. For every start time t:
 
-        w1 = [x(t-1), x(t)]    p1 = model(w1)    # prediction of x(t+1)
-        w2 = [x(t),   p1   ]   p2 = model(w2)    # prediction of x(t+2)
+        w1 = [x(t-m+1), ..., x(t-1), x(t)]    p1 = model(w1)    # prediction of x(t+1)
+        w2 = [x(t-m+2), ..., x(t),   p1   ]   p2 = model(w2)    # prediction of x(t+2)
         ...
-        each step feeds the model its own previous prediction, for 2 steps
+        the window slides one column left per step: it drops its oldest lag and
+        appends the model's own previous prediction. This runs for {rollout_steps} steps.
 
-        loss = mean over all t, all horizons h in 1..2, and all sensors of ( ph - x(t+h) )^2
+        loss = mean over all t, all horizons k in 1..{rollout_steps}, and all sensors of ( pk - x(t+k) )^2
 
     After the first step the model runs on its own output, so errors compound. A model that is plausible one step ahead but has the dynamics wrong will drift over the rollout and be punished. 
 
@@ -41,7 +42,7 @@ model:
 
     * Import any packages you use.
     * Model signature must be `def model(data, params):`.
-    * `data['x']` is the window, shape (n_sensors, max_length). Column -1 is the most recent step, column -2 the one before. This is the only information you get: no external input, and no sight of the step you are predicting.
+    * `data['x']` is the window, shape (n_sensors, {input_sequence_length}). Column -1 is the most recent step, column -2 the one before it, and so on back to column -{input_sequence_length}, the oldest. All {input_sequence_length} lags are available to you. This is the only information you get: no external input, and no sight of the step you are predicting.
     * Sensors wrap around (periodic). Reach a neighbour with `np.roll(u, 1)` (left) or `np.roll(u, -1)` (right). Work in sensor-index units — any physical spacing is absorbed into your free parameters.
     * `params` is a dict of named arrays/scalars (e.g. params['decay_rate']). All free parameters must be numeric.
     * Free parameters are penalized elementwise: an (n_sensors, n_sensors) matrix of couplings costs n_sensors^2.
@@ -52,15 +53,17 @@ model:
   image_analysis_instructions: |
     **Image Analysis Instructions:**
 
-    The attached figure has one row per model, above a row showing the data.
+    The attached figure has a top row showing the data, and one row below it per model.
 
-    *Left, heatmaps.* Sensors (in position order) by time, for one block. Red is positive displacement, blue negative, white zero; all heatmaps share one colour scale, so they are directly comparable. The top panel is the data. Each panel below is that model's prediction of the same block 2 steps ahead, i.e. after 2 steps of running on its own output.
+    *Left, heatmaps.* Sensors (in position order) by time, for two blocks laid side by side. Red is positive displacement, blue negative, **white zero**; all heatmaps share one colour scale, so they are directly comparable. **Black means no value there** - either NaN, or a column the model was not asked to predict. The vertical black band down the middle is the boundary between the two blocks: they are NOT contiguous in time, and at least a whole block's worth of time has been cut out between them, so nothing carries across that band. A black patch anywhere else in a model's panel means that model produced NaN or infinity and diverged. 
+    
+    The top panel is the data. Each panel below is that model's prediction of the same two blocks {rollout_steps} steps ahead, i.e. after {rollout_steps} steps of running on its own output. Predictions sit in the time column they are predicting, so panels line up column by column with the data above; the black stripe at the start of each block is the lead-in, where there is not yet enough history to start a rollout.
 
-    *Right, line plots.* The top panel shows the true displacement of three sensors, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three sensors, in matching colours. Thin solid = residual one step ahead; thick dashed = 2 steps ahead. A perfect model leaves both flat at zero.
+    *Right, line plots.* The top panel shows the true displacement of three sensors, marked by dotted lines in the data heatmap. Below, for each model, is that model's residual (prediction minus data) for those same three sensors, in matching colours. Thin solid = residual one step ahead; thick dashed = {rollout_steps} steps ahead. A perfect model leaves both flat at zero. The vertical line marks the same block boundary as in the heatmaps.
 
     Consider:
 
-    **Growth with horizon.** How much larger is the 2-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds.
+    **Growth with horizon.** How much larger is the {rollout_steps}-step residual than the one-step residual? Large growth means the model is locally passable but its dynamics are wrong, and the error compounds.
 
     **Structure.** Does the residual vary smoothly with time, or look like noise? Smooth variation is a systematic failure, and its shape is evidence about what the model is missing.
 
@@ -75,7 +78,7 @@ parameter_estimator:
 
     **The estimator does not see the same data as the model. Read this before writing any indexing.**
 
-    The *model* is called once per prediction step, on a short window: `data['x']` has shape `(n_sensors, max_length)`.
+    The *model* is called once per prediction step, on a short window: `data['x']` has shape `(n_sensors, {input_sequence_length})`.
 
     The *estimator* is called once per recording, on that recording's entire training split:
 

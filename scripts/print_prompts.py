@@ -108,7 +108,13 @@ def print_prompts_for_project(project: str) -> None:
 
     parents = [make_parent(*p) for p in ALL_PARENTS[:num_parents]]
     current = make_current("Asymmetric Von Mises", model_code=CURRENT_MODEL)
-    flat_config = {"num_parents": num_parents, "max_lines": 30, "swear_words": "lstsq, scipy.optimize, curve_fit"}
+    flat_config = {
+        "num_parents": num_parents,
+        "max_lines": 30,
+        "swear_words": "lstsq, scipy.optimize, curve_fit",
+        # projects may template their own evaluate keys (e.g. burgers' input_sequence_length)
+        **config.evaluate,
+    }
 
     print(f"\n{SEP}")
     print(f"PROJECT: {project} — MODEL PROMPT (explore, {num_parents} parents)")

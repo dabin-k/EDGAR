@@ -8,7 +8,8 @@ def model(data, params):
             u(t) = u(t-1) + 1.5 * RHS(u(t-1)) - 0.5 * RHS(u(t-2))
             The step dt is folded into k.
 
-    data['x'] : (n_sensors, max_length); column -1 most recent, -2 previous, periodic.
+    data['x'] : (n_sensors, input_sequence_length); column -1 most recent, -2 previous,
+    periodic. This model uses the two most recent columns
 
     Returns:
         np.ndarray: predicted field at the next step, (n_sensors,).
