@@ -5,10 +5,17 @@ terms {1, u, u^2, u_x, u u_x, u_xx, ...} fit by STLSQ sparse regression. This is
 `SINDy` variant we settled on for this benchmark (the field is already in the right
 coordinates, so no autoencoder — see journal/burgers_benchmark_plan.md, Decision 1).
 
-Fairness with STENCIL-NET: STENCIL-NET is *given* the known forcing f(x,t) (it enters
-its loss as the fc terms). So SINDy must get the same known forcing. We subtract the
-analytic f(x,t) from the estimated u_t before regression, so SINDy fits the homogeneous
-operator u_t - f = N(u, u_x, u_xx, ...). Without this the forcing corrupts the whole fit.
+`run()` reads the shared *unforced* datasets (`ic_seed_*_nl_*.npz`), one sample at a
+time. Each sample has its own viscosity D, so the target operator is
+u_t = D u_xx - u u_x and coefficient recovery is checked against a per-sample truth.
+The fit is horizon-independent (SINDy recovers a continuous operator), so ONE fit is
+scored at every rollout horizon -- unlike STENCIL-NET, which retrains per horizon.
+
+Forcing is still supported by fit_pdefind for the older forced bundle. Fairness with
+STENCIL-NET there: STENCIL-NET is *given* the known forcing f(x,t) (it enters its loss
+as the fc terms). So SINDy must get the same known forcing. We subtract the analytic
+f(x,t) from the estimated u_t before regression, so SINDy fits the homogeneous operator
+u_t - f = N(u, u_x, u_xx, ...). Without this the forcing corrupts the whole fit.
 
 Two library variants (see fit_pdefind):
   * strong (default): PDELibrary, differentiates the data to build u_t and the spatial
@@ -34,11 +41,15 @@ notes 2026-07-20 + 2026-07-20_weak_sindy.md):
     the coarse grid still climbs 0.17 (Nx=256) -> 0.71 (Nx=64); the forcing modes are low
     (l_k in {2,3,4}), so it is not forcing under-resolution.
 
+NOTE on the STLSQ threshold: the true u_xx coefficient IS the sample's D, as small as
+0.005, so the old default of 0.01 thresholded the true diffusion term away *by
+construction* on the low-D samples. The default is now 0.002, below every true D.
+
 CLI:
-    python runner.py --noise 0.0            # strong fit on shared coarse bundle
-    python runner.py --sweep                # full noise sweep, writes results/
-    python runner.py --sweep --weak         # integral-SINDy noise sweep
-Runs locally on CPU (seconds).
+    python runner.py --data-path .../ic_seed_0_nl_0.0.npz --sample-idx 1
+    python runner.py --data-path .../ic_seed_0_nl_0.1.npz --sample-idx 1 --weak
+    python sweep.py                         # 3 noise x 4 samples x {strong, weak}
+Runs locally on CPU (seconds per fit).
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -56,6 +68,9 @@ from pysindy.differentiation import FiniteDifference
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "data_loader"))
 import load_data as ld  # noqa: E402
+
+_DEFAULT_DATA_DIR = "/home/dabin/data/burgers_simulated"
+MSE_CAP = 1e3
 
 
 def forcing_field(A, w, phi, l, N, L, xg, dt, nt):
@@ -70,7 +85,7 @@ def forcing_field(A, w, phi, l, N, L, xg, dt, nt):
     return F
 
 def fit_pdefind(blocks, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
-                poly_degree=2, deriv_order=2, weak=False, K=500):
+                poly_degree=2, deriv_order=2, weak=False, K=500, seed=0):
     """Fit PDE-FIND jointly over a list of time-blocks. Returns {equation, names, coefs}.
 
     blocks : a list of (Nx, nt_b) contiguous time-blocks (a single field is just a
@@ -102,6 +117,13 @@ def fit_pdefind(blocks, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
               "integral SINDy" variant the Champion paper cites. Validated: with the
               forcing correction it recovers 0.02 u_xx - 1.0 u u_x on the FORCED fine
               grid, and stays robust to sigma=0.1 (see journal 2026-07-20_weak_sindy.md).
+    seed    : WEAK path only. WeakPDELibrary picks its K integration subdomains from the
+              global np.random and exposes no seed, so repeat fits on identical data
+              return different coefficients. This pins the draw. The scatter it pins is
+              real, not numerical: over repeat draws the diffusion coefficient is stable
+              to ~1-2% at high D but the advective one moves by tens of percent at low D
+              (see journal 2026-07-29), so single-draw coefficients should not be quoted
+              to more precision than that.
     """
     if not isinstance(blocks, (list, tuple)):
         raise TypeError("blocks must be a list of (Nx, nt_b) time-blocks (use [field] for one)")
@@ -109,7 +131,8 @@ def fit_pdefind(blocks, xg, dt, forcing=None, threshold=0.05, alpha=1e-5,
     if len(fblocks) != len(blocks):
         raise ValueError(f"forcing has {len(fblocks)} blocks but blocks has {len(blocks)}")
     if weak:
-        return _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order, K)
+        return _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order,
+                         K, seed)
     return _fit_strong(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order)
 
 
@@ -142,19 +165,32 @@ def _fit_strong(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_or
     return _model_to_dict(model)
 
 
-def _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order, K):
+def _fit_weak(blocks, xg, dt, fblocks, threshold, alpha, poly_degree, deriv_order, K,
+              seed=0):
     from pysindy.feature_library import WeakPDELibrary
     from pysindy.utils import AxesArray
     nt = blocks[0].shape[1]
     # All blocks share one grid, so build the weak library once (its K random
     # spatiotemporal integration subdomains are fixed at construction) and push every
     # block through the SAME subdomains, then stack the K rows per block.
-    lib = WeakPDELibrary(
-        function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
-        derivative_order=deriv_order,
-        spatiotemporal_grid=_spatiotemporal_grid(xg, dt, nt),
-        include_bias=True, is_uniform=True, periodic=True, K=K,
-    )
+    #
+    # WeakPDELibrary draws those subdomain centres from the GLOBAL np.random and has no
+    # seed argument of its own, so two runs on identical data return different
+    # coefficients. Seed around the construction (restoring the caller's RNG state
+    # afterwards, so this stays a local effect) to make the fit reproducible. Note this
+    # pins the draw; it does not remove the underlying subdomain-draw variance, which is
+    # real and largest for the advective coefficient at low D.
+    rng_state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        lib = WeakPDELibrary(
+            function_library=PolynomialLibrary(degree=poly_degree, include_bias=False),
+            derivative_order=deriv_order,
+            spatiotemporal_grid=_spatiotemporal_grid(xg, dt, nt),
+            include_bias=True, is_uniform=True, periodic=True, K=K,
+        )
+    finally:
+        np.random.set_state(rng_state)
     axes = {"ax_spatial": [0], "ax_time": 1, "ax_coord": [2]}
     lib.fit([AxesArray(blocks[0][:, :, None], axes)])
     Thetas, ydots = [], []
@@ -209,21 +245,153 @@ def _spatiotemporal_grid(xg, dt, nt):
     return np.stack([XX, TT], axis=-1)
 
 
-def run(noise_level=0.0, threshold=0.05, weak=False, out_dir=None):
+# ----------------------------------------------------------------------------
+# recovered-PDE -> RHS, with a shock-capturing integrator. Moved here from
+# compare_sindy_stencilnet.py: this runner needs them to score its own fits, and
+# the compare script re-exports them.
+# ----------------------------------------------------------------------------
+def parse_term(name):
+    """PDELibrary feature name -> (poly_power_outside_deriv, deriv_order).
+
+    'uu_1'->(1,1), 'u^2u_11'->(2,2), 'u'->(1,0), 'u^2'->(2,0), '1'->(0,0)."""
+    name = name.strip()
+    if name in ("1", ""):
+        return (0, 0)
+    dorder = 0
+    base = name
+    if "_" in name:
+        base, ones = name.rsplit("_", 1)
+        dorder = len(ones)
+    E = 0
+    for tok in re.findall(r"u(?:\^(\d+))?", base):
+        E += int(tok) if tok else 1
+    poly = E - (1 if dorder > 0 else 0)  # one u lives inside the derivative
+    return (poly, dorder)
+
+
+def make_rhs(names, coefs, dx, scheme="central"):
+    """u_t = N(u): reaction (order0, pointwise) + advection (order1, LF flux)
+       + diffusion (order2, central). Order-1 term c u^p u_x = d/dx[c/(p+1) u^(p+1)]
+       is integrated conservatively so shock-forming advection stays stable. 'scheme' sets
+       the interface dissipation alpha
+
+           'central' : alpha=0. No added dissipation.
+           'lax' : Lax-Friedrichs (alpha = max wave speed) - adds dissipation to stabilize shocks.
+    """
+    react, flux, diff = [], [], []
+    for n, c in zip(names, coefs):
+        c = float(c)
+        if c == 0:
+            continue
+        p, d = parse_term(n)
+        (react if d == 0 else flux if d == 1 else diff).append((c, p))
+
+    # np.roll on axis=-1 (the spatial axis) so N works on both a single field (Lx,)
+    # and a batch of restart states (n_starts, Lx) — teacher_forced_forecast steps
+    # all restarts at once. alpha (local wave speed) is per-row via keepdims.
+    def dx2(v):
+        return (np.roll(v, -1, axis=-1) - 2 * v + np.roll(v, 1, axis=-1)) / dx ** 2
+
+    def N(v):
+        out = np.zeros_like(v)
+        for c, p in react:
+            out += c * v ** p
+        for c, p in diff:
+            out += c * (v ** p) * dx2(v)
+        if flux:
+            f = -sum(c / (p + 1) * v ** (p + 1) for c, p in flux)  # u_t = -f_x
+            if scheme == "central":
+                alpha = 0.0
+            else:
+                alpha = np.max(np.abs(sum(c * v ** p for c, p in flux)), axis=-1, keepdims=True) + 1e-12
+            Fp = 0.5 * (f + np.roll(f, -1, axis=-1)) - 0.5 * alpha * (np.roll(v, -1, axis=-1) - v)
+            out += -(Fp - np.roll(Fp, 1, axis=-1)) / dx
+        return out
+    return N
+
+
+def _score(rhs, u_clean, dtc, train_cols, test_cols, rollout_steps):
+    """Forecast MSE + persistence floor on the shared teacher-forced restarts."""
+    T = u_clean.shape[1]
+    preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+    stable = bool(np.all(np.isfinite(preds)))
+    preds = np.nan_to_num(preds, nan=1e30, posinf=1e30, neginf=-1e30)
+    p_preds, p_targets = ld.teacher_forced_forecast(
+        lambda state, t_arr: np.zeros_like(state), u_clean, dtc, rollout_steps)
+    tr, te = ld.split_start_masks(train_cols, test_cols, T, rollout_steps)
+    mse_tr = min(ld.forecast_mse(preds[tr], targets[tr]), MSE_CAP)
+    mse_te = min(ld.forecast_mse(preds[te], targets[te]), MSE_CAP)
+    pers_tr = ld.forecast_mse(p_preds[tr], p_targets[tr])
+    pers_te = ld.forecast_mse(p_preds[te], p_targets[te])
+    return {
+        "rollout_steps": rollout_steps, "stable": stable,
+        "n_train_starts": int(tr.sum()), "n_test_starts": int(te.sum()),
+        "forecast_mse_train": mse_tr, "forecast_mse_test": mse_te,
+        "persistence_mse_train": pers_tr, "persistence_mse_test": pers_te,
+        "skill_test": 1.0 - mse_te / pers_te,
+    }
+
+
+def run(data_path, sample_idx, weak=False, threshold=0.002, rollout_steps=(1, 2, 4),
+        block_len=200, out_dir=None):
+    """Fit one sample of a shared benchmark dataset and score it at several horizons.
+
+    The fit uses only the TRAIN blocks (leak-free ld.block_split), as a list of
+    contiguous sub-fields so no derivative / weak-integral window straddles a
+    boundary, then is scored on the disjoint TEST blocks it never saw.
+
+    Unlike STENCIL-NET, the fit does NOT depend on rollout_steps -- SINDy recovers a
+    continuous operator, and the horizon only changes how far it is rolled at score
+    time. So one fit is scored at every horizon rather than refitted per horizon.
+
+    The true operator is u_t = D u_xx - u u_x with D the sample's own viscosity, so
+    coefficient recovery is checked against a target that moves per sample.
+    """
+    ds = ld.load_dataset(data_path)
     out_dir = out_dir or os.path.join(_HERE, "results")
     os.makedirs(out_dir, exist_ok=True)
-    b = ld.load_bundle()
-    u = ld.noise_field(b, noise_level)
-    xg = b["x_coarse"].astype(float); dt = b["dtc"]
-    F = forcing_field(b["A"], b["w"], b["phi"], b["l"], b["N"], b["L"], xg, dt, u.shape[1])
-    fit = fit_pdefind([u], xg, dt, forcing=[F], threshold=threshold, weak=weak)
+    sample_idx = int(sample_idx)
+
+    xg = ds["x_coarse"].astype(float)
+    dtc = ds["dtc"]
+    dx = float(xg[1] - xg[0])
+    D = float(ds["D"][sample_idx])
+    noise_level = float(ds["noise_level"])
+    ic_seed = int(ds["ic_seed"])
+    if ds["forced"]:
+        raise ValueError(f"{data_path} is forced; this runner handles the unforced datasets")
+    u_obs = ds["u_noisy"][sample_idx]
+    u_clean = ds["u_clean"][sample_idx]
+    T = u_clean.shape[1]
+
+    train_cols, test_cols = ld.block_split(T, block_len=block_len)
+    fit = fit_pdefind(ld.contiguous_blocks(u_obs, train_cols), xg, dtc, forcing=None,
+                      threshold=threshold, weak=weak)
+    cmap = dict(zip(fit["names"], fit["coefs"]))
+    N = make_rhs(fit["names"], fit["coefs"], dx)
+    rhs = lambda state, t_arr: N(state)  # noqa: E731  (unforced: no time dependence)
+
+    horizons = [_score(rhs, u_clean, dtc, train_cols, test_cols, int(h))
+                for h in rollout_steps]
+
+    coef_u_xx = float(cmap.get("u_11", 0.0))
+    coef_uu_x = float(cmap.get("uu_1", 0.0))
     result = {
-        "method": "sindy_weak" if weak else "sindy",
-        "noise_level": noise_level, "threshold": threshold, "grid": "coarse_s4",
-        "n_x": int(u.shape[0]), "equation": fit["equation"],
-        "feature_names": fit["names"], "coefficients": fit["coefs"],
+        "method": "sindy_weak" if weak else "sindy_strong",
+        "data_path": data_path, "ic_seed": ic_seed, "sample_idx": sample_idx, "D": D,
+        "noise_level": noise_level, "threshold": threshold, "block_len": block_len,
+        "n_x": int(u_clean.shape[0]),
+        "equation": fit["equation"], "feature_names": fit["names"],
+        "coefficients": fit["coefs"],
+        "n_terms": int(sum(1 for c in fit["coefs"] if c != 0)),
+        # truth is u_t = D u_xx - u u_x, so the u_xx target moves with the sample
+        "coef_u_xx": coef_u_xx, "true_u_xx": D,
+        "coef_uu_x": coef_uu_x, "true_uu_x": -1.0,
+        "rel_err_u_xx": (coef_u_xx - D) / D,
+        "rel_err_uu_x": (coef_uu_x + 1.0) / 1.0,
+        "horizons": horizons,
     }
-    tag = ("weak_" if weak else "") + f"noise{noise_level}"
+    tag = f"{'weak' if weak else 'strong'}_nl{noise_level}_s{sample_idx}"
     with open(os.path.join(out_dir, f"sindy_{tag}.json"), "w") as fh:
         json.dump(result, fh, indent=2)
     return result
@@ -231,12 +399,22 @@ def run(noise_level=0.0, threshold=0.05, weak=False, out_dir=None):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--noise", type=float, default=0.0)
-    ap.add_argument("--threshold", type=float, default=0.05)
+    ap.add_argument("--data-path", required=True, dest="data_path",
+                    help="ic_seed_*_nl_*.npz written by data_loader/generate_datasets.py")
+    ap.add_argument("--sample-idx", type=int, required=True, dest="sample_idx")
+    ap.add_argument("--threshold", type=float, default=0.002,
+                    help="STLSQ threshold; must sit below the smallest true D (0.005)")
     ap.add_argument("--weak", action="store_true", help="use WeakPDELibrary (integral SINDy)")
-    ap.add_argument("--sweep", action="store_true")
+    ap.add_argument("--rollout-steps", type=int, nargs="+", default=[1, 2, 4],
+                    dest="rollout_steps")
     args = ap.parse_args()
-    levels = [0.0, 0.01, 0.05, 0.1, 0.3] if args.sweep else [args.noise]
-    for nl in levels:
-        r = run(noise_level=nl, threshold=args.threshold, weak=args.weak)
-        print(f"noise={nl}: (u)' = {r['equation']}")
+    r = run(data_path=args.data_path, sample_idx=args.sample_idx,
+            threshold=args.threshold, weak=args.weak, rollout_steps=args.rollout_steps)
+    print(f"D={r['D']}  nl={r['noise_level']}  {r['method']}")
+    print(f"  (u)' = {r['equation']}")
+    print(f"  u_xx {r['coef_u_xx']:.5f} (true {r['true_u_xx']:.3f})  "
+          f"uu_x {r['coef_uu_x']:.3f} (true -1.0)")
+    for h in r["horizons"]:
+        print(f"  h={h['rollout_steps']}: mse_test {h['forecast_mse_test']:.3e} "
+              f"pers {h['persistence_mse_test']:.3e} skill {h['skill_test']:.5f} "
+              f"stable={h['stable']}")

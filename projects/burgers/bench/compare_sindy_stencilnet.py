@@ -46,7 +46,6 @@ import argparse
 import glob
 import json
 import os
-import re
 import warnings
 
 import sys
@@ -85,67 +84,11 @@ def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
 split_start_masks = ld.split_start_masks   # shared with the STENCIL-NET/SINDy runners
 
 
-# ----------------------------------------------------------------------------
-# recovered-PDE -> RHS, with a shock-capturing integrator (see module docstring)
-# ----------------------------------------------------------------------------
-def parse_term(name):
-    """PDELibrary feature name -> (poly_power_outside_deriv, deriv_order).
-
-    'uu_1'->(1,1), 'u^2u_11'->(2,2), 'u'->(1,0), 'u^2'->(2,0), '1'->(0,0)."""
-    name = name.strip()
-    if name in ("1", ""):
-        return (0, 0)
-    dorder = 0
-    base = name
-    if "_" in name:
-        base, ones = name.rsplit("_", 1)
-        dorder = len(ones)
-    E = 0
-    for tok in re.findall(r"u(?:\^(\d+))?", base):
-        E += int(tok) if tok else 1
-    poly = E - (1 if dorder > 0 else 0)  # one u lives inside the derivative
-    return (poly, dorder)
-
-
-def make_rhs(names, coefs, dx, scheme="central"):
-    """u_t = N(u): reaction (order0, pointwise) + advection (order1, LF flux)
-       + diffusion (order2, central). Order-1 term c u^p u_x = d/dx[c/(p+1) u^(p+1)]
-       is integrated conservatively so shock-forming advection stays stable. 'scheme' sets 
-       the interface dissipation alpha
-
-           'central' : alpha=0. No added dissipation. 
-           'lax' : Lax-Friedrichs (alpha = max wave speed) - adds dissipation to stabilize shocks.    
-    """
-    react, flux, diff = [], [], []
-    for n, c in zip(names, coefs):
-        c = float(c)
-        if c == 0:
-            continue
-        p, d = parse_term(n)
-        (react if d == 0 else flux if d == 1 else diff).append((c, p))
-
-    # np.roll on axis=-1 (the spatial axis) so N works on both a single field (Lx,)
-    # and a batch of restart states (n_starts, Lx) — teacher_forced_forecast steps
-    # all restarts at once. alpha (local wave speed) is per-row via keepdims.
-    def dx2(v):
-        return (np.roll(v, -1, axis=-1) - 2 * v + np.roll(v, 1, axis=-1)) / dx ** 2
-
-    def N(v):
-        out = np.zeros_like(v)
-        for c, p in react:
-            out += c * v ** p
-        for c, p in diff:
-            out += c * (v ** p) * dx2(v)
-        if flux:
-            f = -sum(c / (p + 1) * v ** (p + 1) for c, p in flux)  # u_t = -f_x
-            if scheme == "central":
-                alpha = 0.0
-            else:
-                alpha = np.max(np.abs(sum(c * v ** p for c, p in flux)), axis=-1, keepdims=True) + 1e-12
-            Fp = 0.5 * (f + np.roll(f, -1, axis=-1)) - 0.5 * alpha * (np.roll(v, -1, axis=-1) - v)
-            out += -(Fp - np.roll(Fp, 1, axis=-1)) / dx
-        return out
-    return N
+# recovered-PDE -> RHS with a shock-capturing integrator; these live in the SINDy
+# runner now (it needs them to score its own fits) and are re-exported here so this
+# script's call sites are unchanged.
+parse_term = sindy_runner.parse_term
+make_rhs = sindy_runner.make_rhs
 
 
 # ----------------------------------------------------------------------------
