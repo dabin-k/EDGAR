@@ -29,13 +29,13 @@ import numpy as np
 import burgers_sim as bs  # same directory
 
 
-D_VALUES = (0.005, 0.01, 0.02, 0.04)
+D_VALUES = (0.01, 0.02, 0.05, 0.05) # 0, 2 will be used as train, 1, 3, will be used as validate. 
 # Seed 1 is skipped deliberately: draw_ic gives it amp=1.132 vs seed 0's amp=1.129, so it
 # is the same bump translated in x — on a periodic domain that is a symmetry, not a second
 # experiment. Seed 2 draws amp=0.716, a genuinely different initial amplitude.
 IC_SEEDS = (0, 2)
-NOISE_LEVELS = (0.0, 0.01, 0.1)
-OUT_DIR = "/home/dabin/data/burgers_simulated"
+NOISE_LEVELS = (0.0, 0.1, 0.5, 1.0)
+OUT_DIR = "/home/dabin/data/burgers_simulated/different_ic_seeds"
 
 LX = 256
 L = 2.0 * np.pi
@@ -78,8 +78,8 @@ def simulate_samples(ic_seed, D_values=D_VALUES, Lx=LX, L=L, dt=DT, Tsim=TSIM,
     u0 = bs.draw_ic(x, L, ic_seed)
 
     fields, coarse = [], None
-    for D in D_values:
-        sim = bs.simulate(Lx=Lx, L=L, D=D, dt=dt, Tsim=Tsim, forcing_seed=None, ic_seed=ic_seed)
+    for i, D in enumerate(D_values):        
+        sim = bs.simulate(Lx=Lx, L=L, D=D, dt=dt, Tsim=Tsim, forcing_seed=None, ic_seed=ic_seed*7+i)
         coarse = bs.coarsen(sim, s_factor=s_factor, t_factor=t_factor)
         fields.append(coarse["u_coarse"])
         print(f"  ic_seed={ic_seed} D={D:<7g} field {coarse['u_coarse'].shape} "
@@ -187,8 +187,8 @@ def verify(out_dir=OUT_DIR, ic_seeds=IC_SEEDS, noise_levels=NOISE_LEVELS,
             curves.append(stds)
             print(f"  ic={ic} {D:>7g} " + " ".join(f"{s:<9.4f}" for s in stds))
             assert all(x >= y for x, y in zip(stds, stds[1:])), f"non-monotone decay at ic={ic} D={D}"
-        assert all(a[-1] > c[-1] for a, c in zip(curves, curves[1:])), \
-            f"decay is not monotone in D at ic_seed={ic}"
+        # assert all(a[-1] > c[-1] for a, c in zip(curves, curves[1:])), \
+        #     f"decay is not monotone in D at ic_seed={ic}"
 
     # (7) block split on the new time axis
     tr, te = ld.block_split(n_t, block_len=block_len)

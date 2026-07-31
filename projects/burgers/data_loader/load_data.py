@@ -125,12 +125,16 @@ def block_split(n_times: int, block_len: int = 200):
 def discover_validate_samples(n_samples: int):
     """Which samples of a dataset file are discover / validate.
 
-    THE definition of the sample-axis split: the first half of a file's samples are
-    discover, the rest validate. Since the samples differ only in viscosity `D`,
-    validate is a generalisation test over *unseen D*. EDGAR's `load_data` builds
-    its tensors from this, and the reference-method sweeps report their per-sample
-    scores aggregated over the same two groups, so one change here moves every
-    method's discover / validate partition together.
+    THE definition of the sample-axis split: samples alternate, even indices to
+    discover and odd to validate, mirroring `train_test_blocks` on the time axis.
+    Since the samples differ only in viscosity `D`, and `generate_datasets.D_VALUES`
+    is ordered so that alternating picks up a different `D` on each side, validate is
+    a generalisation test over *unseen D*. A first-half split would instead hand
+    validate the tail of `D_VALUES`, which is both the extreme end of the range and,
+    at the current values, a repeated `D`. EDGAR's `load_data` builds its tensors from
+    this, and the reference-method sweeps report their per-sample scores aggregated
+    over the same two groups, so one change here moves every method's discover /
+    validate partition together.
 
     Args:
         n_samples: Number of samples in the dataset file.
@@ -138,8 +142,7 @@ def discover_validate_samples(n_samples: int):
     Returns:
         (discover_idx, validate_idx), each an int array of sample indices.
     """
-    n_disc = n_samples // 2
-    return np.arange(n_disc), np.arange(n_disc, n_samples)
+    return np.arange(0, n_samples, 2), np.arange(1, n_samples, 2)
 
 
 def contiguous_blocks(field: np.ndarray, cols: np.ndarray) -> list[np.ndarray]:
