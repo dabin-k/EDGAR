@@ -119,7 +119,7 @@ def rescore_stencilnet(data_dir, levels, weights_dir, device, dry_run):
         r, j = ckpt["rollout_steps"], ckpt["sample_idx"]
         res_path = os.path.join(
             _HERE, "stencilnet", "results", f"rollout{r}",
-            f"stencilnet_nl{ckpt['noise_level']}_s{j}.json",
+            f"stencilnet_ic{ckpt['ic_seed']}_nl{ckpt['noise_level']}_s{j}.json",
         )
         with open(res_path) as fh:
             old = json.load(fh)
@@ -184,7 +184,8 @@ def _report(cell):
     for h, old in zip(cell["horizons_noisy_scored"], _aligned(cell)):
         flag = "" if h["stable"] else "  UNSTABLE"
         print(
-            f"{cell['method']:>13} nl={cell['noise_level']:<5} s={cell['sample_idx']} "
+            f"{cell['method']:>13} ic={cell['ic_seed']} "
+            f"nl={cell['noise_level']:<5} s={cell['sample_idx']} "
             f"D={cell['D']:.3f} h={h['rollout_steps']} | "
             f"mse_test {h['forecast_mse_test']:.3e} (was {old['forecast_mse_test']:.3e}) "
             f"| skill {h['skill_test']:7.4f} (was {old['skill_test']:7.4f}){flag}",
@@ -206,12 +207,22 @@ def _summarise(cells, n_samples):
     disc_idx, val_idx = ld.discover_validate_samples(n_samples)
     disc, val = set(disc_idx.tolist()), set(val_idx.tolist())
     rows = []
-    for method, nl in sorted({(c["method"], c["noise_level"]) for c in cells}):
-        group = [c for c in cells if c["method"] == method and c["noise_level"] == nl]
+    # ic_seed is a grouping key, not something to average over: the seeds are
+    # different initial conditions, so a mean across them hides which one is hard.
+    for method, ic, nl in sorted(
+        {(c["method"], c["ic_seed"], c["noise_level"]) for c in cells}
+    ):
+        group = [
+            c
+            for c in cells
+            if c["method"] == method
+            and c["ic_seed"] == ic
+            and c["noise_level"] == nl
+        ]
         horizons = sorted(
             {h["rollout_steps"] for c in group for h in c["horizons_noisy_scored"]}
         )
-        row = {"method": method, "noise_level": nl, "by_horizon": []}
+        row = {"method": method, "ic_seed": ic, "noise_level": nl, "by_horizon": []}
         for h in horizons:
             def mean_over(idxs, key, _h=h):
                 vals = [
@@ -271,7 +282,7 @@ def main(data_dir, levels, weights_dir, block_len, device, methods, dry_run):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=_DEFAULT_DATA_DIR, dest="data_dir")
-    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.01, 0.1])
+    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.1, 0.5, 1.0])
     ap.add_argument("--weights-dir", default=_DEFAULT_WEIGHTS_DIR, dest="weights_dir")
     ap.add_argument("--block-len", type=int, default=200, dest="block_len")
     ap.add_argument("--device", default=None, help="cuda / cpu; default auto-detect")

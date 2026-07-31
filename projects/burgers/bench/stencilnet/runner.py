@@ -29,8 +29,8 @@ same number of steps it is graded on (was a fixed m=4 in the reference).
 CLI:
     python runner.py --data-path .../ic_seed_0_nl_0.0.npz --sample-idx 1 --epochs 30000
     python runner.py --data-path .../ic_seed_0_nl_0.1.npz --sample-idx 1   # noise-as-latent path
-Outputs a per-run dict to results/rollout<r>/stencilnet_nl<level>_s<j>.json, a
-forecast field to results/rollout<r>/stencilnet_pred_nl<level>_s<j>.npz, and the
+Outputs a per-run dict to results/rollout<r>/stencilnet_ic<ic>_nl<level>_s<j>.json, a
+forecast field to results/rollout<r>/stencilnet_pred_ic<ic>_nl<level>_s<j>.npz, and the
 trained weights to <weights_dir>/ic<ic>_nl<level>_r<r>_s<j>.pt.
 """
 
@@ -335,7 +335,7 @@ def run(
         "skill_test": 1.0 - mse_test / pers_test,
         "loss_hist": loss_hist,
     }
-    tag = f"nl{noise_level}_s{sample_idx}"
+    tag = f"ic{ic_seed}_nl{noise_level}_s{sample_idx}"
     with open(os.path.join(out_dir, f"stencilnet_{tag}.json"), "w") as fh:
         json.dump(result, fh, indent=2)
     # one-step-ahead teacher-forced field (preds[:, 0]) for visualisation

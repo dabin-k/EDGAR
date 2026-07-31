@@ -396,7 +396,7 @@ def run(data_path, sample_idx, weak=False, threshold=0.002, rollout_steps=(1, 2,
         "rel_err_uu_x": (coef_uu_x + 1.0) / 1.0,
         "horizons": horizons,
     }
-    tag = f"{'weak' if weak else 'strong'}_nl{noise_level}_s{sample_idx}"
+    tag = f"{'weak' if weak else 'strong'}_ic{ic_seed}_nl{noise_level}_s{sample_idx}"
     with open(os.path.join(out_dir, f"sindy_{tag}.json"), "w") as fh:
         json.dump(result, fh, indent=2)
     return result

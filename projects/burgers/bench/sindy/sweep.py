@@ -4,14 +4,14 @@ Mirrors bench/stencilnet/sweep.py so the two reference methods are produced the 
 way, with one structural difference: **SINDy's fit does not depend on the rollout
 horizon.** It recovers a continuous operator, and the horizon only changes how far
 that operator is rolled at score time, so each fit is scored at every horizon rather
-than refitted per horizon. That makes this 3 x 4 x 2 = 24 fits (seconds each), not
-72 — against STENCIL-NET's 36 separately-trained nets.
+than refitted per horizon. That makes this 4 x 4 x 2 = 32 fits (seconds each), not
+96 — against STENCIL-NET's 48 separately-trained nets.
 
 Run:
     python sweep.py
     python sweep.py --levels 0.0 --samples 1 --dry-run
-Writes results/sindy_sweep.json (every fit tagged with noise_level, sample_idx, D,
-variant, plus its per-horizon scores) and per-fit JSON to results/.
+Writes results/sindy_sweep_ic<seed>.json (every fit tagged with noise_level,
+sample_idx, D, variant, plus its per-horizon scores) and per-fit JSON to results/.
 """
 
 from __future__ import annotations
@@ -168,9 +168,10 @@ def main(
                 all_results.append(res)
 
     payload = {"runs": all_results, "summary": _summarise(all_results, n_samples)}
-    with open(os.path.join(out_dir, "sindy_sweep.json"), "w") as fh:
+    sweep_path = os.path.join(out_dir, f"sindy_sweep_ic{ic_seed}.json")
+    with open(sweep_path, "w") as fh:
         json.dump(payload, fh, indent=2)
-    print(f"wrote {out_dir}/sindy_sweep.json  ({len(all_results)} fits)")
+    print(f"wrote {sweep_path}  ({len(all_results)} fits)")
     return all_results
 
 
@@ -178,7 +179,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=runner._DEFAULT_DATA_DIR, dest="data_dir")
     ap.add_argument("--ic-seed", type=int, default=0, dest="ic_seed")
-    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.01, 0.1])
+    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.1, 0.5, 1.0])
     ap.add_argument(
         "--samples",
         type=int,
@@ -193,7 +194,7 @@ if __name__ == "__main__":
         "--threshold",
         type=float,
         default=0.002,
-        help="STLSQ threshold; must sit below the smallest true D (0.005)",
+        help="STLSQ threshold; must sit below the smallest true D (0.01)",
     )
     ap.add_argument("--block-len", type=int, default=200, dest="block_len")
     ap.add_argument("--strong-only", action="store_true", dest="strong_only")

@@ -12,7 +12,7 @@ reasons this is one net per cell rather than one per file:
 Run on the GPU box:
     python sweep.py --epochs 30000 --device cuda
     python sweep.py --dry-run
-Writes results/stencilnet_sweep.json (every run tagged with noise_level,
+Writes results/stencilnet_sweep_ic<seed>.json (every run tagged with noise_level,
 rollout_steps, sample_idx, D, plus per-(noise, rollout) discover/validate means);
 per-run JSON/npz artifacts go to results/rollout<r>/, weights to --weights-dir.
 """
@@ -34,14 +34,16 @@ def _dataset_path(data_dir, ic_seed, noise_level):
     return os.path.join(data_dir, f"ic_seed_{ic_seed}_nl_{noise_level}.npz")
 
 
-def _existing(out_root, rollout, noise_level, sample_idx, epochs):
+def _existing(out_root, rollout, ic_seed, noise_level, sample_idx, epochs):
     """A completed run of at least `epochs` for this cell, or None.
 
-    36 runs is long enough that an interrupted sweep should resume rather than
+    48 runs is long enough that an interrupted sweep should resume rather than
     start over, but a shorter smoke run must not be mistaken for a full one.
     """
     path = os.path.join(
-        out_root, f"rollout{rollout}", f"stencilnet_nl{noise_level}_s{sample_idx}.json"
+        out_root,
+        f"rollout{rollout}",
+        f"stencilnet_ic{ic_seed}_nl{noise_level}_s{sample_idx}.json",
     )
     if not os.path.exists(path):
         return None
@@ -131,7 +133,7 @@ def main(
         for r in rollout_steps:
             for nl in levels:
                 for j in samples:
-                    done = _existing(out_root, r, nl, j, epochs) is not None
+                    done = _existing(out_root, r, ic_seed, nl, j, epochs) is not None
                     print(
                         f"  rollout={r} noise={nl} sample={j} "
                         f"{'SKIP (done)' if done and not overwrite else 'RUN'}  "
@@ -146,7 +148,11 @@ def main(
         for nl in levels:
             data_path = _dataset_path(data_dir, ic_seed, nl)
             for j in samples:
-                cached = None if overwrite else _existing(out_root, r, nl, j, epochs)
+                cached = (
+                    None
+                    if overwrite
+                    else _existing(out_root, r, ic_seed, nl, j, epochs)
+                )
                 if cached is not None:
                     print(
                         f"=== skip (already done) rollout={r} noise={nl} sample={j} ===",
@@ -176,9 +182,10 @@ def main(
                 all_results.append(res)
 
     payload = {"runs": all_results, "summary": _summarise(all_results, n_samples)}
-    with open(os.path.join(out_root, "stencilnet_sweep.json"), "w") as fh:
+    sweep_path = os.path.join(out_root, f"stencilnet_sweep_ic{ic_seed}.json")
+    with open(sweep_path, "w") as fh:
         json.dump(payload, fh, indent=2)
-    print(f"wrote {out_root}/stencilnet_sweep.json  ({len(all_results)} runs)")
+    print(f"wrote {sweep_path}  ({len(all_results)} runs)")
     return all_results
 
 
@@ -188,7 +195,7 @@ if __name__ == "__main__":
         "--data-dir", default="/home/dabin/data/burgers_simulated", dest="data_dir"
     )
     ap.add_argument("--ic-seed", type=int, default=0, dest="ic_seed")
-    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.01, 0.1])
+    ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.1, 0.5, 1.0])
     ap.add_argument(
         "--rollout-steps", type=int, nargs="+", default=[1, 2, 4], dest="rollout_steps"
     )
