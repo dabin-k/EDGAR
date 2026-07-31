@@ -186,16 +186,16 @@ def split_start_masks(train_cols, test_cols, n_times: int, rollout_steps: int):
     return window_all(is_tr), window_all(is_te)
 
 
-def forecast_mse(u_pred: np.ndarray, u_clean: np.ndarray) -> float:
-    """Shared benchmark metric: MSE of a prediction against the CLEAN field.
+def forecast_mse(u_pred: np.ndarray, u_target: np.ndarray) -> float:
+    """Shared benchmark metric: MSE of a prediction against a target field.
 
-    All methods are scored on this identical function so numbers are comparable:
-    the target is always the noise-free ground truth, never the noisy observation.
+    All methods are scored on this identical function so numbers are comparable.
+    The caller chooses the target field
     """
     u_pred = np.asarray(u_pred)
-    u_clean = np.asarray(u_clean)
-    assert u_pred.shape == u_clean.shape, (u_pred.shape, u_clean.shape)
-    return float(np.mean((u_pred - u_clean) ** 2))
+    u_target = np.asarray(u_target)
+    assert u_pred.shape == u_target.shape, (u_pred.shape, u_target.shape)
+    return float(np.mean((u_pred - u_target) ** 2))
 
 
 def benchmark_rollout_steps() -> int:
@@ -212,17 +212,23 @@ def benchmark_rollout_steps() -> int:
         return int(yaml.safe_load(fh)["evaluate"]["rollout_steps"])
 
 
-def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps: int):
+def teacher_forced_forecast(rhs, field: np.ndarray, dtc: float, rollout_steps: int):
     """Teacher-forced restart forecast for the continuous-operator reference methods.
 
     Mirrors EDGAR's scoring protocol (`evaluate.py`): from every time column that
-    has `rollout_steps` clean steps ahead, seed a classic-RK3 rollout at the TRUE
-    state `u_clean[:, s]` and integrate `rollout_steps` steps on the model's own
-    predictions (closed-loop within the window), then score every step against the
-    clean field. Re-anchoring at each start — rather than a single full-horizon
+    has `rollout_steps` steps ahead, seed a classic-RK3 rollout at the state
+    `field[:, s]` and integrate `rollout_steps` steps on the model's own
+    predictions (closed-loop within the window), then score every step against
+    `field`. Re-anchoring at each start — rather than a single full-horizon
     free-run — is exactly how EDGAR models are graded, so the reference methods and
     EDGAR share one protocol; it also stops a single diverging window from
     cascading into a global NaN.
+
+    `field` supplies BOTH the restart states and the targets, so passing the clean
+    field would hand the method a noise-free initial condition that EDGAR never
+    gets (`load_data` feeds it `u_noisy`). Benchmark call sites therefore pass the
+    OBSERVED field: seeded from noisy states, scored against noisy targets, on
+    both counts matching EDGAR.
 
     Both STENCIL-NET and SINDy learn a continuous-time RHS operator that is stepped
     externally by RK3, so this takes the RHS as a callable and owns the integrator,
@@ -232,7 +238,7 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
         rhs: callable mapping a batched state `(n_starts, Lx)` and per-start
             physical times `(n_starts,)` to du/dt `(n_starts, Lx)`. Any known
             forcing must already be folded in by the caller.
-        u_clean: clean ground-truth field, shape `(Lx, T)`.
+        field: observed field, shape `(Lx, T)`; used for restart states AND targets.
         dtc: coarse timestep.
         rollout_steps: steps rolled per restart before scoring.
 
@@ -240,13 +246,13 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
         (preds, targets), both `(n_starts, rollout_steps, Lx)` with
         `n_starts = T - rollout_steps`. The start of restart `i` is time column `i`.
     """
-    u_clean = np.asarray(u_clean, dtype=float)
-    Lx, T = u_clean.shape
+    field = np.asarray(field, dtype=float)
+    Lx, T = field.shape
     h = int(rollout_steps)
     n_starts = T - h
     starts = np.arange(n_starts)
 
-    state = u_clean[:, starts].T.copy()  # (n_starts, Lx) at t = starts*dtc
+    state = field[:, starts].T.copy()  # (n_starts, Lx) at t = starts*dtc
     t = starts * dtc
     preds = np.empty((n_starts, h, Lx))
     for j in range(h):
@@ -264,7 +270,7 @@ def teacher_forced_forecast(rhs, u_clean: np.ndarray, dtc: float, rollout_steps:
         t = t + dtc
 
     idx = starts[:, None] + 1 + np.arange(h)[None, :]  # (n_starts, h)
-    targets = u_clean.T[idx]  # (n_starts, h, Lx)
+    targets = field.T[idx]  # (n_starts, h, Lx)
     return preds, targets
 
 

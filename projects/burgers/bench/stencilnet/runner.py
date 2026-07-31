@@ -12,8 +12,9 @@ file only:
      rollout window crosses into a test block; the noisy case adds a single
      learnable latent-noise field over the training columns (sliced per block,
      regularized once) which the same error functions handle,
-  4. scores forecast MSE against the CLEAN field using teacher-forced RK3
-     restarts (data_loader.teacher_forced_forecast), reporting forecast_mse_train
+  4. scores forecast MSE against the OBSERVED (noisy) field, seeded from observed
+     states, using teacher-forced RK3 restarts
+     (data_loader.teacher_forced_forecast), reporting forecast_mse_train
      and forecast_mse_test on the same split as SINDy — the SAME protocol EDGAR is
      graded on (evaluate.py), not a single full-horizon free-run — alongside the
      do-nothing (persistence) forecast on the identical restarts, so the MSE can
@@ -272,9 +273,6 @@ def run(
             loss_hist.append((epoch, float(loss.item())))
     train_s = time.time() - t0
 
-    # teacher-forced restart forecast, scored vs CLEAN on the same protocol as
-    # EDGAR (projects/burgers/evaluate/evaluate.py): from every true state, RK3-roll
-    # `rollout_steps` on the net's own predictions and score against the clean field.
     # The batched rhs is net(u) + known forcing at each restart's physical time.
     xg = np.linspace(0, L, Lxc)
 
@@ -291,7 +289,7 @@ def run(
             )
         return net_out + F
 
-    preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+    preds, targets = ld.teacher_forced_forecast(rhs, u_obs, dtc, rollout_steps)
     # Score on the SAME leak-free split as SINDy: a restart is train/test only if
     # its whole rollout window lies in the train/test blocks (straddling windows
     # belong to neither), so no scored forecast crosses the split.
@@ -306,7 +304,7 @@ def run(
     # a small absolute MSE can just be tracking the decay -- persistence decays the
     # same way, and is the floor any real model must clear.
     p_preds, p_targets = ld.teacher_forced_forecast(
-        lambda state, t_arr: np.zeros_like(state), u_clean, dtc, rollout_steps
+        lambda state, t_arr: np.zeros_like(state), u_obs, dtc, rollout_steps
     )
     pers_train = ld.forecast_mse(p_preds[train_mask], p_targets[train_mask])
     pers_test = ld.forecast_mse(p_preds[test_mask], p_targets[test_mask])

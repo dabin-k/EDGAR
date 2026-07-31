@@ -310,14 +310,19 @@ def make_rhs(names, coefs, dx, scheme="central"):
     return N
 
 
-def _score(rhs, u_clean, dtc, train_cols, test_cols, rollout_steps):
-    """Forecast MSE + persistence floor on the shared teacher-forced restarts."""
-    T = u_clean.shape[1]
-    preds, targets = ld.teacher_forced_forecast(rhs, u_clean, dtc, rollout_steps)
+def _score(rhs, field, dtc, train_cols, test_cols, rollout_steps):
+    """Forecast MSE + persistence floor on the shared teacher-forced restarts.
+
+    `field` is the OBSERVED (noisy) field: it seeds every restart and supplies every
+    target, so the fit is graded on exactly what EDGAR is graded on. Seeding from
+    u_clean would hand SINDy a denoised initial condition EDGAR never receives.
+    """
+    T = field.shape[1]
+    preds, targets = ld.teacher_forced_forecast(rhs, field, dtc, rollout_steps)
     stable = bool(np.all(np.isfinite(preds)))
     preds = np.nan_to_num(preds, nan=1e30, posinf=1e30, neginf=-1e30)
     p_preds, p_targets = ld.teacher_forced_forecast(
-        lambda state, t_arr: np.zeros_like(state), u_clean, dtc, rollout_steps)
+        lambda state, t_arr: np.zeros_like(state), field, dtc, rollout_steps)
     tr, te = ld.split_start_masks(train_cols, test_cols, T, rollout_steps)
     mse_tr = min(ld.forecast_mse(preds[tr], targets[tr]), MSE_CAP)
     mse_te = min(ld.forecast_mse(preds[te], targets[te]), MSE_CAP)
@@ -371,7 +376,7 @@ def run(data_path, sample_idx, weak=False, threshold=0.002, rollout_steps=(1, 2,
     N = make_rhs(fit["names"], fit["coefs"], dx)
     rhs = lambda state, t_arr: N(state)  # noqa: E731  (unforced: no time dependence)
 
-    horizons = [_score(rhs, u_clean, dtc, train_cols, test_cols, int(h))
+    horizons = [_score(rhs, u_obs, dtc, train_cols, test_cols, int(h))
                 for h in rollout_steps]
 
     coef_u_xx = float(cmap.get("u_11", 0.0))
