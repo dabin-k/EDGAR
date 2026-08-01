@@ -1,0 +1,149 @@
+# State-space DSL for a noisy oscillator with drifting frequency.
+# Deep-merged over projects/prompt_defaults.yaml.
+#
+# Contract: LLM writes ONE step of a state-space model — not a windowed
+# regression. Framework wraps it in jax.lax.scan over time. y[t] is never in
+# scope inside model(), so leakage is structurally impossible.
+
+model:
+  base: 'You are an AI scientist learning a **state-space model** for a noisy 1-D
+    oscillator whose natural frequency drifts slowly over time. Each trajectory is
+    the observation of a latent dynamical system: at time t you see y[t] = latent(t)
+    + noise. Your model tracks a hidden state (e.g. position, velocity, frequency
+    estimate) and, at each step, predicts the next observation from that state.
+
+    You are given the PREVIOUS observation y[t-1] to update your state; you must
+    NOT peek at y[t] when predicting it. The framework enforces this: y[t] is not
+    in scope. Loss is per-sample Gaussian negative log-likelihood over the trajectory
+    (after a fixed 50-step warmup). Lower is better.
+
+    A trivial baseline predicts y[t] ≈ y[t-1] (persistence). A good model must
+    encode oscillatory phase and velocity in the latent state, and — for the drifting-
+    frequency variant — update a running frequency estimate from each new observation.
+
+    Below are {num_parents} models, sorted from worst to best. *Analyze* their
+    progression, *generalize* what lowers the loss, and *create* a new model that
+    beats all of them.
+
+    '
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Model signature must be `def model(state, y_prev, params):` — a SINGLE
+    step of a state-space model. `state` is a dict of scalar floats (the current
+    belief); `y_prev` is a scalar (the observation from the previous timestep);
+    `params` is a dict of learnable scalars.
+
+    * OUTPUT: return the tuple `(new_state, mean)` where `new_state` is a dict
+    with EXACTLY the same keys as `state`, and `mean` is a scalar — your
+    prediction of the next observation''s mean. Do NOT return an array. Do NOT
+    return a distribution — observation noise is handled by a single learnable
+    `log_sigma_obs` parameter (see below).
+
+    * y[t] IS NOT IN SCOPE. You only see `y_prev` = y[t-1] and the current
+    `state` (which was built by scanning over y[<t-1]). Predicting y[t] means
+    outputting a mean based on state and y_prev; the framework compares it to
+    the true y[t] for the loss.
+
+    * PATTERN (predict-then-update, Kalman-style): use `y_prev` to correct
+    `state`, then step the dynamics forward, then read out the predicted mean
+    from the updated state. Typical structure:
+        innovation = y_prev - state["expected"]
+        state_corrected = state + gain * innovation
+        state_next = one_step_of_dynamics(state_corrected, params)
+        mean = state_next["observable_component"]
+
+    * You may store anything in the state that helps: position, velocity, a
+    frequency estimate, a low-pass drift term, a moving average. Keep the state
+    small (≤ 8 scalars) — each state key is a compile-time constant, and every
+    key requires a matching `s0_<key>` in DEFAULT_PARAMS.
+
+    * DEFAULT_PARAMS convention:
+        - Include one entry per learnable parameter, e.g. `omega`, `damping`, `k_gain`.
+        - Include `log_sigma_obs` — the log observation noise std (typically -1 to 0).
+        - For each state key `<key>`, include an entry `s0_<key>` — the initial
+          value the framework will use as the scan starting state.
+      Example for a state = {"x": ..., "v": ...} model:
+        model.DEFAULT_PARAMS = {"omega": 1.0, "damping": 0.1, "log_sigma_obs": -1.0,
+                                 "s0_x": 0.0, "s0_v": 0.0}
+      The framework strips the `s0_` prefix and passes those as `state`; the rest
+      are the `params` dict your model receives.
+
+    * CRITICAL: array shapes are irrelevant here — state values are scalars.
+    Use pure scalar arithmetic. No `np.arange`, no dynamic shapes, no slicing.
+
+    * Provide `model.DEFAULT_PARAMS`: sensible float initial values for every key
+    in `params`, including all `s0_*` and `log_sigma_obs` keys.
+
+    '
+parameter_estimator:
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Function signature must be `def parameter_estimator(data):`. `data` is
+    one trajectory''s training dict with `data[''y'']` — a 1-D array of length T
+    of the observed time series.
+
+    * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`,
+    including `log_sigma_obs` AND every `s0_*` initial-state key. Missing any of
+    these will cause your parameter_estimator to be rejected. All values must be
+    plain Python floats.
+
+    * Sensible defaults for common keys:
+        - `log_sigma_obs`: log of the std of first-difference residuals
+          (`np.log(np.diff(y).std())`).
+        - `s0_x`: `float(y[0])` — first observation.
+        - `s0_v`: `0.0` — velocity unknown at t=0.
+        - `omega` / `s0_freq_est`: dominant FFT peak, e.g.
+          `2*np.pi * np.argmax(np.abs(np.fft.rfft(y - y.mean()))[1:]) / len(y)`.
+
+    * Your response **must** be less than {max_lines} lines including imports.
+
+    * Do not use complex fitting functions like {swear_words}; a simple, fast
+    initial estimate is all that is needed.
+
+    * Do not call the model function; you will not have access to it.
+
+    '
+jax_translator_model:
+  code_guidelines: 'CRITICAL JAX compatibility requirements for this state-space
+    project:
+
+    * The model signature is `def model(state, y_prev, params)` and returns
+    `(new_state, mean)` — a Python tuple whose second element is a jnp scalar.
+    Preserve this signature and return-tuple structure exactly.
+
+    * `state` and `new_state` are Python dicts with the SAME keys throughout the
+    scan. Do not add, remove, or rename keys. Every access `state["key_name"]`
+    must have a matching entry in the returned `new_state`.
+
+    * Preserve `model.DEFAULT_PARAMS` verbatim, including all `s0_*` prefixed
+    keys and `log_sigma_obs`. These are load-bearing: the framework strips
+    `s0_*` to build the scan carry and reads `log_sigma_obs` to build the
+    Gaussian NLL.
+
+    * Replace all boolean indexing with `jnp.where`.
+
+    * Use `jnp` everywhere (no `np`). Use `jnp.clip` for clipping — not
+    `jax.lax.clip`.
+
+    * Avoid Python control flow (if/for) that depends on array values. Use
+    `jnp.where` for element-wise conditionals.
+
+    * No dynamic array shapes — all constants must be Python literals or
+    compile-time integers.
+
+    * Never call Python `int()` / `float()` on JAX values. Use `x.astype(float)`
+    instead.
+
+    * Ensure compatibility with `jax.jit`, `jax.grad`, `jax.vmap`, AND
+    `jax.lax.scan` — the model is called inside a scan whose carry structure
+    must be invariant. Do not introduce any operation that produces a tracer
+    with a shape different from `state`.
+
+    * Ensure all string values in function call arguments are properly
+    JSON-escaped.
+
+    '
