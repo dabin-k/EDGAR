@@ -125,7 +125,9 @@ def _optimize(
         return jnp.mean(loss_fn(output, data_train))
 
     loss_and_grad = jax.jit(jax.value_and_grad(total_loss))
-    opt = optax.adam(gd_config["learning_rate"])
+    clip_norm = gd_config.get("gradient_clip_norm")
+    adam = optax.adam(gd_config["learning_rate"])
+    opt = optax.chain(optax.clip_by_global_norm(clip_norm), adam) if clip_norm else adam
     opt_state = opt.init(flat)
     best_loss, best_flat = float("inf"), flat
 
