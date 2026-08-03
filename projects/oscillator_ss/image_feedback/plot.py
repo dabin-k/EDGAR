@@ -33,8 +33,21 @@ def plot_model_fits(
     if not save_path:
         raise ValueError("Please provide a save_path for the plot")
 
-    project_root = Path(__file__).resolve().parent.parent
-    repo_root = project_root.parent.parent
+    # ``plot.py`` is loaded via ``exec()`` by task_spec, so ``__file__`` is
+    # not defined here. Walk up from the save_path (which lives under
+    # ``<repo>/program_databases/.../image_fits/`` or ``image_feedback/``)
+    # to find the repo root and add it to sys.path.
+    save_p = Path(save_path).resolve()
+    repo_root = save_p
+    for _ in range(10):
+        if (repo_root / "projects" / "oscillator_ss").is_dir():
+            break
+        if repo_root.parent == repo_root:
+            raise RuntimeError(
+                f"couldn't locate repo root walking up from {save_p}; "
+                "expected projects/oscillator_ss/ somewhere above."
+            )
+        repo_root = repo_root.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from projects.oscillator_ss.data_loader.load_data import apply_model  # noqa: E402

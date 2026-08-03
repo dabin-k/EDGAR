@@ -14,9 +14,11 @@ evolution:
 
 llms:
   num_parents: 2
-  model_llm: claude-sonnet-4-6
-  param_est_llm: claude-sonnet-4-6
-  jax_model_translator_llm: claude-haiku-4-5
+  # Headless Claude Code: no API key needed, uses the local `claude` binary
+  # via edgar/llm/claude_headless.py.
+  model_llm: claude-code-headless
+  param_est_llm: claude-code-headless
+  jax_model_translator_llm: claude-code-headless
   max_tokens: 10000
 
 scoring:

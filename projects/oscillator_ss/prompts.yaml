@@ -64,9 +64,9 @@ model:
         - Include `log_sigma_obs` — the log observation noise std (typically -1 to 0).
         - For each state key `<key>`, include an entry `s0_<key>` — the initial
           value the framework will use as the scan starting state.
-      Example for a state = {"x": ..., "v": ...} model:
-        model.DEFAULT_PARAMS = {"omega": 1.0, "damping": 0.1, "log_sigma_obs": -1.0,
-                                 "s0_x": 0.0, "s0_v": 0.0}
+      Example for a state = {{"x": ..., "v": ...}} model:
+        model.DEFAULT_PARAMS = {{"omega": 1.0, "damping": 0.1, "log_sigma_obs": -1.0,
+                                 "s0_x": 0.0, "s0_v": 0.0}}
       The framework strips the `s0_` prefix and passes those as `state`; the rest
       are the `params` dict your model receives.
 

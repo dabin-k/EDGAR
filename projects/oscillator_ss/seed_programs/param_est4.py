@@ -8,14 +8,16 @@ def parameter_estimator(data):
     y = np.asarray(data["y"], dtype=np.float64)
     y = y - y.mean()
     T = y.shape[0]
+    dt = 0.05                                        # must match model4's dt
     if T < 8:
         omega_est = 1.0
     else:
         spectrum = np.abs(np.fft.rfft(y))
         spectrum[0] = 0.0
         k_peak = int(np.argmax(spectrum))
-        f_peak = k_peak / T
-        omega_est = max(2.0 * np.pi * f_peak, 0.05)
+        # rfft bin k → f=k/T cycles/sample → angular freq per sample = 2π·k/T,
+        # which must be divided by dt to get radians per second (what model uses).
+        omega_est = max(2.0 * np.pi * k_peak / (T * dt), 0.05)
     residual_std = max(float(np.diff(y).std()), 1e-3)
     return {
         "damping": 0.05,
