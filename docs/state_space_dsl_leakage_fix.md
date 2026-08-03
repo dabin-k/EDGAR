@@ -303,7 +303,7 @@ This is acceptable and expected. The compile cost cannot be shared across progra
 
 ### 6.2 Backprop memory
 
-For T=2400, state dim ≈ 4 scalars, batch ≈ 16 trajectories, backprop tape ≈ 2400 × 4 × 16 × 4 bytes = 600 KB. Utterly comfortable. The scaling is `O(T × |state| × batch)`. At T=10000 with 100-dim state and 64-trajectory batch, we're at 250 MB — still comfortable on modern GPUs, but the regime where `remat_scan` becomes worth considering.
+For T=2400, state dim ≈ 4 scalars, batch = 32 trajectories, backprop tape ≈ 2400 × 4 × 32 × 4 bytes ≈ 1.2 MB. Utterly comfortable. The scaling is `O(T × |state| × batch)`. At T=10000 with 100-dim state and 64-trajectory batch, we're at 250 MB — still comfortable on modern GPUs, but the regime where `remat_scan` becomes worth considering.
 
 ### 6.3 Number of parameters
 
@@ -315,7 +315,7 @@ Fix in the project config: drop `param_penalty_weight` by an order of magnitude 
 
 The DSL is dimensionless in state and trajectory length, so scaling to longer runs or bigger populations is linear. But wall-clock is dominated by **scoring**, not LLM latency: the observed FHN run (`docs/cost_breakdown_1d_run.md:66-70`) spent 79% of its 120-min wall clock in scoring and 16% waiting for LLMs, with per-call means of 110 s (model draft), 32 s (parameter estimator) and 14 s (JAX translation) — totaling ~150 s of LLM work per program, compressed by `asyncio.gather` to roughly one-sixth of that in wall-clock terms.
 
-Extrapolation: at the observed 24 min per 8-program generation, a 100-generation × 16-program run would be ~60+ hours on the same host. Not something you casually rerun.
+Extrapolation: the observed FHN generation cost ≈ 16 min in scoring plus ~5-8 min in LLM wait, plotting and bookkeeping — end-to-end ≈ 24 min per 8-program generation. Scaling that to a 100-generation × 16-program run gives ~60+ hours on the same host. Not something you casually rerun.
 
 ## 7. Empirical validation
 
@@ -417,7 +417,7 @@ The strongest form of the argument: the models we can no longer express under th
 ### Cons
 
 - **The `s0_` prefix is a naming convention, not a schema.** Collisions are unlikely but not impossible; a schema-level field would be more principled.
-- **Per-program compile cost is unavoidable.** ~5 seconds per program on first use of a new state shape. For large populations this becomes the dominant cost; caching cannot help because state shapes differ.
+- **Per-program compile cost is unavoidable.** 50-120 seconds per program on first use of a new state shape (see §6.1). For large populations this dominates the wall clock; caching cannot help because state shapes differ.
 - **`param_penalty_weight` must be retuned.** The extra `s0_*` params inflate `n_params` and require the penalty to be dropped ~10× to preserve fair pressure across model complexity.
 - **Warmup is a hardcoded module constant.** Changing it per-run requires editing source. This is by design (jit safety) but is a real usability sharp edge.
 - **Fingerprint discrimination on trajectories is fragile.** Short `X_eval` traces are a workaround, not a solution; long-term the fingerprint should be moment-based or PSD-based rather than raw-trace-based.

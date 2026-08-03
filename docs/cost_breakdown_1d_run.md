@@ -22,12 +22,12 @@ out. Nothing was invented.
 | `program_databases/08-01/17-51-50/run.log` | Compact human-readable version of the same data + per-program tick lines during scoring | Cross-check of the per-generation breakdown |
 | `program_databases/08-01/17-51-50/status.json` | `started_at` / `updated_at` timestamps | Total wall-clock reference |
 | `program_databases/08-01/17-51-50/population.jsonl` (44 records) | Per-program source code (`code.model`, `code.param_est`, `code.model_jax`), losses, birth metadata | Code-length statistics used in the input-token estimate |
-| `projects/fhn_excitable/config.yaml` | `gradient_descent.max_iter=500`, `learning_rate=0.005`, `timeout_s=600`, `n_trajectories=32`, `T=2400`, batch size 4, 2 islands | Interpretation of the scoring stage |
+| `projects/fhn_excitable/config.yaml` | `gradient_descent.max_iter=500`, `learning_rate=0.005`, `timeout_s=600`, `n_trajectories=32`, `T=2400`, `batch_size=2`, `n_islands=2` (this run overrode `batch_size` to 4 via CLI — see `run.log` line 5) | Interpretation of the scoring stage |
 | `edgar/scoring/scoring.py` | How each program is scored (subprocess, `jit`, `vmap`, gradient descent loop) | Explanation of the score stage's internal structure |
 | `projects/fhn_excitable/data_loader/load_data.py` | `apply_model` wraps model in a `jax.lax.scan` over the T=2400 trajectory, then `vmap`s across the 32 trajectories | Explanation of the scan and its compile cost |
 | `nvidia-smi` | RTX A4000, 16 GB, driver 535, CUDA 12.2 | Compute-host context |
 
-**Coverage caveat.** The run was killed part-way through generation 5. The
+**Coverage caveat.** The run was killed *during* the scoring stage of generation 5 (`status.json.current_stage = "score (1/8)"`). The
 metrics file only recorded through generation 4. My totals cover **seed +
 generations 0–4** (five completed evolution units, 44 programs, roughly 114
 minutes of stage time, matching the 120 min wall clock). The partial gen 5 is
@@ -50,9 +50,9 @@ estimate the input side from prompt/code length, flagged as an estimate.
   ≈5 min gap is idle time between generations (population save, dashboard
   writes, and Python-level bookkeeping that the timing decorator doesn't
   wrap).
-- 44 programs produced (4 seed + 5 × 8 spawned; one gen 0 island was 4
-  instead of 8 due to a spawning constraint, matching the 44 population
-  records).
+- 44 programs produced: 4 seed + 5 generations × 2 islands × batch_size=4
+  = 40 spawned. Every non-seed (generation, island) cell in
+  `population.jsonl` has exactly 4 programs.
 - 41 of 44 scored with a finite loss (3 hit NaN, none timed out).
 - Compute host: one workstation, NVIDIA RTX A4000 (16 GB), running for ~2 h.
 
