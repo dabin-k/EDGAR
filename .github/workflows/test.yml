@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group dev
+      - run: uv run python projects/mPFC_spikes/leakage_check.py
       - run: uv run pytest
 
   ping-google:

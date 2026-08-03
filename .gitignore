@@ -27,3 +27,7 @@ __pycache__/
 
 # Cluster run logs (per-project, regenerated each submission)
 cluster_logs/
+
+# Local symlinks / scratch artifacts (keep runs reproducible in task_spec git_dirty)
+data
+test_image.png

@@ -5,3 +5,11 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: mpfc-leakage-check
+        name: mPFC windowed leakage check
+        entry: python projects/mPFC_spikes/leakage_check.py
+        language: system
+        pass_filenames: false
+        files: ^(edgar/scoring/|projects/mPFC_spikes/)
