@@ -33,6 +33,9 @@ ValidLLMs = Literal[
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
+    # Headless Claude Code CLI — no API key, uses the local `claude` binary.
+    # See edgar/llm/claude_headless.py.
+    "claude-code-headless",
 ]
 """Literal type for valid LLM model names.
 
