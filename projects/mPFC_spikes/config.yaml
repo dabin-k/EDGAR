@@ -14,20 +14,24 @@ evolution:
   n_migrants: 2
 
 project_params:
-  bin_ms: 5.0
+  bin_ms: 20.0               # 20 ms bins: coarser than 5 ms so the next-bin target
+                             # is less Poisson-sparse (median ~180 vs ~12 spikes over
+                             # the sampled anchors), giving a wider, better-conditioned
+                             # loss to optimise/select on.
   state: sws
   sws_mode: longest          # single longest SWS episode (no history-corrupting joins)
   # Windowed next-bin contract: each sample is a strictly-past window (W bins)
-  # mapped to the next bin, so leakage is structurally impossible. W=300 bins =
-  # 1.5 s of history at 5 ms bins (captures SWS UP/DOWN structure + fast bursting).
-  window_W: 300
-  # Anchors sampled per neuron per split (train/test each). mPFC units are sparse,
-  # so more anchors = more spikes = better-conditioned per-neuron fit, at the cost
-  # of history-array memory (N * A * W * 4 bytes per split).
-  anchors_per_neuron: 4000
+  # mapped to the next bin, so leakage is structurally impossible. W=100 bins =
+  # 2.0 s of history at 20 ms bins (captures SWS UP/DOWN structure + bursting).
+  window_W: 100
+  # Anchors sampled per neuron per split (train/test each). Coarser bins shrink W,
+  # which frees memory to sample far more anchors (~86% of the ~17.5k-bin train
+  # region) -> most spikes become anchor targets, sharpening the per-neuron fit.
+  # Memory is N * A * W * 4 bytes per split (~144 MB here).
+  anchors_per_neuron: 15000
   min_region_spikes: 100      # keep neurons with >= this many spikes in each time-half
   n_eval: 1
-  eval_anchors: 200
+  eval_anchors: 500
   random_seed: 42
 
 llms:

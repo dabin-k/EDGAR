@@ -96,13 +96,29 @@ def _bin_counts(spikes, segments, dt):
     return counts, seg_bins
 
 
-def _pick_anchors(lo: int, hi: int, n: int) -> np.ndarray:
-    """Evenly spaced anchor bin-indices in [lo, hi). Caps at the number available."""
+def _pick_anchors(lo: int, hi: int, n: int, min_stride: int = 1) -> np.ndarray:
+    """Evenly spaced anchor bin-indices in [lo, hi).
+
+    When ``min_stride > 1``, consecutive anchors are at least ``min_stride`` bins
+    apart so past windows do not overlap (pass ``min_stride=W`` for independent
+    samples). Caps ``n`` at the number of such slots available.
+    """
     span = hi - lo
     if span <= 0:
         raise ValueError(f"empty anchor region [{lo}, {hi}); widen T or shrink W")
+    if min_stride < 1:
+        raise ValueError(f"min_stride must be >= 1, got {min_stride}")
+
+    if min_stride > 1:
+        max_n = max(1, span // min_stride)
+        n = int(min(n, max_n))
+        if n <= 1:
+            return np.array([lo + span // 2], dtype=np.int64)
+        slot_idx = np.unique(np.linspace(0, max_n - 1, n).astype(np.int64))
+        return lo + slot_idx * min_stride
+
     n = int(min(n, span))
-    return (lo + np.unique(np.linspace(0, span - 1, n).astype(np.int64)))
+    return lo + np.unique(np.linspace(0, span - 1, n).astype(np.int64))
 
 
 def load_data(
@@ -164,8 +180,8 @@ def load_data(
     # Anchor bin-indices, shared across neurons (so the sample arrays are
     # rectangular for the nested vmap). Guard band = W keeps every train window
     # inside [0, half) and every test window inside [half, T).
-    train_anchors = _pick_anchors(W, half, anchors_per_neuron)
-    test_anchors = _pick_anchors(half + W, T, anchors_per_neuron)
+    train_anchors = _pick_anchors(W, half, anchors_per_neuron, min_stride=W)
+    test_anchors = _pick_anchors(half + W, T, anchors_per_neuron, min_stride=W)
     assert train_anchors.min() >= W and test_anchors.min() >= W
     assert train_anchors.max() < half and test_anchors.max() < T
 
@@ -183,11 +199,15 @@ def load_data(
             f"Only {n_neurons} neuron(s) pass min_region_spikes={min_region_spikes}; "
             "lower the threshold."
         )
+    y_train = counts[:, train_anchors]
+    mean_rate = max(float(y_train.mean()), 1e-8)
+    const_rate_nll = 1.0 - np.log(mean_rate)
     print(
         f"[load_data] SWS {sws_mode}: {len(spikes)} neurons -> {n_neurons} kept "
         f"(>= {min_region_spikes} spk/region); T={T} bins @ {bin_ms} ms; W={W}; "
-        f"anchors train/test={len(train_anchors)}/{len(test_anchors)}; "
-        f"median spikes/neuron={np.median(counts.sum(axis=1)):.0f}"
+        f"anchors train/test={len(train_anchors)}/{len(test_anchors)} "
+        f"(stride>={W}); median spikes/neuron={np.median(counts.sum(axis=1)):.0f}; "
+        f"const-rate NLL/spike={const_rate_nll:.3f}"
     )
 
     x = counts.astype(np.float32)  # (n_neurons, T)
@@ -218,7 +238,7 @@ def load_data(
     # _sample_indices are positions INTO the discover axis (to match `params`).
     n_eval = int(min(max(1, n_eval), len(disc_idx)))
     eval_pos = np.sort(rng.choice(len(disc_idx), n_eval, replace=False))
-    eval_anchor_sub = _pick_anchors(W, half, eval_anchors)
+    eval_anchor_sub = _pick_anchors(W, half, eval_anchors, min_stride=W)
     X_eval = _windows(x_disc[eval_pos], eval_anchor_sub)
     X_eval["_sample_indices"] = eval_pos
 

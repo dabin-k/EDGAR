@@ -118,8 +118,8 @@ def check_guard_band(data_path: str, pp: dict) -> tuple[bool, dict]:
     counts, _ = LD._bin_counts(LD._load_spike_trains(sall), LD._sws_segments(ws, pp.get("sws_mode", "longest")), pp.get("bin_ms", 5.0) / 1000.0)
     T = counts.shape[1]
     half = T // 2
-    train_anchors = LD._pick_anchors(W, half, A)
-    test_anchors = LD._pick_anchors(half + W, T, A)
+    train_anchors = LD._pick_anchors(W, half, A, min_stride=W)
+    test_anchors = LD._pick_anchors(half + W, T, A, min_stride=W)
     # train windows span [t-W, t-1] for t in train_anchors -> max index < half.
     train_window_max = int(train_anchors.max())  # last bin used is t-1 < half
     # test targets and their windows start at half+W-W = half.
