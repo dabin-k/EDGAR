@@ -10,9 +10,33 @@ EDGAR is an evolutionary program-synthesis system. In each generation, an LLM pr
 
 ## 2. The problem: temporal leakage
 
-### 2.1 The broken contract
+### 2.1 Where EDGAR started: a general regression contract
 
-EDGAR's original scoring API for time-series data handed the LLM the following signature:
+Before we touch time series, it helps to see what EDGAR was built for. The original scoring API is a single generic contract for any batch regression problem:
+
+```python
+def model(data, params) -> prediction:
+    """
+    data:       dict of arrays — inputs (whatever the project needs)
+    params:     dict of learnable parameters
+    returns:    prediction — same shape as the target the loss will compare against
+    """
+```
+
+A concrete example from `projects/orientation_tuning/`:
+
+```python
+def model(data, params):
+    theta = data["stimulus"]                    # (n_trials,) — stimulus angles
+    dist  = angular_distance(theta, params["theta_pref"])
+    return params["baseline"] + params["amplitude"] * gaussian(dist, params["tuning_width"])
+```
+
+The framework fits `params` by gradient descent on a project-defined loss against `data["response"]`. This works cleanly for **problems where the target is not derivable from the input** — tuning curves, place fields, dose-response, static equations of state. There is no temporal structure and therefore no leakage attack surface: `data` cannot contain the answer, even in principle.
+
+### 2.2 The naive extension to time series (what we started with)
+
+When people wanted to fit dynamical models — an oscillator, a Kalman-like filter, a neural spike train — the natural move was to reuse the same contract but let `data["y"]` be a full trajectory and let `prediction` be a full array of one-step-ahead means:
 
 ```python
 def model(data, params) -> mean:
@@ -27,7 +51,9 @@ The framework then computed a Gaussian NLL between `mean[t]` and `y[t]`, summed 
 
 The intent was that `mean[t]` should be a function of `y[<t]` only — a causal one-step predictor. But **nothing in the type system, the runtime, or the code enforced that**. The full `y` array is in the function's scope; the LLM is free to reference `y[t]` (or `y[t+1]`, or `y[t:t+5].mean()`) when computing `mean[t]`.
 
-### 2.2 What actually happened
+That is the leakage attack surface. The regression contract is safe on regression problems and unsafe on time-series problems for exactly one reason: **the target is now part of the input**.
+
+### 2.3 What actually happened
 
 LLMs did precisely this. Sometimes deliberately ("I'll use the observation to correct the state"), sometimes by off-by-one indexing bugs (`mean = y[1:]` instead of `mean = y[:-1]`). The resulting programs achieved NLL scores far below what any real dynamical system could produce — because they were reading the answer.
 
@@ -38,7 +64,7 @@ Two symptoms told us the loop was compromised:
 
 The evolutionary pressure was rewarding indexing bugs, not scientific insight.
 
-### 2.3 Why this is not merely a bug — it's a contract failure
+### 2.4 Why this is not merely a bug — it's a contract failure
 
 Any function whose signature grants access to the full future trajectory *and* is asked to predict any element of that trajectory has a leakage attack surface. The only way to eliminate it is to remove `y[≥t]` from the model's scope at step `t`. Nothing else — not prompt engineering, not linters, not runtime warnings — is structural.
 
