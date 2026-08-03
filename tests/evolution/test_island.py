@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import jax.numpy as jnp
 from scipy.stats import chisquare
 from edgar.evolution.island import (
     boltzmann_sample,
@@ -362,6 +363,21 @@ def test_are_duplicates_none_loss_not_duplicate():
     p0 = make_fingerprint_program(_E0, loss=None, n_params=2)
     p1 = make_fingerprint_program(_E0, loss=5.0, n_params=2)
     assert not _are_duplicates(p0, p1, loss_tol=0.01, cosine_tol=0.95)
+
+
+def test_are_duplicates_inf_loss_not_duplicate():
+    """Two programs both at inf loss must not be treated as duplicates."""
+    p0 = make_fingerprint_program(_E0, loss=float("inf"), n_params=2)
+    p1 = make_fingerprint_program(_E0, loss=float("inf"), n_params=2)
+    assert not _are_duplicates(p0, p1, loss_tol=0.01, cosine_tol=0.95)
+
+
+def test_are_duplicates_shape_mismatch_not_duplicate():
+    """Fingerprints of different lengths cannot be cosine-compared."""
+    p0 = make_fingerprint_program(_E0, loss=1.0, n_params=2)
+    p1 = make_fingerprint_program(_E0, loss=1.0, n_params=2)
+    p1.eval_fingerprint = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0])
+    assert not _are_duplicates(p0, p1, loss_tol=0.1, cosine_tol=0.95)
 
 
 def test_are_duplicates_near_identical_fingerprint():
