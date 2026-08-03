@@ -86,7 +86,7 @@ We did not run a benchmark of "prompt rules vs. no rules"; the argument above wa
 
 The second attempt reshaped the data into `(window_of_past, next_bin)` pairs and asked the LLM to predict `next_bin` from `window_of_past`. This is structurally leak-proof — the model literally never sees `next_bin` — and evolution ran to completion without pathology.
 
-But it destroyed the sequential dynamical-systems formulation. A model of a driven oscillator, a Hawkes process, or a Kalman filter is fundamentally *stateful*: the belief at step `t` depends on the entire history of observations up to `t`, compressed into a running state. Independent `(window, next)` samples cannot express this — the window has to either be so long that gradients vanish, or so short that the state has no memory. Evolution signal collapsed to near-baseline: the framework was leak-proof, but the models it could express were too weak to be interesting.
+But it destroyed the sequential dynamical-systems formulation. A model of a driven oscillator, a Hawkes process, or a Kalman filter is fundamentally *stateful*: the belief at step `t` depends on the entire history of observations up to `t`, compressed into a running state. Independent `(window, next)` samples cannot express this — any state variable whose relevant history exceeds the window is unrecoverable, so the LLM is reduced to writing memoryless functions of the last `W` observations. Under this reduced signature evolution collapsed to near-baseline: the framework was leak-proof but the models it could express were too weak to be interesting.
 
 The lesson: **causality and statefulness are separable requirements**. The fix must give us both.
 
@@ -153,7 +153,8 @@ Two things to notice:
 The framework provides a Gaussian NLL with a learnable per-cell observation noise and a warmup skip:
 
 ```python
-WARMUP_STEPS = 100   # module-level constant, see §5.3
+WARMUP_STEPS = 100   # module-level constant, per-project; see §5.3
+                     # (fhn_excitable uses 100; oscillator_ss uses 50)
 
 def loss_fn(model_output, data):
     # model_output: (n_samples, T-1, 2) — [..., 0] = means, [..., 1] = log_sigmas
@@ -165,7 +166,7 @@ def loss_fn(model_output, data):
     return jnp.mean(nll, axis=-1)
 ```
 
-The warmup absorbs the transient during which the model's initial-state prior is being corrected by observations. Without it, the first ~100 predictions dominate the loss with garbage.
+The warmup absorbs the initial-state-prior transient — the interval during which observations are correcting the model's `s0_*` guess into a sensible belief. Not skipping it would let that transient dominate the mean NLL. We haven't ablated the value directly; 50-100 was chosen to be safely longer than the state-correction timescales of the seed programs.
 
 ### 4.3 A worked seed program
 
@@ -251,7 +252,7 @@ model.DEFAULT_STATE  = {"V": -1.0, "w": -0.5}   # this attribute is the trap
 
 **Why we rejected the YAML route**: it works, but adds a config surface that only this one project uses, and the framework's YAML validation would need updating. Not worth the surface area for a value that changes once per project.
 
-**What we did instead**: declare `WARMUP_STEPS: int = 100` at the top of the project's `load_data.py`. The value is baked into the `loss_fn` closure at Python-import time, well before any `jit` tracing. `cloudpickle` preserves module globals, so the closure serializes cleanly across worker processes. To change the warmup, edit one line; every worker picks it up on next import.
+**What we did instead**: declare `WARMUP_STEPS: int` at the top of each project's `load_data.py` — 100 in `fhn_excitable`, 50 in `oscillator_ss`. The value is baked into the `loss_fn` closure at Python-import time, well before any `jit` tracing. `cloudpickle` preserves module globals, so the closure serializes cleanly across worker processes. To change the warmup, edit one line; every worker picks it up on next import.
 
 ### 5.4 Plain `lax.scan` vs. `remat_chunked_scan` for memory
 
@@ -263,11 +264,11 @@ model.DEFAULT_STATE  = {"V": -1.0, "w": -0.5}   # this attribute is the trap
 
 ### 5.5 Gradient clipping — the one engine change we couldn't avoid
 
-State-space scans backpropagate through T = 2400 steps. Even with well-scaled dynamics, individual per-step gradients can compound multiplicatively when the model is in a bad basin during early training. Empirically, unclipped gradients caused loss to diverge to `inf` within the first 20 Adam steps on ~15% of programs.
+State-space scans backpropagate through T = 2400 steps. Even with well-scaled dynamics, individual per-step gradients can compound multiplicatively when the model is in a bad basin during early training. This is the standard motivation for gradient clipping in long-horizon RNN training; we adopted the standard remedy rather than measuring the un-clipped failure rate ourselves. (For the record, the observed FHN run with clipping enabled produced 3 NaN losses out of 44 programs — an unclipped ablation might raise that, but has not been run.)
 
 The fix is standard: `optax.chain(optax.clip_by_global_norm(5.0), optax.adam(lr))`. Pre-Adam clipping — clip the raw gradient, then let Adam normalize it — is the correct order because Adam's second-moment estimates are corrupted by extreme gradients if you clip after.
 
-This required two lines in the engine:
+This required two small additions in the engine, both backward-compatible:
 
 - `edgar/io/config.py`: add `gradient_clip_norm: float | None = None` to `GradientDescentConfig`. Without this field the Pydantic model has `extra="ignore"` and the YAML value is silently dropped before it reaches `_optimize`. This is the kind of failure that's easy to miss because everything looks right — the YAML has the key, the run completes, but no clipping happens.
 - `edgar/scoring/scoring.py::_optimize`: when the config value is set, wrap the optimizer as above. When it's `None`, behavior is byte-identical to the pre-change codebase, so every existing project keeps working.
@@ -286,15 +287,17 @@ The framework has no auto-invocation hook where a project can register a pre-sco
 
 ### 5.7 Fingerprint discrimination
 
-`_eval_fingerprint` computes a cosine similarity between programs' outputs on a small `X_eval` set to detect near-duplicates. For state-space models on long trajectories, the outputs are strongly phase-locked to the driving signal, so cosine similarity between *any* two programs is ≥ 0.95 — everything looks like a duplicate, and dedup collapses the population to two or three cluster reps.
+`_eval_fingerprint` computes a cosine similarity between programs' outputs on a small `X_eval` set to detect near-duplicates. For state-space models on long trajectories the outputs are strongly phase-locked to the driving signal, and the concern is that cosine similarity between *any* two programs is pushed high enough to trip the dedup threshold — collapsing the population to a few cluster reps. (We haven't measured the pairwise-cosine distribution on a full run; this section documents the guard we put in against the failure mode, not a measured collapse.)
 
-Fix: `X_eval` uses short trajectories (T=100 rather than the full T=2400), and `apply_model` returns only the mean column (not the stacked mean+log_sigma) when it detects a `_fingerprint_only` flag in the data dict. Shorter traces + narrower feature set = actual discrimination.
+Guard: `X_eval` uses short trajectories (T=100 rather than the full T=2400), and `apply_model` returns only the mean column (not the stacked mean+log_sigma) when it detects a `_fingerprint_only` flag in the data dict. Shorter traces + narrower feature set = more discriminative fingerprints.
 
 ## 6. How this scales
 
 ### 6.1 Per-program cost
 
-Every LLM offspring has a novel state shape. JAX compiles per shape, so each program pays a fresh compile of ~ 3-8 seconds. The scan itself runs at ~ 1-3 ms per trajectory (T=2400, state ≈ 4 scalars) on a single A100. For a generation of 4 offspring × 8 islands = 32 programs, the compile cost dominates: ~ 3 minutes of compile per generation, ~ 30 seconds of actual gradient descent.
+Every LLM offspring has a novel state shape. JAX compiles per shape, so each program pays a fresh compile: on the RTX A4000 the FHN run in `docs/cost_breakdown_1d_run.md:194-202` measures **30-70 s** for the main `value_and_grad` compile, plus 3-4 auxiliary compiles for the eval helpers (each 5-15 s, no backward pass), for a total per-program compile budget of **50-120 s**. After compile, one Adam step is a single kernel launch — the same doc measures **20-60 ms per step** for the full vmapped 32-trajectory batch, so 500 Adam steps takes **10-30 s** of the per-program budget. Mean total per-program scoring cost: **124 s** on the FHN run (compile-dominated).
+
+For a generation of `batch_size × n_islands` programs — 4 in the current `fhn_excitable` / `oscillator_ss` configs, 8 in the observed FHN run — the compile cost dominates the whole scoring stage. In the observed run, one generation of 8 programs takes ≈ 16 min of scoring wall clock (`cost_breakdown_1d_run.md:88-91`).
 
 This is acceptable and expected. The compile cost cannot be shared across programs because their state shapes differ, and pretending otherwise would require an untyped state representation that would defeat the point.
 
@@ -310,25 +313,27 @@ Fix in the project config: drop `param_penalty_weight` by an order of magnitude 
 
 ### 6.4 Number of generations
 
-The DSL is dimensionless in state and trajectory length, so scaling to longer runs or bigger populations is linear. Wall-clock is dominated by LLM latency (~5-15 s per program from a hosted API) far more than compilation or scoring, so a 100-generation run of 16 programs each is a ~10-hour job, not something you casually rerun.
+The DSL is dimensionless in state and trajectory length, so scaling to longer runs or bigger populations is linear. But wall-clock is dominated by **scoring**, not LLM latency: the observed FHN run (`docs/cost_breakdown_1d_run.md:66-70`) spent 79% of its 120-min wall clock in scoring and 16% waiting for LLMs, with per-call means of 110 s (model draft), 32 s (parameter estimator) and 14 s (JAX translation) — totaling ~150 s of LLM work per program, compressed by `asyncio.gather` to roughly one-sixth of that in wall-clock terms.
+
+Extrapolation: at the observed 24 min per 8-program generation, a 100-generation × 16-program run would be ~60+ hours on the same host. Not something you casually rerun.
 
 ## 7. Empirical validation
 
 The fix was validated on a FitzHugh-Nagumo testbed. FHN is a canonical excitable-neuron model with a two-variable latent state — an observable voltage `V` and a hidden recovery variable `w` — so any evolved program that reaches near-oracle NLL must have *discovered* the hidden state, not just fit `V`.
 
-Ground-truth benchmarks on a 16-trajectory, T=2400 dataset:
+Ground-truth benchmarks on a 32-trajectory, T=2400 dataset:
 
 | benchmark | NLL (nat/bin) | notes |
 |---|---|---|
 | oracle floor | **-2.3134** | true dynamics + true `w`, per-trajectory MLE σ |
-| best seed | -2.1703 | best of four 1D-only hand-written seeds |
+| best seed | -2.1703 | best of the four hand-written seed programs (models 1-4, 1-D only) |
 | persistence | -2.1355 | `mean = y_prev` |
 | discovery budget | +0.1779 nat | oracle − persistence, headroom for evolution to close |
-| **top-3 evolved (mean)** | **≈ -2.198** | top-3 programs from the run below; closes ≈ 20 % of the seed→oracle gap (0.03 / 0.14 nat) |
+| **top-3 evolved (mean)** | **-2.1985** | top-3 programs from the run below; closes ≈ 20 % of the seed→oracle gap (0.028 nat of 0.143 nat) |
 
-A five-generation LLM-driven run (Claude Code as the model author, run `program_databases/08-01/17-51-50/`) produced 44 programs total, of which 37 added a hidden state variable and 33 beat the best seed. Numbers are on the **discover** split — validate-split scoring was not run for this pass, so the closure percentage above is a discover-set claim, not a held-out one. Post-hoc leakage inspection: the four seeds and every evolved program that produced a finite loss satisfy the ISOLATION invariant below (`leakage_check.py`). We did not statically inspect every AST for `y[≥t]` access — the DSL makes such access a Python scope error, so passing ISOLATION on every finite program is the strongest structural evidence available.
+A five-generation LLM-driven run (Claude Code as the model author, run `program_databases/08-01/17-51-50/`) produced 44 programs total; 41 produced a finite discover loss. Of those 41, **37 (90 %) added a hidden state variable** and **33 (80 %) beat the best seed**. Numbers are on the **discover** split — validate-split scoring was not run for this pass, so the closure percentage above is a discover-set claim, not a held-out one. Structural invariants (below) were verified via `leakage_check.py` on the four seed programs, but no sweep log covering all 41 finite programs was captured in the run directory; the strongest empirical claim available is therefore "seeds + spot-check" rather than "every evolved program." The DSL makes future-index access a Python scope error regardless, so the invariant is a structural property, not a probabilistic one.
 
-Structural invariants tested per program (`leakage_check.py`):
+Structural invariants tested per seed program (`leakage_check.py`):
 
 - **ISOLATION**: perturbing `y[t:]` by ±100 leaves `mean[<t]` bit-exact unchanged. Passes because `y[≥t]` is not in scope at step `t`.
 - **SHAPE**: `validate_step` accepts every seed.
@@ -347,7 +352,7 @@ Any model of the form "the next observation is a function of a bounded internal 
 
 - **Deterministic dynamical systems** — ODEs discretized to Euler / RK4, iterated maps, any Markov flow.
 - **Stochastic dynamical systems** — SDEs with additive noise, GARCH-family volatility processes, anything driven by iid noise per step.
-- **Linear and nonlinear filters** — Kalman filter, extended Kalman filter, particle filter (with a fixed particle count baked into the state), any Bayesian filter that maintains a belief state.
+- **Linear and nonlinear filters** — Kalman filter, extended Kalman filter, deterministic particle filter with a fixed particle count carried in the state (stochastic resampling would violate scan-body determinism and is out of scope), any Bayesian filter that maintains a belief state.
 - **Hidden Markov models** — the posterior over hidden states is itself a state pytree.
 - **Recurrent neural architectures** — RNN, GRU, LSTM cells have exactly this signature (`hidden_prev, x_prev → hidden_next, y_pred`).
 - **Hawkes processes** — the intensity is a state variable driven by past observations; the decay term is a scalar dynamics parameter.
@@ -446,10 +451,10 @@ Ordered by expected leverage:
 
 ## 12. Files touched
 
-Engine (two lines total, both backward-compatible):
+Engine — two small, backward-compatible additions:
 
-- `edgar/io/config.py` — added `gradient_clip_norm: float | None = None` to `GradientDescentConfig`.
-- `edgar/scoring/scoring.py` — `_optimize` wraps the optimizer with `optax.chain(clip_by_global_norm, adam)` when the config value is set.
+- `edgar/io/config.py` — added a `gradient_clip_norm: float | None = None` field to `GradientDescentConfig`.
+- `edgar/scoring/scoring.py` — `_optimize` wraps the optimizer with `optax.chain(clip_by_global_norm, adam)` when the config value is set (a one-branch addition inside the optimizer construction).
 
 Projects (self-contained, no cross-project coupling):
 
