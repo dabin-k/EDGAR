@@ -1,0 +1,43 @@
+run:
+  random_seed: 42
+
+io:
+  data_path: ""
+
+evolution:
+  n_generations: 2
+  n_islands: 2
+  batch_size: 2
+  critical_population_size: 6
+  n_migrants: 1
+  topology: [1, 0]
+
+llms:
+  num_parents: 2
+  model_llm: claude-sonnet-4-6
+  param_est_llm: claude-sonnet-4-6
+  jax_model_translator_llm: claude-haiku-4-5
+  max_tokens: 10000
+
+scoring:
+  param_penalty_weight: 0.0
+  timeout_s: 120.0
+  gradient_descent:
+    max_iter: 300
+    learning_rate: 0.02
+
+project_params:
+  system: driven_vdp
+  vdp_mu: 2.0
+  vdp_amp: 1.0
+  vdp_w_drive: 1.0
+  n_trajectories: 64
+  num_timepoints: 1024
+  noise_level: 0.05
+  window_W: 96
+  anchors_per_sample: 512
+  predict_horizon: 1
+  rollout_H: 200
+  n_eval: 4
+  eval_anchors: 200
+  seed: 42

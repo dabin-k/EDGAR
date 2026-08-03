@@ -1,0 +1,72 @@
+# Windowed next-value regression on 1D dynamical trajectories (driven van der Pol).
+# Deep-merged over projects/prompt_defaults.yaml.
+
+model:
+  base: 'You are an AI scientist learning the 1D dynamics of a forced nonlinear
+    oscillator. Each training example is a short WINDOW of past values from a
+    single trajectory; your model must predict the NEXT scalar value. Scoring is
+    mean squared error (MSE) over many anchor points — lower is better.
+
+    The trivial baseline is persistence: predict x[t] ≈ x[t-1] (the most recent
+    value in the window). A good model must capture oscillatory phase and velocity
+    from the past window, not just copy the last value. The real test is whether
+    a free-run rollout tracks the true oscillator — one-step MSE alone is not enough.
+
+    Below are {num_parents} models, sorted from worst to best. *Analyze* their
+    progression, *generalize* what lowers the loss, and *create* a new model that
+    beats all of them.
+
+    '
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Model signature must be `def model(window, params):`. `window` is a 1-D
+    numpy array of length W: strictly-past values, oldest first. `window[-1]` is
+    the most recent past value x[t-1]; `window[0]` is x[t-W]. W is fixed for a run;
+    read it as `W = window.shape[0]`. There is no time index and no full series.
+
+    * OUTPUT: return a single scalar — the predicted next value. Do NOT return
+    an array. `params` is a dict of named scalars. No positivity constraint.
+
+    * Weight the recent past. Natural models use fixed-length kernels over the
+    window, e.g. `np.dot(window, kernel)` with `lags = np.arange(W, 0, -1)`.
+
+    * You may treat the window as noisy observations of a low-dimensional latent
+    state (e.g. position and velocity). Estimate that state from the window, then
+    predict the next observation. Params may include entries of a transition matrix
+    and observation model (as named scalars, e.g. `A11`, `A12`, `omega`).
+
+    * CRITICAL: array shapes must be fixed. Derive length from `W = window.shape[0]`
+    (a fixed integer), never from a learnable parameter. Let parameters shape kernel
+    *values* over the fixed length W.
+
+    * Prefer vectorized operations over Python `for` loops. Keep it cheap.
+
+    * Cast to `int()` when using a numeric value as an array size, slice index,
+    or `range()` argument.
+
+    * Provide `model.DEFAULT_PARAMS`: sensible float initial values for every key
+    in `params`.
+
+    '
+parameter_estimator:
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Function signature must be `def parameter_estimator(data):`. `data` is one
+    trajectory''s training dict with `data[''history'']` (2-D array shape (A, W):
+    A past windows, each length W). Do NOT use `data[''target_y'']` — it is held out.
+
+    * Return a param dict whose keys EXACTLY match the model''s params, all plain
+    Python floats.
+
+    * Your response **must** be less than {max_lines} lines including imports.
+
+    * Do not use complex fitting functions like {swear_words}; a simple, fast
+    initial estimate is all that is needed.
+
+    * Do not call the model function; you will not have access to it.
+
+    '
