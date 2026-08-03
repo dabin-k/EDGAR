@@ -55,14 +55,17 @@ That is the leakage attack surface. The regression contract is safe on regressio
 
 ### 2.3 What actually happened
 
-LLMs did precisely this. Sometimes deliberately ("I'll use the observation to correct the state"), sometimes by off-by-one indexing bugs (`mean = y[1:]` instead of `mean = y[:-1]`). The resulting programs achieved NLL scores far below what any real dynamical system could produce — because they were reading the answer.
+Two failure modes emerged, both structural rather than accidental:
 
-Two symptoms told us the loop was compromised:
+- **Deliberate use of the observation.** The LLM would write reasoning like "correct the mean by the innovation `y[t] - prediction`" — which, at step `t`, requires `y[t]`. Under the old contract this was one line of legal Python.
+- **Off-by-one indexing.** `mean = y[1:]` looks like a lag of one but is actually a lead of one. Under the old contract the framework did not distinguish.
 
-1. **Post-optimization losses below the theoretical Gaussian floor** — the entropy of the observation noise sets a hard lower bound on NLL for a well-calibrated predictor. Programs beat it routinely.
-2. **Winning programs did not generalize** — validate-cell losses were catastrophically worse than discover-cell losses, because on validate cells the same leaky indexing pattern was correlated with different noise realizations.
+We do not have a systematic pre-fix leakage census on old runs — the old contract left no artefact that tells you *which* programs were leaky vs. merely fit, so a proper measurement is retrospective and expensive. What we do have:
 
-The evolutionary pressure was rewarding indexing bugs, not scientific insight.
+- **The structural argument in §2.4**: any signature that hands the model the full `y` and asks it to predict any element of `y` has a leakage attack surface, and prompt discipline cannot close it (§3.1).
+- **Post-fix runs pass ISOLATION**: on the FHN state-space testbed, all four seeds and every evolved program that produced a finite loss satisfy the ISOLATION invariant (perturbing `y[t:]` leaves `pred[<t]` bit-exact) — see §7. That is not a comparison to the old contract, but it is the strongest claim we can make with the runs in hand: under the new DSL, leakage is impossible; under the old, it was possible.
+
+The evolutionary pressure under the old contract could reward indexing bugs, because nothing in the scoring loop distinguished a correct causal predictor from a program that happened to read a value it should not have.
 
 ### 2.4 Why this is not merely a bug — it's a contract failure
 
@@ -72,13 +75,12 @@ Any function whose signature grants access to the full future trajectory *and* i
 
 ### 3.1 Prompt engineering (rejected)
 
-The first attempt added rules to the LLM prompt: "do not index `y[t]` when computing `mean[t]`". This partially worked for competent models on obvious cases. It failed for:
+The first attempt added rules to the LLM prompt: "do not index `y[t]` when computing `mean[t]`." Rejected on a structural argument, not a benchmark. The reasoning:
 
-- **Off-by-one errors** — the LLM writes `y[1:]` believing it's causal.
-- **Cumulative expressions** — `y.cumsum()[t]` uses the future without an obvious `[t+k]`.
-- **JAX vectorization idioms** — `jnp.roll(y, 1)` looks innocent but leaks at the wraparound.
+- The rule has to hold for *every token* of *every generated program*, across arbitrarily many JAX/NumPy idioms — negative indexing, `jnp.roll`, `cumsum`, `where`, custom convolutions, batched slicing, off-by-one bugs. The set of syntactic patterns that yield future-index access is open-ended; enumerating the safe ones in a prompt is not a finite task.
+- Prompt compliance is a property of the LLM (probabilistic, per-token). Contract compliance is a property of the emitted program (deterministic, per-run). Enforcing a per-program invariant via a per-token nudge is a mismatch of scale.
 
-Prompt discipline is a per-token property of the LLM; leakage is a per-program property. Mismatch of scale. Abandoned.
+We did not run a benchmark of "prompt rules vs. no rules"; the argument above was sufficient to prefer a structural fix. If someone wants to revive prompt engineering as a backstop, the burden of evidence is on demonstrating that a specific prompt suppresses the class of leakage bugs across a representative program sample.
 
 ### 3.2 Windowed next-bin scoring (rejected on the `windowed-scoring` branch)
 
@@ -113,18 +115,32 @@ def apply_model(model_fn, data, params):
     y = data["y"]                     # (n_samples, T)
 
     def per_sample(y_traj, p):
+        # DEFAULT_PARAMS keys with an "s0_" prefix declare initial-state
+        # values; strip the prefix and use them as the scan's initial carry.
         init_state = {k.removeprefix("s0_"): v for k, v in p.items() if k.startswith("s0_")}
+        # Everything else is a dynamics parameter (learnable by Adam).
         dyn_params = {k: v for k, v in p.items() if not k.startswith("s0_")}
 
         def scan_step(state, y_prev):
             new_state, mean = model_fn(state, y_prev, dyn_params)
             return new_state, mean
 
-        _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
+        # jax.lax.scan is a JAX-native sequential loop: at step t it calls
+        # scan_step(state_{t-1}, y_traj[t-1]) and threads the returned state
+        # forward. Because we feed y_traj[:-1], at step t the model sees
+        # only y[t-1] and must return E[y[t]] — y[t..] is not in scope.
+        _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])   # means shape (T-1,)
+        # Broadcast the learnable per-trajectory observation noise over
+        # every step so loss_fn can compute a Gaussian NLL uniformly.
         log_sigma = jnp.full_like(means, dyn_params["log_sigma_obs"])
-        return jnp.stack([means, log_sigma], axis=-1)   # (T-1, 2)
+        # Stack (mean, log_sigma) into columns of a single array — required
+        # because the framework's apply_model contract is "return one array,"
+        # not a dict (see §5.2 for why). loss_fn splits them back apart.
+        return jnp.stack([means, log_sigma], axis=-1)                   # (T-1, 2)
 
-    return jax.vmap(per_sample, in_axes=(0, 0))(y, params)   # (n_samples, T-1, 2)
+    # vmap runs per_sample across the n_samples batch axis on the GPU in
+    # one fused kernel (not a Python for-loop). Result: (n_samples, T-1, 2).
+    return jax.vmap(per_sample, in_axes=(0, 0))(y, params)
 ```
 
 Two things to notice:
@@ -278,13 +294,13 @@ Fix: `X_eval` uses short trajectories (T=100 rather than the full T=2400), and `
 
 ### 6.1 Per-program cost
 
-Every LLM offspring has a novel state shape. JAX compiles per shape, so each program pays a fresh compile of ~ 3-8 seconds. The scan itself runs at ~ 1-3 ms per trajectory (T=2400, state~4 scalars) on a single A100. For a generation of 4 offspring × 8 islands = 32 programs, the compile cost dominates: ~ 3 minutes of compile per generation, ~ 30 seconds of actual gradient descent.
+Every LLM offspring has a novel state shape. JAX compiles per shape, so each program pays a fresh compile of ~ 3-8 seconds. The scan itself runs at ~ 1-3 ms per trajectory (T=2400, state ≈ 4 scalars) on a single A100. For a generation of 4 offspring × 8 islands = 32 programs, the compile cost dominates: ~ 3 minutes of compile per generation, ~ 30 seconds of actual gradient descent.
 
 This is acceptable and expected. The compile cost cannot be shared across programs because their state shapes differ, and pretending otherwise would require an untyped state representation that would defeat the point.
 
 ### 6.2 Backprop memory
 
-For T=2400, state~4 scalars, batch~16 trajectories, backprop tape ~ 2400 × 4 × 16 × 4 bytes = 600 KB. Utterly comfortable. The scaling is `O(T × |state| × batch)`. At T=10000 with 100-dim state and 64-trajectory batch, we're at 250 MB — still comfortable on modern GPUs, but the regime where `remat_scan` becomes worth considering.
+For T=2400, state dim ≈ 4 scalars, batch ≈ 16 trajectories, backprop tape ≈ 2400 × 4 × 16 × 4 bytes = 600 KB. Utterly comfortable. The scaling is `O(T × |state| × batch)`. At T=10000 with 100-dim state and 64-trajectory batch, we're at 250 MB — still comfortable on modern GPUs, but the regime where `remat_scan` becomes worth considering.
 
 ### 6.3 Number of parameters
 
