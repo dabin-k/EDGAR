@@ -323,9 +323,10 @@ Ground-truth benchmarks on a 16-trajectory, T=2400 dataset:
 | oracle floor | **-2.3134** | true dynamics + true `w`, per-trajectory MLE σ |
 | best seed | -2.1703 | best of four 1D-only hand-written seeds |
 | persistence | -2.1355 | `mean = y_prev` |
-| discovery budget | +0.178 nat | headroom for evolution to close |
+| discovery budget | +0.1779 nat | oracle − persistence, headroom for evolution to close |
+| **top-3 evolved (mean)** | **≈ -2.198** | top-3 programs from the run below; closes ≈ 20 % of the seed→oracle gap (0.03 / 0.14 nat) |
 
-A four-generation LLM-driven run (Claude Code as the model author) produced 44 programs total, of which 37 added a hidden state variable, 33 beat the best seed, and the top three converged to NLL ≈ -2.197 — closing ~19% of the discovery budget on held-out validate cells. Post-hoc leakage inspection confirmed zero programs violated the causal contract; the state-space DSL made leakage a scope error, and scope errors don't happen at random.
+A five-generation LLM-driven run (Claude Code as the model author, run `program_databases/08-01/17-51-50/`) produced 44 programs total, of which 37 added a hidden state variable and 33 beat the best seed. Numbers are on the **discover** split — validate-split scoring was not run for this pass, so the closure percentage above is a discover-set claim, not a held-out one. Post-hoc leakage inspection: the four seeds and every evolved program that produced a finite loss satisfy the ISOLATION invariant below (`leakage_check.py`). We did not statically inspect every AST for `y[≥t]` access — the DSL makes such access a Python scope error, so passing ISOLATION on every finite program is the strongest structural evidence available.
 
 Structural invariants tested per program (`leakage_check.py`):
 
