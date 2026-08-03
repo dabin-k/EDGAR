@@ -1,0 +1,40 @@
+run:
+  random_seed: 42
+
+io:
+  data_path: ""     # synthetic; unused
+
+evolution:
+  # Smoke defaults — override on the CLI for real runs.
+  n_generations: 2
+  n_islands: 2
+  batch_size: 2
+  critical_population_size: 6
+  n_migrants: 1
+  topology: [1, 0]
+
+llms:
+  num_parents: 2
+  model_llm: claude-code-headless
+  param_est_llm: claude-code-headless
+  jax_model_translator_llm: claude-code-headless
+  max_tokens: 10000
+
+scoring:
+  param_penalty_weight: 0.001
+  timeout_s: 600.0
+  gradient_descent:
+    max_iter: 500
+    learning_rate: 0.005
+    gradient_clip_norm: 5.0
+
+project_params:
+  n_trajectories: 32
+  T: 2400
+  dt: 0.05
+  mu: 2.0            # relaxation regime; period ~7.6 time units ≈ 152 steps
+  proc_noise_std: 0.3
+  obs_noise_std: 0.15
+  T_eval: 200
+  n_eval: 4
+  seed: 42

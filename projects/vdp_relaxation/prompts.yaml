@@ -1,0 +1,174 @@
+# State-space DSL for stochastic van der Pol. Deep-merged over projects/prompt_defaults.yaml.
+#
+# Discovery story: unlike FHN's excitable dynamics (which need a slow hidden
+# refractory variable), van der Pol needs a hidden velocity AND a nonlinear
+# damping term that reverses sign at |x| > 1. Linear-damping models can track
+# a limit cycle only crudely; the (1 - x^2) * u structure is what makes VdP
+# relaxation dynamics work.
+
+model:
+  base: 'You are an AI scientist learning a **state-space model** for a noisy 1-D
+    signal that comes from a **nonlinear relaxation oscillator**. Each trajectory
+    is a slow-fast limit cycle: the observed position sits near a turning point
+    for a while, then swings quickly through zero to the opposite turning point.
+    The underlying system has two state variables (position and velocity) but you
+    only observe ONE of them (position) at each timestep.
+
+    Your model tracks a hidden state (which should include an unobserved velocity-like
+    variable) and at each step predicts the next observation from that state. Simple
+    linear damping (like `du/dt = -gamma * u - x`) is NOT ENOUGH — it produces a
+    plain decaying sinusoid, not a limit cycle with fast swings between turning
+    points. The nonlinearity that separates fast and slow phases is essential.
+
+    You are given the PREVIOUS observation y[t-1] to update your state; you must
+    NOT peek at y[t] when predicting it. The framework enforces this: y[t] is not
+    in scope. Loss is per-sample Gaussian negative log-likelihood over the
+    trajectory (after a fixed 100-step warmup during which the hidden-state prior
+    stabilises). Lower is better.
+
+    A trivial baseline predicts y[t] ≈ y[t-1] (persistence) and gets slaughtered
+    on the fast swings through zero. A linear oscillator seed can capture some of
+    the rhythm but cannot represent the flat turning-point plateaus. To beat both,
+    your model MUST (a) carry a hidden velocity-like variable, and (b) let its
+    damping depend on position — the effective damping should be NEGATIVE when
+    |position| is small (amplifies motion) and POSITIVE when |position| is large
+    (brakes motion). A term like `(1 - x*x) * u` inside the velocity update is
+    the canonical shape.
+
+    Below are {num_parents} models, sorted from worst to best. *Analyze* their
+    progression, *generalize* what lowers the loss, and *create* a new model that
+    beats all of them.
+
+    '
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Model signature must be `def model(state, y_prev, params):` — a SINGLE
+    step of a state-space model. `state` is a dict of scalar floats (the current
+    belief); `y_prev` is a scalar (the observation from the previous timestep);
+    `params` is a dict of learnable scalars.
+
+    * OUTPUT: return the tuple `(new_state, mean)` where `new_state` is a dict
+    with EXACTLY the same keys as `state`, and `mean` is a scalar — your
+    prediction of the next observation''s mean. Do NOT return an array. Do NOT
+    return a distribution — observation noise is handled by a single learnable
+    `log_sigma_obs` parameter (see below).
+
+    * y[t] IS NOT IN SCOPE. You only see `y_prev` = y[t-1] and the current
+    `state`. Predicting y[t] means outputting a mean based on state and y_prev;
+    the framework compares it to the true y[t] for the loss.
+
+    * **HIDDEN STATE IS ESSENTIAL FOR THIS TASK.** The underlying system is a
+    limit-cycle oscillator whose damping depends on position. Introduce a hidden
+    scalar (name it `u` for "velocity", `v` for "momentum", whatever) that:
+        - is updated by an acceleration-like expression involving BOTH position
+          and velocity
+        - has a NONLINEAR position-dependent damping term (e.g. a factor like
+          `(1 - x*x)` multiplying the velocity, or a cubic in velocity like `u^3`)
+        - modulates the position update via `x_next = x + dt * u` (or similar)
+
+    * PATTERN (predict-then-update, Kalman-style with hidden velocity):
+        innovation = y_prev - state["x"]
+        x_c = state["x"] + gain_x * innovation
+        u_c = state["u"] + gain_u * innovation      # optionally correct velocity
+        # dynamics — NONLINEAR position-dependent damping
+        du = mu * (1.0 - x_c * x_c) * u_c - x_c
+        u_next = u_c + dt * du
+        x_next = x_c + dt * u_next                   # or use u_c for explicit Euler
+        mean = x_next
+
+    * You may store additional state if it helps. Keep the state small (≤ 6
+    scalars). Every state key needs a matching `s0_<key>` in DEFAULT_PARAMS.
+
+    * DEFAULT_PARAMS convention:
+        - Include one entry per learnable parameter, e.g. `mu`, `dt`, `k_gain`.
+        - Include `log_sigma_obs` — the log observation noise std (typically -2 to 0).
+        - For each state key `<key>`, include an entry `s0_<key>` — the initial
+          value the framework will use as the scan starting state.
+      Example for state = {{"x": ..., "u": ...}} VdP-like model:
+        model.DEFAULT_PARAMS = {{"mu": 2.0, "dt": 0.05, "k_x": 0.3,
+                                 "log_sigma_obs": -1.5,
+                                 "s0_x": 2.0, "s0_u": 0.0}}
+      The framework strips the `s0_` prefix and passes those as `state`; the rest
+      are the `params` dict your model receives.
+
+    * CRITICAL: array shapes are irrelevant — state values are scalars.
+    Use pure scalar arithmetic. No `np.arange`, no dynamic shapes, no slicing.
+
+    * Provide `model.DEFAULT_PARAMS`: sensible float initial values for every key
+    in `params`, including all `s0_*` and `log_sigma_obs` keys.
+
+    '
+parameter_estimator:
+  code_guidelines: '**Code Generation Guidelines:**
+
+    * Import any packages you use (use numpy as np).
+
+    * Function signature must be `def parameter_estimator(data):`. `data` is
+    one trajectory''s training dict with `data[''y'']` — a 1-D array of length T
+    of the observed time series.
+
+    * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`,
+    including `log_sigma_obs` AND every `s0_*` initial-state key. Missing any of
+    these will cause your parameter_estimator to be rejected. All values must be
+    plain Python floats.
+
+    * Sensible defaults for common keys:
+        - `log_sigma_obs`: log of the std of first-difference residuals
+          (`np.log(np.diff(y).std())`).
+        - `s0_x` (or the observable-position initial value): `float(y[0])`.
+        - `s0_u` / `s0_v` (hidden velocity initial values): can be estimated as
+          `(y[1] - y[0]) / dt` — this uses only causal information. Or start at 0.0
+          and let gradient descent refine.
+        - Time-constants / gains: pick small values like `0.05` to `0.3`; gradient
+          descent will refine.
+
+    * Your response **must** be less than {max_lines} lines including imports.
+
+    * Do not use complex fitting functions like {swear_words}; a simple, fast
+    initial estimate is all that is needed.
+
+    * Do not call the model function; you will not have access to it.
+
+    '
+jax_translator_model:
+  code_guidelines: 'CRITICAL JAX compatibility requirements for this state-space
+    project:
+
+    * The model signature is `def model(state, y_prev, params)` and returns
+    `(new_state, mean)` — a Python tuple whose second element is a jnp scalar.
+    Preserve this signature and return-tuple structure exactly.
+
+    * `state` and `new_state` are Python dicts with the SAME keys throughout the
+    scan. Do not add, remove, or rename keys. Every access `state["key_name"]`
+    must have a matching entry in the returned `new_state`.
+
+    * Preserve `model.DEFAULT_PARAMS` verbatim, including all `s0_*` prefixed
+    keys and `log_sigma_obs`. These are load-bearing: the framework strips
+    `s0_*` to build the scan carry and reads `log_sigma_obs` to build the
+    Gaussian NLL.
+
+    * Replace all boolean indexing with `jnp.where`.
+
+    * Use `jnp` everywhere (no `np`). Use `jnp.clip` for clipping — not
+    `jax.lax.clip`.
+
+    * Avoid Python control flow (if/for) that depends on array values. Use
+    `jnp.where` for element-wise conditionals.
+
+    * No dynamic array shapes — all constants must be Python literals or
+    compile-time integers.
+
+    * Never call Python `int()` / `float()` on JAX values. Use `x.astype(float)`
+    instead.
+
+    * Ensure compatibility with `jax.jit`, `jax.grad`, `jax.vmap`, AND
+    `jax.lax.scan` — the model is called inside a scan whose carry structure
+    must be invariant. Do not introduce any operation that produces a tracer
+    with a shape different from `state`.
+
+    * Ensure all string values in function call arguments are properly
+    JSON-escaped.
+
+    '
