@@ -193,7 +193,7 @@ if __name__ == "__main__":
     ap.add_argument(
         "--threshold",
         type=float,
-        default=0.002,
+        default=0.009,
         help="STLSQ threshold; must sit below the smallest true D (0.01)",
     )
     ap.add_argument("--block-len", type=int, default=200, dest="block_len")
