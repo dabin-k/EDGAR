@@ -34,6 +34,16 @@ where the learnable ``s0_*`` prior has not yet been corrected by observations.
 Edit the number here to change; there is no YAML surface for this because a
 data-dict key would be traced by JIT and cause ``ConcretizationTypeError``."""
 
+TEST_WARMUP_STEPS: int = 0
+"""Leading predictions ignored by ``loss_fn`` when evaluating on the *test*
+window. Zero: ``roll_state`` scans the whole train window (>> WARMUP_STEPS) from
+``s0_*``, so the latent carried across the boundary is already converged — the
+first test prediction has no init transient to discard. The test dicts stamp this
+as ``_eval_warmup``; the train (fitting) path has no such key and falls back to
+``WARMUP_STEPS``. Kept symmetric with ``WARMUP_STEPS`` so both are tunable in one
+place. Safe as a data-dict value because the test path is eager (never jitted),
+unlike the fit loss — so no ``ConcretizationTypeError``."""
+
 
 # ── data synthesis: noisy oscillator with drifting frequency ──
 
@@ -160,16 +170,25 @@ def load_data(
         residuals = y_np[:, 1:] - y_np[:, :-1]
         sigma = np.maximum(residuals.std(axis=-1, keepdims=True), 1e-3)
         nll = np.log(sigma) + 0.5 * (residuals / sigma) ** 2
-        return nll[:, WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
+        return nll[:, TEST_WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
 
-    # Baseline computed on the test window so it matches discover.final (held-out).
+    # Baseline computed on the test window (at TEST_WARMUP_STEPS) so it matches
+    # discover.final, the model's now-warmup-free held-out test loss.
     pers_disc = _persistence_nll_per_trajectory(np.asarray(_test_win(y_disc)))
     pers_val = _persistence_nll_per_trajectory(np.asarray(_test_win(y_val)))
 
     X_disc_train = {"y": _train_win(y_disc)}
-    X_disc_test = {"y": _test_win(y_disc), "_persistence_nll": jnp.asarray(pers_disc)}
+    X_disc_test = {
+        "y": _test_win(y_disc),
+        "_eval_warmup": TEST_WARMUP_STEPS,
+        "_persistence_nll": jnp.asarray(pers_disc),
+    }
     X_val_train = {"y": _train_win(y_val)}
-    X_val_test = {"y": _test_win(y_val), "_persistence_nll": jnp.asarray(pers_val)}
+    X_val_test = {
+        "y": _test_win(y_val),
+        "_eval_warmup": TEST_WARMUP_STEPS,
+        "_persistence_nll": jnp.asarray(pers_val),
+    }
 
     # X_eval: SHORT trajectories for fingerprint dedup (avoids cosine-collapse
     # of phase-locked long trajectories). Uses same generator with a fresh rng
@@ -310,12 +329,15 @@ def loss_fn(model_output, data):
     ``model_output``: ``(n_samples, T-1, 2)`` (means and log_sigma stacked).
     ``data["y"]``:    ``(n_samples, T)`` targets; scan predicts y[1..T-1].
     ``WARMUP_STEPS`` is a module-level Python constant (jit-safe, cloudpickle-
-    survivable). See its docstring for why not a config value.
+    survivable). See its docstring for why not a config value. The test dicts
+    override the skip to ``TEST_WARMUP_STEPS`` via ``_eval_warmup``; only the eager
+    test path supplies the key, so the jitted fit loss keeps the static default.
     """
+    warmup = int(data.get("_eval_warmup", WARMUP_STEPS))
     y = data["y"][:, 1:]                         # (n_samples, T-1)
-    means      = model_output[:, WARMUP_STEPS:, 0]
-    log_sigmas = model_output[:, WARMUP_STEPS:, 1]
-    tgt        = y[:, WARMUP_STEPS:]
+    means      = model_output[:, warmup:, 0]
+    log_sigmas = model_output[:, warmup:, 1]
+    tgt        = y[:, warmup:]
     nll = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     return jnp.mean(nll, axis=-1)                # (n_samples,)
 

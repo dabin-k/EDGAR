@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from projects.vdp_relaxation.data_loader.load_data import (   # noqa: E402
-    apply_model, WARMUP_STEPS, load_data,
+    apply_model, TEST_WARMUP_STEPS, load_data,
 )
 
 
@@ -50,7 +50,7 @@ def analyse(run_dir: Path) -> None:
     dt = pp["dt"]
     x_next_raw = x_true[:, :-1] + dt * u_true[:, :-1]
     x_next_y = (x_next_raw - y_shift) / y_scale
-    resid = (y[:, 1:] - x_next_y)[:, WARMUP_STEPS:]
+    resid = (y[:, 1:] - x_next_y)[:, TEST_WARMUP_STEPS:]
     sigma_mle = np.maximum(resid.std(axis=1), 1e-6)
     L_oracle = float((np.log(sigma_mle) + 0.5).mean())
     L_pers = float(np.asarray(Xd_te["_persistence_nll"]).mean())

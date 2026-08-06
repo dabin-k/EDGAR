@@ -41,6 +41,16 @@ its DEFAULT_PARAMS prior and takes ~1 spike-cycle (~90 steps at ε=0.08,
 dt=0.05) to stabilise. See docstring in oscillator_ss/load_data.py for why
 this is a Python constant, not a config value."""
 
+TEST_WARMUP_STEPS: int = 0
+"""Leading predictions ignored by ``loss_fn`` when evaluating on the *test*
+window. Zero: ``roll_state`` scans the whole train window (>> WARMUP_STEPS) from
+``s0_*``, so the latent carried across the boundary is already converged — the
+first test prediction has no init transient to discard. The test dicts stamp this
+as ``_eval_warmup``; the train (fitting) path has no such key and falls back to
+``WARMUP_STEPS``. Kept symmetric with ``WARMUP_STEPS`` so both are tunable in one
+place. Safe as a data-dict value because the test path is eager (never jitted),
+unlike the fit loss — so no ``ConcretizationError``."""
+
 
 # ── data synthesis: stochastic FitzHugh-Nagumo ──
 
@@ -169,11 +179,13 @@ def load_data(
         return arr[:, split_t - 1:]
 
     # Persistence-baseline NLL per trajectory — diagnostic, matches oscillator_ss.
+    # Computed on the test window at TEST_WARMUP_STEPS so it stays comparable to
+    # the model's (now warmup-free) held-out test loss.
     def _persistence_nll_per_trajectory(y_np: np.ndarray) -> np.ndarray:
         residuals = y_np[:, 1:] - y_np[:, :-1]
         sigma = np.maximum(residuals.std(axis=-1, keepdims=True), 1e-3)
         nll = np.log(sigma) + 0.5 * (residuals / sigma) ** 2
-        return nll[:, WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
+        return nll[:, TEST_WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
 
     pers_disc = _persistence_nll_per_trajectory(np.asarray(_test_win(y_disc)))
     pers_val = _persistence_nll_per_trajectory(np.asarray(_test_win(y_val)))
@@ -181,6 +193,7 @@ def load_data(
     X_disc_train = {"y": _train_win(y_disc)}
     X_disc_test = {
         "y": _test_win(y_disc),
+        "_eval_warmup": TEST_WARMUP_STEPS,
         "_persistence_nll": jnp.asarray(pers_disc),
         # Oracle sidecars for scripts/fhn_oracle_nll.py, sliced to the same test
         # window as "y"; scoring path never reads them (apply_model / loss_fn
@@ -193,6 +206,7 @@ def load_data(
     X_val_train = {"y": _train_win(y_val)}
     X_val_test = {
         "y": _test_win(y_val),
+        "_eval_warmup": TEST_WARMUP_STEPS,
         "_persistence_nll": jnp.asarray(pers_val),
         "_w_true": _test_win(w_val),
         "_V_true": _test_win(V_val),
@@ -313,11 +327,18 @@ def roll_state(model_fn, data, params):
 
 
 def loss_fn(model_output, data):
-    """Per-sample Gaussian NLL over the post-warmup horizon."""
+    """Per-sample Gaussian NLL over the post-warmup horizon.
+
+    ``warmup`` defaults to the fit-time ``WARMUP_STEPS``; the test dicts override
+    it to ``TEST_WARMUP_STEPS`` (=0) via ``_eval_warmup``. Only the eager test path
+    supplies the key, so the jitted fit loss always sees the static default — no
+    ``ConcretizationError``.
+    """
+    warmup = int(data.get("_eval_warmup", WARMUP_STEPS))
     y = data["y"][:, 1:]
-    means = model_output[:, WARMUP_STEPS:, 0]
-    log_sigmas = model_output[:, WARMUP_STEPS:, 1]
-    tgt = y[:, WARMUP_STEPS:]
+    means = model_output[:, warmup:, 0]
+    log_sigmas = model_output[:, warmup:, 1]
+    tgt = y[:, warmup:]
     nll = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     return jnp.mean(nll, axis=-1)
 
