@@ -226,33 +226,70 @@ def _split_params_s0(params: dict) -> tuple[dict, dict]:
     return init_state, dyn_params
 
 
-def apply_model(model_fn, data, params):
-    """State-space scan wrapper — identical to oscillator_ss's.
+def _scan_one(model_fn, y_traj, init_state, dyn_params):
+    """Scan ``model_fn`` over one trajectory, returning ``(means, final_state)``.
+    We keep the final carry so ``roll_state`` can hand it to the test window.
 
-    ``model_fn(state, y_prev, dyn_params) -> (new_state, mean)`` is scanned
-    over the trajectory. ``y[t]`` is never in scope inside ``model_fn`` when
-    it predicts y[t] — that's the causality guarantee.
+    Returns : 
+        - means: (T-1,) array — the one-step ahead prediction at each step.
+        - final_state: dictionary (pytree) of the same structure as ``init_state``.
+    """
+    def scan_step(state, y_prev):
+        new_state, mean = model_fn(state, y_prev, dyn_params)
+        return new_state, mean
+
+    final_state, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
+    return means, final_state
+
+
+def apply_model(model_fn, data, params):
+    """State-space scan wrapper.
 
     Returns:
       - Normal path: ``(n_samples, T-1, 2)`` — means and broadcast log_sigma.
       - Fingerprint path: ``(n_samples, T-1)`` — residuals (y_true - mean).
+
+    When we apply the model to test trials, we don't want to use the fitted init_state. 
+    Instead, we roll the state across the train/test boundary, which is achieved by
+    ``roll_state`` on the train_window and saved as ``data["_init_carry"]``. The test window 
+    then uses this carry as the initial state for its scan.
+    
+    Absent the key, behaviour is the plain-scan default - this is the behaviour on train trials. 
     """
     y = data["y"]
     fingerprint_only = bool(data.get("_fingerprint_only", False))
+    init_carry = data.get("_init_carry")
+    # None broadcasts to every sample; a per-sample carry is mapped over axis 0.
+    carry_axis = None if init_carry is None else 0
 
-    def per_sample(y_traj, p):
+    def per_sample(y_traj, p, carry):
         init_state, dyn_params = _split_params_s0(p)
-
-        def scan_step(state, y_prev):
-            new_state, mean = model_fn(state, y_prev, dyn_params)
-            return new_state, mean
-
-        _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
+        if carry is not None:
+            init_state = carry
+        means, _ = _scan_one(model_fn, y_traj, init_state, dyn_params)
         if fingerprint_only:
             targets = y_traj[1:]
             return targets - means
         log_sigma = jnp.full_like(means, dyn_params["log_sigma_obs"])
         return jnp.stack([means, log_sigma], axis=-1)
+
+    return jax.vmap(per_sample, in_axes=(0, 0, carry_axis))(y, params, init_carry)
+
+
+def roll_state(model_fn, data, params):
+    """Return the per-sample final latent carry after scanning the train trials.
+
+    Registered by the scorer (via ``TaskSpec.rollout_fn``) as the train→test
+    hand-off: the returned pytree becomes ``data["_init_carry"]`` for the test
+    evaluation. Scans from each sample's ``s0_*`` params — the train window always
+    starts from the learnable initial state.
+    """
+    y = data["y"]
+
+    def per_sample(y_traj, p):
+        init_state, dyn_params = _split_params_s0(p)
+        _, final_state = _scan_one(model_fn, y_traj, init_state, dyn_params)
+        return final_state
 
     return jax.vmap(per_sample, in_axes=(0, 0))(y, params)
 

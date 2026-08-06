@@ -131,6 +131,13 @@ class TaskSpec:
             (a single `vmap` over axis-0). A project may override it by defining
             `apply_model(model_fn, data, params)` in its `data_loader/load_data.py`
             (e.g. the mPFC windowed nested vmap).
+        rollout_fn (Callable | None): Optional per-project hook for stateful
+            (state-space) projects that define `roll_state(model_fn, data, params)`
+            in their `data_loader/load_data.py`. It returns the per-sample final
+            latent carry after scanning the train trials, which the scorer feeds
+            into test evaluation so dynamics/noise params can be cross-validated on
+            held-out trials without refitting the initial state. None (default)
+            leaves scoring unchanged for stateless projects.
         creation_timestamp (str): Timestamp set at construction, used to create the
             hierarchical on-disk layout `<save_path>/MM-DD/HH-MM-SS/`.
         seed_programs (list[Program]): Hand-written seed programs (typically 2) that
@@ -174,6 +181,8 @@ class TaskSpec:
     plot_fn: Callable | None
 
     apply_model_fn: Callable = field(default=None)
+
+    rollout_fn: Callable | None = field(default=None)
 
     creation_timestamp: str = field(
         default_factory=lambda: datetime.now().strftime("%m-%d/%H-%M-%S")
@@ -226,6 +235,10 @@ class TaskSpec:
             or apply_model_plain
         )
 
+        rollout_fn = load_function_from_source(
+            data_loader_path.read_text(), "roll_state"
+        )
+
         plot_path = config.project_dir / "image_feedback" / "plot.py"
         plot_fn = (
             load_function_from_source(plot_path.read_text(), "plot_model_fits")
@@ -272,6 +285,7 @@ class TaskSpec:
             loss_fn=loss_fn,
             plot_fn=plot_fn,
             apply_model_fn=apply_model_fn,
+            rollout_fn=rollout_fn,
             seed_programs=seed_programs,
             rng=np.random.default_rng(config.run.random_seed),
         )

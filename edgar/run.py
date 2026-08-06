@@ -181,6 +181,7 @@ async def run(
                     spec.loss_fn,
                     split="discover",
                     apply_model_fn=spec.apply_model_fn,
+                    rollout_fn=spec.rollout_fn,
                     n_items=len(spec.seed_programs),
                 )
                 t_fits_seeds(spec, X_discover[1], population)
@@ -251,6 +252,7 @@ async def run(
                     spec.loss_fn,
                     split="discover",
                     apply_model_fn=spec.apply_model_fn,
+                    rollout_fn=spec.rollout_fn,
                     n_items=n_spawn,
                 )
                 t_fits(spec, X_discover[1], population)
@@ -293,6 +295,7 @@ async def run(
                 spec.loss_fn,
                 split="validate",
                 apply_model_fn=spec.apply_model_fn,
+                rollout_fn=spec.rollout_fn,
             )
             rank(population)
 
