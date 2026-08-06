@@ -38,7 +38,7 @@ def main() -> int:
     pp = dict(cfg.get("project_params", {}))
     (Xd_tr, Xd_te), _, _ = load_data(**pp)
 
-    y = np.asarray(Xd_tr["y"], dtype=np.float64)
+    y = np.asarray(Xd_te["y"], dtype=np.float64)
     V_true = np.asarray(Xd_te["_V_true"], dtype=np.float64)
     w_true = np.asarray(Xd_te["_w_true"], dtype=np.float64)
     y_shift = np.asarray(Xd_te["_y_shift"], dtype=np.float64)[:, None]     # (n, 1)
@@ -59,7 +59,7 @@ def main() -> int:
 
     pers = float(np.asarray(Xd_te["_persistence_nll"]).mean())
 
-    print(f"\n=== FHN oracle NLL (discovery split) ===")
+    print(f"\n=== FHN oracle NLL (discovery test window) ===")
     print(f"  post-warmup residual std      : min={sigma_mle.min():.4f}  "
           f"mean={sigma_mle.mean():.4f}  max={sigma_mle.max():.4f}")
     print(f"  ORACLE NLL floor              : {nll_oracle:+.4f} nat / bin")

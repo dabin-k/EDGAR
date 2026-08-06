@@ -80,6 +80,7 @@ def main(run_dir: Path) -> int:
         population, (Xv_tr, Xv_te), None,
         config=spec.scoring, loss_fn=spec.loss_fn, split="validate",
         apply_model_fn=spec.apply_model_fn,
+        rollout_fn=spec.rollout_fn,
     )
 
     rank(population)
