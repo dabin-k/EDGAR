@@ -62,7 +62,7 @@ def main() -> int:
 
     pers = float(np.asarray(Xd_te["_persistence_nll"]).mean())
 
-    print(f"\n=== VdP oracle NLL (discovery split) ===")
+    print(f"\n=== VdP oracle NLL (discovery test window) ===")
     print(f"  post-warmup residual std      : min={sigma_mle.min():.4f}  "
           f"mean={sigma_mle.mean():.4f}  max={sigma_mle.max():.4f}")
     print(f"  ORACLE NLL floor              : {nll_oracle:+.4f} nat / bin")
