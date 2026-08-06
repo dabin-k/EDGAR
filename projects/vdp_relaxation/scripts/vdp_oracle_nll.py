@@ -42,7 +42,7 @@ def main() -> int:
     pp = dict(cfg.get("project_params", {}))
     (Xd_tr, Xd_te), _, _ = load_data(**pp)
 
-    y = np.asarray(Xd_tr["y"], dtype=np.float64)
+    y = np.asarray(Xd_te["y"], dtype=np.float64)
     x_true = np.asarray(Xd_te["_x_true"], dtype=np.float64)
     u_true = np.asarray(Xd_te["_u_true"], dtype=np.float64)
     y_shift = np.asarray(Xd_te["_y_shift"], dtype=np.float64)[:, None]     # (n, 1)
