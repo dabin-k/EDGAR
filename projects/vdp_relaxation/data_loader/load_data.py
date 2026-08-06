@@ -201,13 +201,10 @@ def load_data(
     }
 
     n_eval_actual = int(min(max(1, n_eval), len(disc_idx)))
-    eval_ys = np.stack([
-        _synth_vdp(split_rng, T_eval, dt, mu, proc_noise_std, obs_noise_std)[0]
-        for _ in range(n_eval_actual)
-    ])
+    T_eval_actual = int(min(T_eval, split_t))
     eval_pos = np.sort(split_rng.choice(len(disc_idx), n_eval_actual, replace=False))
     X_eval = {
-        "y": jnp.asarray(eval_ys),
+        "y": y_disc[eval_pos, :T_eval_actual],
         "_sample_indices": eval_pos,
         "_fingerprint_only": True,
     }
@@ -217,7 +214,7 @@ def load_data(
         f"disc/val={len(disc_idx)}/{len(val_idx)}; "
         f"split_t={split_t} (train {split_t} / test {T - split_t + 1} timesteps); "
         f"mu={mu}; proc/obs noise={proc_noise_std}/{obs_noise_std}; "
-        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval}, n={n_eval_actual}"
+        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval_actual}, n={n_eval_actual}"
     )
 
     return (

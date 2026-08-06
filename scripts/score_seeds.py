@@ -37,6 +37,7 @@ def main(config_path: str) -> int:
             scoring_cfg,
             X_eval=X_eval,
             apply_model_fn=spec.apply_model_fn,
+            rollout_fn=spec.rollout_fn,
         )
         # Prefer MSE baseline if present (windowed projects); fall back to
         # NLL baseline for state-space projects; else print without skill.

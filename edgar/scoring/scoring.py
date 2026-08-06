@@ -319,7 +319,11 @@ def _worker(
             `param_penalty_weight` and `gradient_descent` settings.
         X_eval: A dictionary of evaluation data for fingerprinting, or `None`.
         split: A string indicating the current scoring split (e.g., "discover" or "validate").
-
+        apply_model_fn_bytes: A `cloudpickle`-serialized function controlling how
+            `model_fn` is mapped over the data (e.g. plain vmap or a nested vmap).
+        rollout_fn_bytes: A `cloudpickle`-serialized ``roll_state`` hook, or `None`.
+            When set, its per-sample final train carry is fed into the test eval
+            as ``_init_carry`` (train→test state hand-off for state-space projects).
     Returns:
         None. Results are placed on the `queue` as a 7-tuple:
         `(final_loss, initial_loss, fingerprint, params, sample_losses, params_init, sample_losses_init)`.

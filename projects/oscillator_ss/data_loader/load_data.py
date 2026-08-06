@@ -191,21 +191,12 @@ def load_data(
     }
 
     # X_eval: SHORT trajectories for fingerprint dedup (avoids cosine-collapse
-    # of phase-locked long trajectories). Uses same generator with a fresh rng
-    # slice so eval trajectories are independent draws.
+    # of phase-locked long trajectories).
     n_eval_actual = int(min(max(1, n_eval), len(disc_idx)))
-    eval_y = np.stack(
-        [
-            _noisy_drifting_oscillator(
-                split_rng, T_eval, dt, freq_mean, freq_drift_amp,
-                freq_drift_period, damping, process_noise_std, obs_noise_std,
-            )
-            for _ in range(n_eval_actual)
-        ]
-    )
+    T_eval_actual = int(min(T_eval, split_t))
     eval_pos = np.sort(split_rng.choice(len(disc_idx), n_eval_actual, replace=False))
     X_eval = {
-        "y": jnp.asarray(eval_y),
+        "y": y_disc[eval_pos, :T_eval_actual],
         "_sample_indices": eval_pos,
         "_fingerprint_only": True,
     }
@@ -216,7 +207,7 @@ def load_data(
         f"split_t={split_t} (train {split_t} / test {T - split_t + 1} timesteps); "
         f"ω_0={freq_mean}±{freq_drift_amp} "
         f"(drift period={freq_drift_period} samples); obs_noise={obs_noise_std}; "
-        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval}, n={n_eval_actual}"
+        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval_actual}, n={n_eval_actual}"
     )
 
     return (
