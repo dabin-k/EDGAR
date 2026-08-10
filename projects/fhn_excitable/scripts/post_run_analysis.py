@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from projects.fhn_excitable.data_loader.load_data import (   # noqa: E402
-    apply_model, WARMUP_STEPS, load_data,
+    apply_model, TEST_WARMUP_STEPS, load_data,
 )
 
 
@@ -41,8 +41,8 @@ def analyse(run_dir: Path) -> None:
     pp = dict(cfg.get("project_params", {}))
     (Xd_tr, Xd_te), _, _ = load_data(**pp)
 
-    # Oracle
-    y = np.asarray(Xd_tr["y"], dtype=np.float64)
+    # Oracle — on the test window (discover.final is the held-out test loss now);
+    y = np.asarray(Xd_te["y"], dtype=np.float64)
     V = np.asarray(Xd_te["_V_true"], dtype=np.float64)
     w = np.asarray(Xd_te["_w_true"], dtype=np.float64)
     y_shift = np.asarray(Xd_te["_y_shift"], dtype=np.float64)[:, None]
@@ -50,7 +50,7 @@ def analyse(run_dir: Path) -> None:
     dt, I0 = pp["dt"], pp["I0"]
     V_next_raw = V[:, :-1] + dt * (V[:, :-1] - V[:, :-1] ** 3 / 3.0 - w[:, :-1] + I0)
     V_next_y = (V_next_raw - y_shift) / y_scale
-    resid = (y[:, 1:] - V_next_y)[:, WARMUP_STEPS:]
+    resid = (y[:, 1:] - V_next_y)[:, TEST_WARMUP_STEPS:]
     sigma_mle = np.maximum(resid.std(axis=1), 1e-6)
     L_oracle = float((np.log(sigma_mle) + 0.5).mean())
     L_pers = float(np.asarray(Xd_te["_persistence_nll"]).mean())
@@ -152,9 +152,15 @@ def analyse(run_dir: Path) -> None:
     figpath = run_dir / "figures" / "top4_fits.png"
     figpath.parent.mkdir(exist_ok=True)
 
-    y_disc = np.asarray(Xd_tr["y"])
+    # Reconstruct the full trajectory (test overlaps train by one boundary sample)
+    # so we can show the fit on the train window AND the held-out test window in
+    # one trace, with a boundary marker. 
+    y_train = np.asarray(Xd_tr["y"])
+    y_test = np.asarray(Xd_te["y"])
+    split_t = y_train.shape[1]
+    y_disc = np.concatenate([y_train, y_test[:, 1:]], axis=1)
     n_traj, T = y_disc.shape
-    T_show = min(700, T - 1)
+    T_show = T - 1
     show = np.linspace(0, min(n_traj - 1, 3), 4).astype(int)
     top4 = ok[:4]
 
@@ -196,10 +202,15 @@ def analyse(run_dir: Path) -> None:
             except Exception as e:
                 print(f"[warn] rendering idx={r['idx']} traj={s}: {e}")
 
+        # Mark the train/test boundary: left of the line is the fit window,
+        # right is the held-out test window (params frozen, state carried over).
+        ax.axvline(split_t, color="gray", ls="--", lw=0.8,
+                   label="train | test" if row_i == 0 else None)
         ax.set_ylabel(f"traj {s}")
         if row_i == 0:
             ax.legend(fontsize=7, loc="upper right")
-            ax.set_title(f"Top-4 FHN-evolved fits — first {T_show} bins")
+            ax.set_title("Top-4 FHN-evolved fits — train fit | held-out test "
+                         "(one-step predictions)")
         if row_i == len(show) - 1:
             ax.set_xlabel("time bin")
 

@@ -32,6 +32,7 @@ scoring:
 project_params:
   n_trajectories: 32
   T: 2400
+  train_frac: 0.5   # fraction of each trajectory used to fit params. Model performance is evaluated on held-out trials
   dt: 0.05
   I0: 0.5           # supra-threshold drive → tonic-ish firing with noise-induced spike times
   a: 0.7

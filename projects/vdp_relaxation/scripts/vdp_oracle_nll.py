@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from projects.vdp_relaxation.data_loader.load_data import (   # noqa: E402
-    load_data, WARMUP_STEPS,
+    load_data, TEST_WARMUP_STEPS,
 )
 
 
@@ -42,7 +42,7 @@ def main() -> int:
     pp = dict(cfg.get("project_params", {}))
     (Xd_tr, Xd_te), _, _ = load_data(**pp)
 
-    y = np.asarray(Xd_tr["y"], dtype=np.float64)
+    y = np.asarray(Xd_te["y"], dtype=np.float64)
     x_true = np.asarray(Xd_te["_x_true"], dtype=np.float64)
     u_true = np.asarray(Xd_te["_u_true"], dtype=np.float64)
     y_shift = np.asarray(Xd_te["_y_shift"], dtype=np.float64)[:, None]     # (n, 1)
@@ -55,14 +55,14 @@ def main() -> int:
     x_next_y = (x_next_raw - y_shift) / y_scale                             # (n, T-1)
 
     resid = y[:, 1:] - x_next_y
-    resid_pw = resid[:, WARMUP_STEPS:]
+    resid_pw = resid[:, TEST_WARMUP_STEPS:]
     sigma_mle = np.maximum(resid_pw.std(axis=1), 1e-6)
     nll_per_traj = np.log(sigma_mle) + 0.5
     nll_oracle = float(nll_per_traj.mean())
 
     pers = float(np.asarray(Xd_te["_persistence_nll"]).mean())
 
-    print(f"\n=== VdP oracle NLL (discovery split) ===")
+    print(f"\n=== VdP oracle NLL (discovery test window) ===")
     print(f"  post-warmup residual std      : min={sigma_mle.min():.4f}  "
           f"mean={sigma_mle.mean():.4f}  max={sigma_mle.max():.4f}")
     print(f"  ORACLE NLL floor              : {nll_oracle:+.4f} nat / bin")

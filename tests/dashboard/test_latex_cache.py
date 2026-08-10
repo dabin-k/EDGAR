@@ -59,8 +59,7 @@ def test_llm_from_task_spec_jax_translator_list(tmp_path: Path):
     """jax_model_translator_llm may be a list (cycled per generation); the config
     schema allows list[ValidLLMs]. We need a single string for the LaTeX call."""
     (tmp_path / "task_spec.yaml").write_text(
-        "llms:\n"
-        f"  jax_model_translator_llm: {json.dumps(['claude-haiku-4-5', 'x'])}\n"
+        f"llms:\n  jax_model_translator_llm: {json.dumps(['claude-haiku-4-5', 'x'])}\n"
     )
     assert _llm_from_task_spec(tmp_path / "task_spec.yaml") == "claude-haiku-4-5"
 

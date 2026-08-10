@@ -156,7 +156,12 @@ def _get_params(param_est_fn, default_params, data_train):
 
 
 def _optimize(
-    model_fn, loss_fn, params_init, data_train, gd_config, apply_model_fn=apply_model_plain
+    model_fn,
+    loss_fn,
+    params_init,
+    data_train,
+    gd_config,
+    apply_model_fn=apply_model_plain,
 ):
     """Performs gradient descent to optimize model parameters.
 
@@ -277,8 +282,35 @@ def _eval_fingerprint(model_fn, params, X_eval, apply_model_fn=apply_model_plain
     return apply_model_fn(model_fn, X_eval, params_matched)
 
 
+def _roll_carry(rollout_fn, model_fn, data_train, params):
+    """Optional train→test state hand-off for stateful (state-space) projects.
+
+    A project may define ``roll_state(model_fn, data, params)`` in its
+    ``load_data.py`` to scan its model over the train trials and return the
+    per-sample final latent carry. When present, we feed that carry into the
+    test evaluation via ``data["_init_carry"]`` so the model rolls across the
+    train/test boundary instead of re-initialising from its ``s0_*`` params —
+    this is what lets the dynamics/noise params be cross-validated on held-out
+    trials without also refitting the initial state.
+
+    Returns a dict to merge into ``data_test``: ``{"_init_carry": carry}`` when a
+    hook is registered, else ``{}`` (so stateless projects are byte-identical).
+    """
+    if rollout_fn is None:
+        return {}
+    return {"_init_carry": rollout_fn(model_fn, data_train, params)}
+
+
 def _worker(
-    queue, program_bytes, data, loss_fn_bytes, config, X_eval, split, apply_model_fn_bytes
+    queue,
+    program_bytes,
+    data,
+    loss_fn_bytes,
+    config,
+    X_eval,
+    split,
+    apply_model_fn_bytes,
+    rollout_fn_bytes,
 ):
     """Scores one program inside a subprocess.
 
@@ -299,7 +331,11 @@ def _worker(
             `param_penalty_weight` and `gradient_descent` settings.
         X_eval: A dictionary of evaluation data for fingerprinting, or `None`.
         split: A string indicating the current scoring split (e.g., "discover" or "validate").
-
+        apply_model_fn_bytes: A `cloudpickle`-serialized function controlling how
+            `model_fn` is mapped over the data (e.g. plain vmap or a nested vmap).
+        rollout_fn_bytes: A `cloudpickle`-serialized ``roll_state`` hook, or `None`.
+            When set, its per-sample final train carry is fed into the test eval
+            as ``_init_carry`` (train→test state hand-off for state-space projects).
     Returns:
         None. Results are placed on the `queue` as a 7-tuple:
         `(final_loss, initial_loss, fingerprint, params, sample_losses, params_init, sample_losses_init)`.
@@ -309,6 +345,7 @@ def _worker(
     program = cloudpickle.loads(program_bytes)
     loss_fn = cloudpickle.loads(loss_fn_bytes)
     apply_model_fn = cloudpickle.loads(apply_model_fn_bytes)
+    rollout_fn = cloudpickle.loads(rollout_fn_bytes)
     data_train, data_test = _resolve_scoring_data(data)
 
     try:
@@ -329,8 +366,14 @@ def _worker(
     try:
         penalty = config["param_penalty_weight"] * program.n_params
         params_init = _get_params(param_est_fn, program.default_params, data_train)
+        # Roll the (un-optimised) model across the train trials and hand its
+        # final state to the test eval; a no-op ({}) for stateless projects.
+        data_test_init = {
+            **data_test,
+            **_roll_carry(rollout_fn, model_fn, data_train, params_init),
+        }
         initial_loss = (
-            _eval_loss(model_fn, loss_fn, params_init, data_test, apply_model_fn)
+            _eval_loss(model_fn, loss_fn, params_init, data_test_init, apply_model_fn)
             + penalty
         )
         params = _optimize(
@@ -341,6 +384,10 @@ def _worker(
             config["gradient_descent"],
             apply_model_fn,
         )
+        data_test = {
+            **data_test,
+            **_roll_carry(rollout_fn, model_fn, data_train, params),
+        }
         final_loss = (
             _eval_loss(model_fn, loss_fn, params, data_test, apply_model_fn) + penalty
         )
@@ -353,6 +400,8 @@ def _worker(
 
     # Fingerprint and sample losses are non-critical: failures here don't poison the loss.
     try:
+        # Fingerprint runs on the independent X_eval set (its own short traces
+        # and sample indices), so it never receives a train-trial carry.
         fingerprint = (
             _eval_fingerprint(model_fn, params, X_eval, apply_model_fn)
             if X_eval is not None
@@ -372,7 +421,9 @@ def _worker(
 
     try:
         sample_losses_init = (
-            _eval_sample_losses(model_fn, loss_fn, params_init, data_test, apply_model_fn)
+            _eval_sample_losses(
+                model_fn, loss_fn, params_init, data_test_init, apply_model_fn
+            )
             if split == "discover"
             else None
         )
@@ -406,6 +457,7 @@ def _score_one_model(
     X_eval=None,
     split: str = "discover",
     apply_model_fn=apply_model_plain,
+    rollout_fn=None,
 ) -> tuple[
     float,
     float,
@@ -438,7 +490,7 @@ def _score_one_model(
         for other results are returned.
     """
     result = _score_one_with_outcome(
-        program, data, loss_fn, config, X_eval, split, apply_model_fn
+        program, data, loss_fn, config, X_eval, split, apply_model_fn, rollout_fn
     )
     return result[:7]
 
@@ -451,6 +503,7 @@ def _score_one_with_outcome(
     X_eval=None,
     split: str = "discover",
     apply_model_fn=apply_model_plain,
+    rollout_fn=None,
 ) -> tuple[
     float,
     float,
@@ -477,6 +530,7 @@ def _score_one_with_outcome(
     loss_fn_bytes = cloudpickle.dumps(loss_fn)
     program_bytes = cloudpickle.dumps(program)
     apply_model_fn_bytes = cloudpickle.dumps(apply_model_fn)
+    rollout_fn_bytes = cloudpickle.dumps(rollout_fn)
     proc = ctx.Process(
         target=_worker,
         args=(
@@ -488,6 +542,7 @@ def _score_one_with_outcome(
             X_eval,
             split,
             apply_model_fn_bytes,
+            rollout_fn_bytes,
         ),
     )
     proc.start()
@@ -565,6 +620,7 @@ def score(
     loss_fn,
     split: str,
     apply_model_fn=apply_model_plain,
+    rollout_fn=None,
 ) -> None:
     """Scores every program needing scoring on the given split.
 
@@ -618,7 +674,14 @@ def score(
                 sample_losses_init,
                 outcome,
             ) = _score_one_with_outcome(
-                program, data_ref, loss_fn, config, X_eval, split, apply_model_fn
+                program,
+                data_ref,
+                loss_fn,
+                config,
+                X_eval,
+                split,
+                apply_model_fn,
+                rollout_fn,
             )
             latency_ms = (time.monotonic() - t0) * 1000.0
             latencies_ms.append(latency_ms)

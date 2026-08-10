@@ -41,6 +41,16 @@ its DEFAULT_PARAMS prior and takes ~1 spike-cycle (~90 steps at ε=0.08,
 dt=0.05) to stabilise. See docstring in oscillator_ss/load_data.py for why
 this is a Python constant, not a config value."""
 
+TEST_WARMUP_STEPS: int = 0
+"""Leading predictions ignored by ``loss_fn`` when evaluating on the *test*
+window. Zero: ``roll_state`` scans the whole train window (>> WARMUP_STEPS) from
+``s0_*``, so the latent carried across the boundary is already converged — the
+first test prediction has no init transient to discard. The test dicts stamp this
+as ``_eval_warmup``; the train (fitting) path has no such key and falls back to
+``WARMUP_STEPS``. Kept symmetric with ``WARMUP_STEPS`` so both are tunable in one
+place. Safe as a data-dict value because the test path is eager (never jitted),
+unlike the fit loss — so no ``ConcretizationError``."""
+
 
 # ── data synthesis: stochastic FitzHugh-Nagumo ──
 
@@ -91,6 +101,7 @@ def load_data(
     data_path: str = "",
     n_trajectories: int = 32,
     T: int = 2400,
+    train_frac: float = 0.5,
     dt: float = 0.05,
     I0: float = 0.5,
     a: float = 0.7,
@@ -104,16 +115,27 @@ def load_data(
 ):
     """Generate stochastic FHN trajectories with observation of V only.
 
-    Returns the standard EDGAR five-way split. Full trajectory used for both
-    train and test (state-space scan carries context); generalization-gap
-    metrics on the dashboard are therefore zero by construction — this is
-    intended for this project.
+    Returns the standard EDGAR five-way split. Trials (timesteps) are split into
+    two contiguous chunks at ``split_t = round(T * train_frac)``: train = the
+    first ``train_frac`` of the trajectory, test = the rest. Params are fit on the
+    train window and cross-validated on the held-out test window; the latent state
+    is carried across the boundary by ``roll_state`` (so dynamics + noise params
+    generalise across time). The initial-state ``s0_*`` params are *not*
+    cross-validated.
     """
     del data_path  # synthetic
-    if T < WARMUP_STEPS + 40:
+    if not 0.0 < train_frac < 1.0:
+        raise ValueError(f"train_frac ({train_frac}) must be in (0, 1).")
+    split_t = int(round(T * train_frac))
+    min_win = WARMUP_STEPS + 40
+    # Current set up : Both train and test must clear the warmup for a meaningful
+    # post-warmup loss window.
+    if split_t < min_win or (T - split_t + 1) < min_win:
         raise ValueError(
-            f"T ({T}) must exceed WARMUP_STEPS ({WARMUP_STEPS}) + 40 for a "
-            "meaningful post-warmup loss window."
+            f"train_frac={train_frac}, T={T} -> train={split_t} / "
+            f"test={T - split_t + 1} timesteps; each must exceed WARMUP_STEPS "
+            f"({WARMUP_STEPS}) + 40 = {min_win}. Increase T or move train_frac "
+            "toward 0.5."
         )
 
     rng = np.random.default_rng(seed)
@@ -149,48 +171,57 @@ def load_data(
     scale_disc = jnp.asarray(all_scale[disc_idx])
     scale_val = jnp.asarray(all_scale[val_idx])
 
+    # ── temporal train/test split (contiguous chunks; split_t set above) ──
+    def _train_win(y_full):
+        return y_full[:, :split_t]
+
+    def _test_win(arr):
+        return arr[:, split_t - 1:]
+
     # Persistence-baseline NLL per trajectory — diagnostic, matches oscillator_ss.
+    # Computed on the test window at TEST_WARMUP_STEPS so it stays comparable to
+    # the model's (now warmup-free) held-out test loss.
     def _persistence_nll_per_trajectory(y_np: np.ndarray) -> np.ndarray:
         residuals = y_np[:, 1:] - y_np[:, :-1]
         sigma = np.maximum(residuals.std(axis=-1, keepdims=True), 1e-3)
         nll = np.log(sigma) + 0.5 * (residuals / sigma) ** 2
-        return nll[:, WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
+        return nll[:, TEST_WARMUP_STEPS:].mean(axis=-1).astype(np.float32)
 
-    pers_disc = _persistence_nll_per_trajectory(np.asarray(y_disc))
-    pers_val = _persistence_nll_per_trajectory(np.asarray(y_val))
+    pers_disc = _persistence_nll_per_trajectory(np.asarray(_test_win(y_disc)))
+    pers_val = _persistence_nll_per_trajectory(np.asarray(_test_win(y_val)))
 
-    X_disc_train = {"y": y_disc}
+    X_disc_train = {"y": _train_win(y_disc)}
     X_disc_test = {
-        "y": y_disc,
+        "y": _test_win(y_disc),
+        "_eval_warmup": TEST_WARMUP_STEPS,
         "_persistence_nll": jnp.asarray(pers_disc),
-        # Oracle sidecars for scripts/fhn_oracle_nll.py; scoring path never
-        # reads them because apply_model / loss_fn only touch "y".
-        "_w_true": w_disc,
-        "_V_true": V_disc,
+        # Oracle sidecars for scripts/fhn_oracle_nll.py, sliced to the same test
+        # window as "y"; scoring path never reads them (apply_model / loss_fn
+        # only touch "y").
+        "_w_true": _test_win(w_disc),
+        "_V_true": _test_win(V_disc),
         "_y_shift": shift_disc,
         "_y_scale": scale_disc,
     }
-    X_val_train = {"y": y_val}
+    X_val_train = {"y": _train_win(y_val)}
     X_val_test = {
-        "y": y_val,
+        "y": _test_win(y_val),
+        "_eval_warmup": TEST_WARMUP_STEPS,
         "_persistence_nll": jnp.asarray(pers_val),
-        "_w_true": w_val,
-        "_V_true": V_val,
+        "_w_true": _test_win(w_val),
+        "_V_true": _test_win(V_val),
         "_y_shift": shift_val,
         "_y_scale": scale_val,
     }
 
-    # X_eval: SHORT trajectories for fingerprint dedup. Fresh draws so the
-    # eval fingerprint doesn't overlap the training data.
+    # X_eval: short traces for fingerprint dedup. A contiguous t=0 window of the
+    # real discover cells (within the TRAIN region, so the fitted s0_* is the
+    # correct init and no carry is needed).
     n_eval_actual = int(min(max(1, n_eval), len(disc_idx)))
-    eval_ys = np.stack([
-        _synth_fhn(split_rng, T_eval, dt, I0, a, b, eps, proc_noise_std,
-                   obs_noise_std)[0]
-        for _ in range(n_eval_actual)
-    ])
+    T_eval_actual = int(min(T_eval, split_t))
     eval_pos = np.sort(split_rng.choice(len(disc_idx), n_eval_actual, replace=False))
     X_eval = {
-        "y": jnp.asarray(eval_ys),
+        "y": y_disc[eval_pos, :T_eval_actual],
         "_sample_indices": eval_pos,
         "_fingerprint_only": True,
     }
@@ -198,9 +229,10 @@ def load_data(
     print(
         f"[fhn_excitable] T={T}, dt={dt}, {n_trajectories} traj -> "
         f"disc/val={len(disc_idx)}/{len(val_idx)}; "
+        f"split_t={split_t} (train {split_t} / test {T - split_t + 1} timesteps); "
         f"a={a}, b={b}, eps={eps}, I0={I0}; "
         f"proc/obs noise={proc_noise_std}/{obs_noise_std}; "
-        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval}, n={n_eval_actual}"
+        f"WARMUP_STEPS={WARMUP_STEPS}; X_eval T={T_eval_actual}, n={n_eval_actual}"
     )
 
     return (
@@ -226,43 +258,87 @@ def _split_params_s0(params: dict) -> tuple[dict, dict]:
     return init_state, dyn_params
 
 
-def apply_model(model_fn, data, params):
-    """State-space scan wrapper — identical to oscillator_ss's.
+def _scan_one(model_fn, y_traj, init_state, dyn_params):
+    """Scan ``model_fn`` over one trajectory, returning ``(means, final_state)``.
+    We keep the final carry so ``roll_state`` can hand it to the test window.
 
-    ``model_fn(state, y_prev, dyn_params) -> (new_state, mean)`` is scanned
-    over the trajectory. ``y[t]`` is never in scope inside ``model_fn`` when
-    it predicts y[t] — that's the causality guarantee.
+    Returns : 
+        - means: (T-1,) array — the one-step ahead prediction at each step.
+        - final_state: dictionary (pytree) of the same structure as ``init_state``.
+    """
+    def scan_step(state, y_prev):
+        new_state, mean = model_fn(state, y_prev, dyn_params)
+        return new_state, mean
+
+    final_state, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
+    return means, final_state
+
+
+def apply_model(model_fn, data, params):
+    """State-space scan wrapper.
 
     Returns:
       - Normal path: ``(n_samples, T-1, 2)`` — means and broadcast log_sigma.
       - Fingerprint path: ``(n_samples, T-1)`` — residuals (y_true - mean).
+
+    When we apply the model to test trials, we don't want to use the fitted init_state. 
+    Instead, we roll the state across the train/test boundary, which is achieved by
+    ``roll_state`` on the train_window and saved as ``data["_init_carry"]``. The test window 
+    then uses this carry as the initial state for its scan.
+    
+    Absent the key, behaviour is the plain-scan default - this is the behaviour on train trials. 
     """
     y = data["y"]
     fingerprint_only = bool(data.get("_fingerprint_only", False))
+    init_carry = data.get("_init_carry")
+    # None broadcasts to every sample; a per-sample carry is mapped over axis 0.
+    carry_axis = None if init_carry is None else 0
 
-    def per_sample(y_traj, p):
+    def per_sample(y_traj, p, carry):
         init_state, dyn_params = _split_params_s0(p)
-
-        def scan_step(state, y_prev):
-            new_state, mean = model_fn(state, y_prev, dyn_params)
-            return new_state, mean
-
-        _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
+        if carry is not None:
+            init_state = carry
+        means, _ = _scan_one(model_fn, y_traj, init_state, dyn_params)
         if fingerprint_only:
             targets = y_traj[1:]
             return targets - means
         log_sigma = jnp.full_like(means, dyn_params["log_sigma_obs"])
         return jnp.stack([means, log_sigma], axis=-1)
 
+    return jax.vmap(per_sample, in_axes=(0, 0, carry_axis))(y, params, init_carry)
+
+
+def roll_state(model_fn, data, params):
+    """Return the per-sample final latent carry after scanning the train trials.
+
+    Registered by the scorer (via ``TaskSpec.rollout_fn``) as the train→test
+    hand-off: the returned pytree becomes ``data["_init_carry"]`` for the test
+    evaluation. Scans from each sample's ``s0_*`` params — the train window always
+    starts from the learnable initial state.
+    """
+    y = data["y"]
+
+    def per_sample(y_traj, p):
+        init_state, dyn_params = _split_params_s0(p)
+        _, final_state = _scan_one(model_fn, y_traj, init_state, dyn_params)
+        return final_state
+
     return jax.vmap(per_sample, in_axes=(0, 0))(y, params)
 
 
 def loss_fn(model_output, data):
-    """Per-sample Gaussian NLL over the post-warmup horizon."""
+    """Per-sample Gaussian NLL over the post-warmup horizon.
+
+    ``warmup`` defaults to the fit-time ``WARMUP_STEPS``; the test dicts override
+    it to ``TEST_WARMUP_STEPS`` (=0) via ``_eval_warmup``. Only the eager test path
+    supplies the key, so the jitted fit loss always sees the static default — no
+    ``ConcretizationError``.
+    """
+    warmup = int(data.get("_eval_warmup", WARMUP_STEPS))
     y = data["y"][:, 1:]
-    means = model_output[:, WARMUP_STEPS:, 0]
-    log_sigmas = model_output[:, WARMUP_STEPS:, 1]
-    tgt = y[:, WARMUP_STEPS:]
+    means = model_output[:, warmup:, 0]
+    log_sigmas = model_output[:, warmup:, 1]
+    tgt = y[:, warmup:]
     nll = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     return jnp.mean(nll, axis=-1)
 

@@ -27,9 +27,11 @@ A concrete example from `projects/orientation_tuning/`:
 
 ```python
 def model(data, params):
-    theta = data["stimulus"]                    # (n_trials,) — stimulus angles
-    dist  = angular_distance(theta, params["theta_pref"])
-    return params["baseline"] + params["amplitude"] * gaussian(dist, params["tuning_width"])
+    theta = data["stimulus"]  # (n_trials,) — stimulus angles
+    dist = angular_distance(theta, params["theta_pref"])
+    return params["baseline"] + params["amplitude"] * gaussian(
+        dist, params["tuning_width"]
+    )
 ```
 
 The framework fits `params` by gradient descent on a project-defined loss against `data["response"]`. This works cleanly for **problems where the target is not derivable from the input** — tuning curves, place fields, dose-response, static equations of state. There is no temporal structure and therefore no leakage attack surface: `data` cannot contain the answer, even in principle.
@@ -112,12 +114,14 @@ The framework then applies this to the full trajectory by scanning:
 
 ```python
 def apply_model(model_fn, data, params):
-    y = data["y"]                     # (n_samples, T)
+    y = data["y"]  # (n_samples, T)
 
     def per_sample(y_traj, p):
         # DEFAULT_PARAMS keys with an "s0_" prefix declare initial-state
         # values; strip the prefix and use them as the scan's initial carry.
-        init_state = {k.removeprefix("s0_"): v for k, v in p.items() if k.startswith("s0_")}
+        init_state = {
+            k.removeprefix("s0_"): v for k, v in p.items() if k.startswith("s0_")
+        }
         # Everything else is a dynamics parameter (learnable by Adam).
         dyn_params = {k: v for k, v in p.items() if not k.startswith("s0_")}
 
@@ -129,14 +133,16 @@ def apply_model(model_fn, data, params):
         # scan_step(state_{t-1}, y_traj[t-1]) and threads the returned state
         # forward. Because we feed y_traj[:-1], at step t the model sees
         # only y[t-1] and must return E[y[t]] — y[t..] is not in scope.
-        _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])   # means shape (T-1,)
+        _, means = jax.lax.scan(
+            scan_step, init_state, y_traj[:-1]
+        )  # means shape (T-1,)
         # Broadcast the learnable per-trajectory observation noise over
         # every step so loss_fn can compute a Gaussian NLL uniformly.
         log_sigma = jnp.full_like(means, dyn_params["log_sigma_obs"])
         # Stack (mean, log_sigma) into columns of a single array — required
         # because the framework's apply_model contract is "return one array,"
         # not a dict (see §5.2 for why). loss_fn splits them back apart.
-        return jnp.stack([means, log_sigma], axis=-1)                   # (T-1, 2)
+        return jnp.stack([means, log_sigma], axis=-1)  # (T-1, 2)
 
     # vmap runs per_sample across the n_samples batch axis on the GPU in
     # one fused kernel (not a Python for-loop). Result: (n_samples, T-1, 2).
@@ -153,15 +159,16 @@ Two things to notice:
 The framework provides a Gaussian NLL with a learnable per-cell observation noise and a warmup skip:
 
 ```python
-WARMUP_STEPS = 100   # module-level constant, per-project; see §5.3
-                     # (fhn_excitable uses 100; oscillator_ss uses 50)
+WARMUP_STEPS = 100  # module-level constant, per-project; see §5.3
+# (fhn_excitable uses 100; oscillator_ss uses 50)
+
 
 def loss_fn(model_output, data):
     # model_output: (n_samples, T-1, 2) — [..., 0] = means, [..., 1] = log_sigmas
-    y          = data["y"][:, 1:]
-    means      = model_output[:, WARMUP_STEPS:, 0]
+    y = data["y"][:, 1:]
+    means = model_output[:, WARMUP_STEPS:, 0]
     log_sigmas = model_output[:, WARMUP_STEPS:, 1]
-    tgt        = y[:, WARMUP_STEPS:]
+    tgt = y[:, WARMUP_STEPS:]
     nll = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     return jnp.mean(nll, axis=-1)
 ```
@@ -179,6 +186,7 @@ def model(state, y_prev, params):
     mean = y_last
     return new_state, mean
 
+
 model.DEFAULT_PARAMS = {
     "log_sigma_obs": -1.5,
     "s0_y_last": 0.0,
@@ -191,10 +199,10 @@ And a Kalman-lite with a hidden recovery variable — the shape of a good FitzHu
 def model(state, y_prev, params):
     V, w = state["V"], state["w"]
     dt, I0, eps = params["dt"], params["I0"], params["eps"]
-    k = params["k_V"]                          # Kalman-style innovation gain
+    k = params["k_V"]  # Kalman-style innovation gain
     innov = y_prev - V
     V_corr = V + k * innov
-    dV = V_corr - V_corr**3/3.0 - w + I0
+    dV = V_corr - V_corr**3 / 3.0 - w + I0
     dw = eps * (V_corr + params["a"] - params["b"] * w)
     V_new = V_corr + dt * dV
     w_new = w + dt * dw
@@ -202,10 +210,17 @@ def model(state, y_prev, params):
     mean = V_new
     return new_state, mean
 
+
 model.DEFAULT_PARAMS = {
-    "dt": 0.05, "I0": 0.5, "eps": 0.08, "a": 0.7, "b": 0.8,
-    "k_V": 0.3, "log_sigma_obs": -1.5,
-    "s0_V": -1.0, "s0_w": -0.5,
+    "dt": 0.05,
+    "I0": 0.5,
+    "eps": 0.08,
+    "a": 0.7,
+    "b": 0.8,
+    "k_V": 0.3,
+    "log_sigma_obs": -1.5,
+    "s0_V": -1.0,
+    "s0_w": -0.5,
 }
 ```
 
@@ -224,8 +239,10 @@ Every design choice in a system like this comes with an alternative that looks e
 
 ```python
 def model(state, y_prev, params): ...
+
+
 model.DEFAULT_PARAMS = {...}
-model.DEFAULT_STATE  = {"V": -1.0, "w": -0.5}   # this attribute is the trap
+model.DEFAULT_STATE = {"V": -1.0, "w": -0.5}  # this attribute is the trap
 ```
 
 **Why we rejected it**: EDGAR's LLM offspring do not write source code that lands directly in a file. They emit a structured `TranslationSchema` (in `edgar/llm/response_schema.py`) that has fields for the model body and its default params, and *no* field for `DEFAULT_STATE`. A seed program with `.DEFAULT_STATE` would work; every LLM offspring of that seed would silently lose the attribute during translation, and the framework would fall back to whatever handling covers the missing case. Fixing it would require adding a field to the schema, updating the translator prompts, the `Program` dataclass, `_translate_one_model`, and `_get_params` — a real five-file engine change with a matching risk of subtle bugs.

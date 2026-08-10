@@ -44,6 +44,7 @@ project_params:
   damping: 0.05
   process_noise_std: 0.15
   obs_noise_std: 0.05
+  train_frac: 0.5          # contiguous train/test split at round(T * train_frac)
   T_eval: 100              # short trajectories for fingerprint discrimination
   n_eval: 4
   seed: 42

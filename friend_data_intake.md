@@ -44,10 +44,11 @@ e.g.:
 
 ```python
 import scipy.io as sio
+
 d = sio.loadmat("session.mat")
-spikes = d["spike_times"]   # neuron -> spike times (s)
-stim   = d["orientation"]   # stimulus per timepoint
-t      = d["t"]             # time (s)
+spikes = d["spike_times"]  # neuron -> spike times (s)
+stim = d["orientation"]  # stimulus per timepoint
+t = d["t"]  # time (s)
 ```
 
 Plus one line on any preprocessing you'd normally apply (bin size, z-scoring,

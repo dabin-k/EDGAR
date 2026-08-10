@@ -35,6 +35,7 @@ project_params:
   mu: 2.0            # relaxation regime; period ~7.6 time units ≈ 152 steps
   proc_noise_std: 0.3
   obs_noise_std: 0.15
+  train_frac: 0.5    # contiguous train/test split at round(T * train_frac)
   T_eval: 200
   n_eval: 4
   seed: 42
