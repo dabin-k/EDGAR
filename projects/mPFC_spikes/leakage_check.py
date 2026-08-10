@@ -28,6 +28,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+import projects  # noqa: E402  (ensure the repo root is importable before project imports)
+
 import numpy as np
 import jax
 import jax.numpy as jnp
