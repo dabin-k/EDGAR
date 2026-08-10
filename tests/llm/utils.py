@@ -22,7 +22,12 @@ def make_fake_spec(output_dir: str | None = None) -> SimpleNamespace:
         with open(save_path, "wb") as f:
             f.write(generate_image_bytes())
 
-    return SimpleNamespace(plot_fn=plot_fn, output_dir=output_dir, evaluate_fn=None)
+    return SimpleNamespace(
+        plot_fn=plot_fn,
+        output_dir=output_dir,
+        evaluate_fn=None,
+        auxiliary_code=None,
+    )
 
 
 def run_model_code(code: str, data: dict, params: dict):

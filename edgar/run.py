@@ -171,6 +171,7 @@ async def run(
                     retry_config=retry_config,
                     max_tokens=config.get("max_tokens"),
                     output_schema=spec.response_schemas.jax_model,
+                    config=config,
                     n_items=len(spec.seed_programs),
                 )
                 t_score_seeds(
@@ -244,6 +245,7 @@ async def run(
                     retry_config=retry_config,
                     max_tokens=config.get("max_tokens"),
                     output_schema=spec.response_schemas.jax_model,
+                    config=config,
                     n_items=n_spawn,
                 )
                 t_score(

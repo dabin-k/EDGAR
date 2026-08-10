@@ -215,6 +215,12 @@ class TaskSpec:
 
     rng: np.random.Generator = field(default_factory=np.random.default_rng)
 
+    # Source of the project's optional helper functions, shown to the LLM as
+    # {auxiliary_code} / {auxiliary_code_jax} and carried on every Program's Code.
+    auxiliary_code: str | None = None
+
+    auxiliary_code_jax: str | None = None
+
     # ── constructors ──
 
     @classmethod
@@ -289,6 +295,13 @@ class TaskSpec:
 
         seed_dir = config.project_dir / "seed_programs"
 
+        # Optional helper functions the generated models may call. Neither name
+        # matches the seed globs below, so they are not picked up as seeds.
+        aux_path = seed_dir / "auxiliary.py"
+        aux_jax_path = seed_dir / "auxiliary_jax.py"
+        auxiliary_code = aux_path.read_text() if aux_path.exists() else None
+        auxiliary_code_jax = aux_jax_path.read_text() if aux_jax_path.exists() else None
+
         # Pre-extract params to see if we need data for resolution
         seed_model_paths = sorted(seed_dir.glob("model*.py"))
         all_default_params = [
@@ -334,6 +347,8 @@ class TaskSpec:
                     code=Code(
                         model=model_path.read_text(),
                         param_est=param_est_path.read_text(),
+                        auxiliary=auxiliary_code,
+                        auxiliary_jax=auxiliary_code_jax,
                     ),
                     name=f"Seed Model {model_num}",
                     data=data_for_resolution,
@@ -369,6 +384,8 @@ class TaskSpec:
             plot_fn=plot_fn,
             seed_programs=seed_programs,
             rng=np.random.default_rng(config.run.random_seed),
+            auxiliary_code=auxiliary_code,
+            auxiliary_code_jax=auxiliary_code_jax,
         )
 
     # ── persistence ──
@@ -401,6 +418,8 @@ class TaskSpec:
             "run": self.run,
             "evaluate": self.evaluate,
             "project_params": self.project_params,
+            "auxiliary_code": self.auxiliary_code,
+            "auxiliary_code_jax": self.auxiliary_code_jax,
             "seed_programs": [
                 {
                     "batch_index": p.birth.batch_index,
@@ -515,13 +534,23 @@ class TaskSpec:
         `evaluate` is included so a project can describe its own evaluation protocol in
         the prompt without restating the numbers (e.g. burgers templates
         `{input_sequence_length}` and `{rollout_steps}` into its model prompt, and they
-        then stay correct when the config changes).
+        then stay correct when the config changes). The project's helper function source
+        is included for the same reason: a prompt that advertises the helpers via
+        `{auxiliary_code}` cannot drift from the code that is actually injected.
 
         Returns:
             dict: A merged dictionary containing configuration parameters from the
-                `evolution`, `llms`, `scoring` and `evaluate` sections.
+                `evolution`, `llms`, `scoring` and `evaluate` sections, plus the
+                auxiliary source strings.
         """
-        return {**self.evolution, **self.llms, **self.scoring, **self.evaluate}
+        return {
+            **self.evolution,
+            **self.llms,
+            **self.scoring,
+            **self.evaluate,
+            "auxiliary_code": self.auxiliary_code or "",
+            "auxiliary_code_jax": self.auxiliary_code_jax or "",
+        }
 
     # ── prompt schemas ──
 

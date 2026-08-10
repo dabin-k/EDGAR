@@ -35,6 +35,18 @@ MODEL_ENTRYPOINT = "model"
 PARAM_EST_ENTRYPOINT = "parameter_estimator"
 
 
+def _join_source(*parts: str | None) -> str:
+    """Concatenates source fragments, dropping missing ones.
+
+    Args:
+        *parts: Source strings, any of which may be `None` or empty.
+
+    Returns:
+        The non-empty fragments joined by a blank line, in the order given.
+    """
+    return "\n\n".join(part for part in parts if part)
+
+
 class ModelLoadingError(Exception):
     """Raised when a JAX model cannot be loaded from its source code."""
 
@@ -78,11 +90,17 @@ class Code:
         model: The numpy source code for the scientific model.
         param_est: The numpy source code for the parameter estimation function.
         model_jax: The JAX-compatible source code for the scientific model.
+        auxiliary: The numpy source of the project's helper functions, which the
+            model code may call without defining them.
+        auxiliary_jax: The JAX-compatible source of those same helper functions,
+            prepended to `model_jax` by `Program.compile_model`.
     """
 
     model: str | None = None
     param_est: str | None = None
     model_jax: str | None = None
+    auxiliary: str | None = None
+    auxiliary_jax: str | None = None
 
 
 class NotValidated:
@@ -192,7 +210,12 @@ class Program:
         """Loads and compiles the JAX model callable from its source code.
 
         This method uses `load_function_from_source` to dynamically load the
-        JAX-translated model code (`self.code.model_jax`) into a callable function.
+        JAX-translated model code (`self.code.model_jax`) into a callable function,
+        concatenated with the project's JAX helper functions
+        (`self.code.auxiliary_jax`) so that model code calling them resolves them at
+        call time. The helpers go *last* deliberately: an LLM asked not to redefine
+        them sometimes does anyway, and the last definition wins, so this keeps the
+        project's vetted version authoritative.
 
         Returns:
             A callable Python function representing the JAX model.
@@ -201,7 +224,8 @@ class Program:
             ModelLoadingError: If the JAX model source code is missing or cannot
                 be loaded/compiled into a valid function.
         """
-        model_fn = load_function_from_source(self.code.model_jax, MODEL_ENTRYPOINT)
+        source = _join_source(self.code.model_jax, self.code.auxiliary_jax)
+        model_fn = load_function_from_source(source, MODEL_ENTRYPOINT)
         if model_fn is None:
             raise ModelLoadingError(
                 f"{self.birth}: could not load '{MODEL_ENTRYPOINT}'"
@@ -212,7 +236,11 @@ class Program:
         """Loads and compiles the parameter estimator callable from its source code.
 
         This method uses `load_function_from_source` to dynamically load the
-        parameter estimator code (`self.code.param_est`) into a callable function.
+        parameter estimator code (`self.code.param_est`) into a callable function,
+        concatenated with the project's numpy helper functions
+        (`self.code.auxiliary`). The estimator prompt shows it the model code, so it
+        reaches for the same helpers the model calls; ordering follows
+        `compile_model`.
 
         Returns:
             A callable Python function representing the parameter estimator.
@@ -221,9 +249,8 @@ class Program:
             ParamEstLoadingError: If the parameter estimator source code is missing
                 or cannot be loaded/compiled into a valid function.
         """
-        param_est_fn = load_function_from_source(
-            self.code.param_est, PARAM_EST_ENTRYPOINT
-        )
+        source = _join_source(self.code.param_est, self.code.auxiliary)
+        param_est_fn = load_function_from_source(source, PARAM_EST_ENTRYPOINT)
         if param_est_fn is None:
             raise ParamEstLoadingError(
                 f"{self.birth}: could not load '{PARAM_EST_ENTRYPOINT}'"

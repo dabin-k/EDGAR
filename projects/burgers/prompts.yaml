@@ -50,6 +50,14 @@ model:
     * Ensure all string values in function call arguments are properly JSON-escaped.
     * Also provide `default_params`: sensible initial float values for every key in `params`, with exactly matching keys.
 
+    **Helper functions already available to you.**
+
+    The functions below are already defined and in scope wherever your model runs. Call them by name.
+    Do NOT redefine them, do NOT import them, and do NOT paste their bodies into your code. Prefer them
+    over hand-rolled stencils. Note, these are helper functions and you do not have to use them, but they are provided to make your life easier. 
+
+    {auxiliary_code}
+
   image_analysis_instructions: |
     **Image Analysis Instructions:**
 
@@ -103,3 +111,40 @@ parameter_estimator:
     * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument.
     * Ensure all string values in function call arguments are properly JSON-escaped.
     * Your response **must** be less than {max_lines} lines including imports, or it will be rejected.
+
+    **Helper functions already available to you.**
+
+    The functions below are already defined and in scope. Call them by name; do not redefine, import or
+    reimplement them. They are the same helpers the model uses, so an estimator written in terms of them
+    inverts exactly the quantity the model computes. **Watch the axis**: the model passes 1-D state over
+    sensors and takes the default, but your `data['x']` is `(n_blocks, n_sensors, block_len)`, so you
+    must pass `axis=1` — the default `axis=-1` would differentiate along time.
+
+    {auxiliary_code}
+
+# Only `base` is overridden; the default `code_guidelines` (the JAX compatibility rules)
+# still apply. String fields replace the default entirely, so the first half below
+# restates projects/prompt_defaults.yaml.
+jax_translator_model:
+  base: |
+    Translate the following model function to JAX-compatible code.
+
+    Ensure that keys of data and params dicts are preserved.
+
+    Ensure that the input and output behavior of the function is preserved.
+
+    Include all necessary imports (jax, jax.numpy as jnp).
+
+    Ensure compatibility with jax.jit, jax.grad, and jax.vmap.
+
+    Do not include any text other than the code.
+
+    **Helper functions: already translated, do not translate them.**
+
+    The model may or may not call the helper functions listed below. They have already been translated to JAX
+    by hand, and the JAX versions are prepended to your output automatically. Translate only the
+    `model` function: call the helpers by name exactly as the numpy code does, and do not emit
+    definitions, imports or reimplementations for them. Their JAX definitions are:
+
+    {auxiliary_code_jax}
+

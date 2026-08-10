@@ -56,6 +56,42 @@ class TestCompile:
         with pytest.raises(ModelLoadingError, match="model"):
             program.compile_model()
 
+    def test_compiled_model_can_call_auxiliary_helpers(self):
+        program = make_program(
+            model_code="def model(data, params):\n    return double(data['x'])"
+        )
+        program.code.auxiliary_jax = "def double(u):\n    return 2.0 * u"
+        model_fn = program.compile_model()
+        assert model_fn({"x": np.array([1.0, 2.0])}, {}).tolist() == [2.0, 4.0]
+
+    def test_auxiliary_wins_over_a_redefinition_in_generated_code(self):
+        program = make_program(
+            model_code=(
+                "def double(u):\n"
+                "    return 999.0 * u\n\n"
+                "def model(data, params):\n"
+                "    return double(data['x'])"
+            )
+        )
+        program.code.auxiliary_jax = "def double(u):\n    return 2.0 * u"
+        model_fn = program.compile_model()
+        assert model_fn({"x": np.array([1.0])}, {}).tolist() == [2.0]
+
+    def test_compiled_param_est_can_call_auxiliary_helpers(self):
+        program = make_program(
+            param_est_code=(
+                "def parameter_estimator(data):\n    return {'a': double(data['x'])}"
+            )
+        )
+        program.code.auxiliary = "def double(u):\n    return 2.0 * u"
+        assert program.compile_param_est()({"x": 3.0}) == {"a": 6.0}
+
+    def test_compile_raises_when_model_missing_but_auxiliary_present(self):
+        program = make_program(model_code=None)
+        program.code.auxiliary_jax = "def double(u):\n    return 2.0 * u"
+        with pytest.raises(ModelLoadingError, match="model"):
+            program.compile_model()
+
     def test_compile_raises_when_param_est_entrypoint_wrong(self):
         program = make_program(param_est_code=wrong_entrypoint_code())
         with pytest.raises(ParamEstLoadingError, match="parameter_estimator"):

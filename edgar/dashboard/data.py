@@ -88,6 +88,8 @@ def _reconstruct_model_prompt(run_dir: Path, pop: Population, idx: int) -> str:
         **(spec_doc.get("llms") or {}),
         **(spec_doc.get("scoring") or {}),
         **(spec_doc.get("evaluate") or {}),
+        "auxiliary_code": spec_doc.get("auxiliary_code") or "",
+        "auxiliary_code_jax": spec_doc.get("auxiliary_code_jax") or "",
     }
 
     p = pop[idx]

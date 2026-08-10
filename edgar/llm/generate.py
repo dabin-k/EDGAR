@@ -20,7 +20,7 @@ import numpy as np
 from pydantic_ai.models import Model
 from pydantic import BaseModel
 
-from ..evolution.program import Program
+from ..evolution.program import Program, _join_source
 from ..evolution.population import Population
 from ..scoring.utils import _safe_loss
 from ..llm.prompt_schema import PromptSchema
@@ -174,6 +174,7 @@ async def _generate_one_model(
         return
     header = f'"""\n{result.thought_process}\n\n{result.latex_equations}\n"""\n\n'
     program.code.model = header + result.code
+    program.code.auxiliary = spec.auxiliary_code if spec is not None else None
     default_params = result.default_params
     if isinstance(default_params, str):
         try:
@@ -353,6 +354,7 @@ async def _translate_one_model(
     retry_config: RetryConfig | None = None,
     max_tokens: int | None = None,
     output_schema: type[BaseModel] = TranslationSchema,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Translates the numpy model code of a single program into JAX-compatible code using an LLM.
 
@@ -361,6 +363,10 @@ async def _translate_one_model(
     can load a 'model' function from it), updates the program's JAX model code.
     The temperature for this LLM call is fixed at 1.0.
 
+    The project's JAX helper source is taken from `config["auxiliary_code_jax"]`,
+    stored on the program, and included when validating the translation, since it
+    is prepended again at compile time.
+
     Args:
         program: The program whose numpy model code needs translation. This program object
             will be mutated with the translated JAX code.
@@ -368,11 +374,17 @@ async def _translate_one_model(
         llm: The LLM model name (str) or a pre-configured PydanticAI Model instance.
         retry_config: Optional retry configuration for the LLM call.
         max_tokens: Optional maximum number of tokens for the LLM response.
+        config: Optional configuration dictionary (`TaskSpec.flat_config`) whose
+            variables are substituted into the translation prompt.
 
     Returns:
         None. The `program` object is mutated in-place if translation is successful.
     """
-    model_prompt = model_prompt_schema.build_prompt("explore", current_program=program)
+    auxiliary_jax = (config or {}).get("auxiliary_code_jax") or None
+    program.code.auxiliary_jax = auxiliary_jax
+    model_prompt = model_prompt_schema.build_prompt(
+        "explore", current_program=program, config=config
+    )
     model_result = await call_llm(
         prompt=model_prompt,
         llm_model=llm,
@@ -382,13 +394,14 @@ async def _translate_one_model(
         max_tokens=max_tokens,
         role="jax",
     )
-    # Validate the generated JAX code by attempting to load the function from its source.
-    # Only assign if the LLM returned a result and the code is valid.
-    if (
-        model_result is not None
-        and load_function_from_source(model_result.code, "model") is not None
-    ):
-        program.code.model_jax = model_result.code
+    # Validate the generated JAX code by attempting to load the function from its source,
+    # alongside the helpers it may call. Only assign if the LLM returned a result and the
+    # code is valid.
+    if model_result is not None:
+        # Same order as Program.compile_model, so validation sees what will run.
+        candidate = _join_source(model_result.code, auxiliary_jax)
+        if load_function_from_source(candidate, "model") is not None:
+            program.code.model_jax = model_result.code
 
 
 async def translate_programs(
@@ -398,6 +411,7 @@ async def translate_programs(
     retry_config: RetryConfig | None = None,
     max_tokens: int | None = None,
     output_schema: type[BaseModel] = TranslationSchema,
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Asynchronously translates all untranslated numpy model code to JAX-compatible code.
 
@@ -411,6 +425,8 @@ async def translate_programs(
         llm: The LLM model name (str) or a pre-configured PydanticAI Model instance.
         retry_config: Optional retry configuration for the LLM calls.
         max_tokens: Optional maximum number of tokens for the LLM responses.
+        config: Optional configuration dictionary (`TaskSpec.flat_config`) whose
+            variables are substituted into the translation prompt.
 
     Returns:
         None. The `program.code.model_jax` field of eligible programs in the `population`
@@ -426,6 +442,7 @@ async def translate_programs(
                 retry_config,
                 max_tokens,
                 output_schema=output_schema,
+                config=config,
             )
             for p in programs
         ]

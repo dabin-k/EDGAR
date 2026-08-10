@@ -48,10 +48,12 @@ at the analytic a, b above -- no fitting:
     o2 Taylor (single-lag)          8.1563e-11
 
 AB2 and the single-lag Taylor form agree to 2%, as two routes to the same order
-should. Prefer this one for the project because input_sequence_length is already
-2 so it needs no wider stencil, but the choice is a convenience, not an accuracy
-argument -- the clean data does not show the second lag buying anything beyond
-order 2 (contrast the note in ground_truth_model_o2_taylor.py).
+should, and both fit inside the current window (input_sequence_length is 5, so
+neither is constrained by the number of lags on offer). The choice between them is
+a convenience, not an accuracy argument -- the clean data does not show the second
+lag buying anything beyond order 2 (contrast the note in
+ground_truth_model_o2_taylor.py; with 5 lags available that note is about what the
+extra lags are worth, not about whether they exist).
 
 Order 2 in time is worth 1.88x, not the ~4x the one-step truncation analysis
 suggests, because it fixes only the *temporal* error: the residual is dominated

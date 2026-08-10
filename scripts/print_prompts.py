@@ -108,12 +108,17 @@ def print_prompts_for_project(project: str) -> None:
 
     parents = [make_parent(*p) for p in ALL_PARENTS[:num_parents]]
     current = make_current("Asymmetric Von Mises", model_code=CURRENT_MODEL)
+    seed_dir = config.project_dir / "seed_programs"
     flat_config = {
         "num_parents": num_parents,
         "max_lines": 30,
         "swear_words": "lstsq, scipy.optimize, curve_fit",
         # projects may template their own evaluate keys (e.g. burgers' input_sequence_length)
         **config.evaluate,
+        **{
+            var: (seed_dir / f"{stem}.py").read_text() if (seed_dir / f"{stem}.py").exists() else ""
+            for var, stem in (("auxiliary_code", "auxiliary"), ("auxiliary_code_jax", "auxiliary_jax"))
+        },
     }
 
     print(f"\n{SEP}")
