@@ -156,7 +156,12 @@ def _get_params(param_est_fn, default_params, data_train):
 
 
 def _optimize(
-    model_fn, loss_fn, params_init, data_train, gd_config, apply_model_fn=apply_model_plain
+    model_fn,
+    loss_fn,
+    params_init,
+    data_train,
+    gd_config,
+    apply_model_fn=apply_model_plain,
 ):
     """Performs gradient descent to optimize model parameters.
 
@@ -297,8 +302,15 @@ def _roll_carry(rollout_fn, model_fn, data_train, params):
 
 
 def _worker(
-    queue, program_bytes, data, loss_fn_bytes, config, X_eval, split,
-    apply_model_fn_bytes, rollout_fn_bytes,
+    queue,
+    program_bytes,
+    data,
+    loss_fn_bytes,
+    config,
+    X_eval,
+    split,
+    apply_model_fn_bytes,
+    rollout_fn_bytes,
 ):
     """Scores one program inside a subprocess.
 
@@ -356,7 +368,10 @@ def _worker(
         params_init = _get_params(param_est_fn, program.default_params, data_train)
         # Roll the (un-optimised) model across the train trials and hand its
         # final state to the test eval; a no-op ({}) for stateless projects.
-        data_test_init = {**data_test, **_roll_carry(rollout_fn, model_fn, data_train, params_init)}
+        data_test_init = {
+            **data_test,
+            **_roll_carry(rollout_fn, model_fn, data_train, params_init),
+        }
         initial_loss = (
             _eval_loss(model_fn, loss_fn, params_init, data_test_init, apply_model_fn)
             + penalty
@@ -369,7 +384,10 @@ def _worker(
             config["gradient_descent"],
             apply_model_fn,
         )
-        data_test = {**data_test, **_roll_carry(rollout_fn, model_fn, data_train, params)}
+        data_test = {
+            **data_test,
+            **_roll_carry(rollout_fn, model_fn, data_train, params),
+        }
         final_loss = (
             _eval_loss(model_fn, loss_fn, params, data_test, apply_model_fn) + penalty
         )
@@ -403,7 +421,9 @@ def _worker(
 
     try:
         sample_losses_init = (
-            _eval_sample_losses(model_fn, loss_fn, params_init, data_test_init, apply_model_fn)
+            _eval_sample_losses(
+                model_fn, loss_fn, params_init, data_test_init, apply_model_fn
+            )
             if split == "discover"
             else None
         )
@@ -654,7 +674,14 @@ def score(
                 sample_losses_init,
                 outcome,
             ) = _score_one_with_outcome(
-                program, data_ref, loss_fn, config, X_eval, split, apply_model_fn, rollout_fn
+                program,
+                data_ref,
+                loss_fn,
+                config,
+                X_eval,
+                split,
+                apply_model_fn,
+                rollout_fn,
             )
             latency_ms = (time.monotonic() - t0) * 1000.0
             latencies_ms.append(latency_ms)

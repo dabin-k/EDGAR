@@ -14,6 +14,7 @@ state-space project). They exercise:
 5. Warmup skip in ``loss_fn`` is bit-invariant to changes in ``y[:warmup]``.
 6. Gaussian NLL matches a hand-computed value for a matched normal.
 """
+
 # ruff: noqa: E402
 import sys
 from pathlib import Path
@@ -21,7 +22,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -89,12 +89,12 @@ def test_scan_ar1_matches_hand_computed():
     y = jnp.array([1.0, 2.0, -1.0, 0.5, 3.0, -2.0, 1.5, 0.0])
     params = {"alpha": alpha, "log_sigma_obs": -1.0, "s0_y_last": 0.0}
 
-    out = _apply_model_scan(_ar1_model, y, params)   # (T-1, 2)
-    expected_means = alpha * y[:-1]                  # (T-1,)
+    out = _apply_model_scan(_ar1_model, y, params)  # (T-1, 2)
+    expected_means = alpha * y[:-1]  # (T-1,)
 
     assert out.shape == (T - 1, 2)
     assert jnp.allclose(out[:, 0], expected_means)
-    assert jnp.all(out[:, 1] == -1.0)                # log_sigma broadcast
+    assert jnp.all(out[:, 1] == -1.0)  # log_sigma broadcast
 
 
 def test_isolation_invariant_persistence():
@@ -105,7 +105,7 @@ def test_isolation_invariant_persistence():
     """
     T = 12
     y_orig = jnp.arange(T, dtype=jnp.float32)
-    y_pert = y_orig.at[5:].set(999.0)                # perturb everything from t=5
+    y_pert = y_orig.at[5:].set(999.0)  # perturb everything from t=5
 
     params = {"log_sigma_obs": 0.0, "s0_y_last": 0.0}
     out_orig = _apply_model_scan(_persistence_model, y_orig, params)
@@ -202,10 +202,10 @@ def test_warmup_skip_is_invariant_to_early_y():
     out_pert = _apply_model_scan(_persistence_model, y_pert, params)
 
     def loss_fn_with_warmup(output, y_full, warmup):
-        y = y_full[1:]                         # targets are y[1..T-1]
-        means      = output[warmup:, 0]
+        y = y_full[1:]  # targets are y[1..T-1]
+        means = output[warmup:, 0]
         log_sigmas = output[warmup:, 1]
-        tgt        = y[warmup:]
+        tgt = y[warmup:]
         return jnp.mean(log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2)
 
     # After the perturbation propagates through the persistence model and gets

@@ -88,7 +88,7 @@ Cost: adds `d*(d+1)/2` parameters for a "boring" reason (observation noise), whi
 One temptation is to let the LLM emit a per-step log_sigma from `model_fn`:
 
 ```python
-return new_state, mean, log_sigma   # 3-tuple — DON'T
+return new_state, mean, log_sigma  # 3-tuple — DON'T
 ```
 
 This does not fit the current `apply_model → loss_fn` handshake without breaking v1's `(mean, log_sigma)` stacking. It also inflates fingerprint dimensionality unpredictably and forces the LLM to reason about noise per-step, which is a distraction from the actual scientific task (getting the mean right). If we ever need heteroscedastic noise, do it as a v2 project that overrides `apply_model` and `loss_fn` — not as a v1 DSL change.
@@ -111,7 +111,7 @@ The multivariate version scans `y_traj[:-1]` where `y_traj` is now shape `(T, d)
 
 ```python
 def apply_model(model_fn, data, params):
-    y = data["y"]                             # (n_samples, T, d)
+    y = data["y"]  # (n_samples, T, d)
     fingerprint_only = bool(data.get("_fingerprint_only", False))
 
     def per_sample(y_traj, p):
@@ -119,20 +119,20 @@ def apply_model(model_fn, data, params):
 
         def scan_step(state, y_prev):
             new_state, mean = model_fn(state, y_prev, dyn_params)
-            return new_state, mean                # mean: (d,)
+            return new_state, mean  # mean: (d,)
 
         _, means = jax.lax.scan(scan_step, init_state, y_traj[:-1])
         # means: (T-1, d)
 
         if fingerprint_only:
-            targets = y_traj[1:]                  # (T-1, d)
-            return targets - means                # (T-1, d)
+            targets = y_traj[1:]  # (T-1, d)
+            return targets - means  # (T-1, d)
 
         # log_sigma_obs is a length-d vector in dyn_params; broadcast to (T-1, d)
-        log_sigma_vec = dyn_params["log_sigma_obs"]     # (d,)
-        log_sigma = jnp.broadcast_to(log_sigma_vec, means.shape)   # (T-1, d)
+        log_sigma_vec = dyn_params["log_sigma_obs"]  # (d,)
+        log_sigma = jnp.broadcast_to(log_sigma_vec, means.shape)  # (T-1, d)
         # Pack as (T-1, d, 2): axis -1 is [mean, log_sigma], axis -2 is channel.
-        return jnp.stack([means, log_sigma], axis=-1)   # (T-1, d, 2)
+        return jnp.stack([means, log_sigma], axis=-1)  # (T-1, d, 2)
 
     return jax.vmap(per_sample, in_axes=(0, 0))(y, params)
     # returns (n_samples, T-1, d, 2)
@@ -149,10 +149,10 @@ def apply_model(model_fn, data, params):
 ```python
 def loss_fn(model_output, data):
     # model_output: (n_samples, T-1, d, 2)
-    y = data["y"][:, 1:, :]                        # (n_samples, T-1, d)
-    means      = model_output[:, WARMUP_STEPS:, :, 0]
+    y = data["y"][:, 1:, :]  # (n_samples, T-1, d)
+    means = model_output[:, WARMUP_STEPS:, :, 0]
     log_sigmas = model_output[:, WARMUP_STEPS:, :, 1]
-    tgt        = y[:, WARMUP_STEPS:, :]
+    tgt = y[:, WARMUP_STEPS:, :]
     # Per-channel per-step NLL:
     nll_per_chan = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     # Average over time AND channels → per-sample scalar loss (see §7.1).
@@ -171,7 +171,7 @@ The v1 assertion `assert mean_arr.shape == ()` becomes:
 ```python
 def validate_step(model_fn, default_params, program_code=""):
     # ... same prelude ...
-    d = int(np.asarray(default_params["log_sigma_obs"]).size)   # channel count
+    d = int(np.asarray(default_params["log_sigma_obs"]).size)  # channel count
 
     # Feed a shape-(d,) y_prev to catch shape mismatches early.
     y_prev = jnp.zeros((d,), dtype=jnp.float32) + 0.5
@@ -244,39 +244,41 @@ The v1 doc provides "persistence" and "FHN Kalman-lite" as worked examples. Here
 **Vector persistence (baseline seed):**
 ```python
 def model(state, y_prev, params):
-    new_state = {"y_last": y_prev}       # shape (d,)
-    mean = new_state["y_last"]           # shape (d,)
+    new_state = {"y_last": y_prev}  # shape (d,)
+    mean = new_state["y_last"]  # shape (d,)
     return new_state, mean
 
+
 model.DEFAULT_PARAMS = {
-    "log_sigma_obs": [-1.5, -1.5, -1.5],     # d = 3 for Lorenz
-    "s0_y_last":     [0.0,  0.0,  0.0],
+    "log_sigma_obs": [-1.5, -1.5, -1.5],  # d = 3 for Lorenz
+    "s0_y_last": [0.0, 0.0, 0.0],
 }
 ```
 
 **2-D coupled Kalman-lite (for coupled VdP or 2-cell FHN):**
 ```python
 def model(state, y_prev, params):
-    x = state["x"]                                     # (2,) — observable position
-    v = state["v"]                                     # (2,) — hidden velocity
+    x = state["x"]  # (2,) — observable position
+    v = state["v"]  # (2,) — hidden velocity
     dt = params["dt"]
-    mu = params["mu"]                                  # (2,) — per-cell VdP parameter
-    k_coupling = params["k_coupling"]                  # scalar — cross-cell coupling
-    k_gain = params["k_gain"]                          # (2,) — per-channel innovation gain
+    mu = params["mu"]  # (2,) — per-cell VdP parameter
+    k_coupling = params["k_coupling"]  # scalar — cross-cell coupling
+    k_gain = params["k_gain"]  # (2,) — per-channel innovation gain
 
-    innovation = y_prev - x                            # (2,)
-    x_corr = x + k_gain * innovation                   # (2,)
+    innovation = y_prev - x  # (2,)
+    x_corr = x + k_gain * innovation  # (2,)
 
     # Coupled VdP: each cell has its own nonlinear damping,
     # plus a linear coupling term to its neighbour.
-    x_other = jnp.array([x_corr[1], x_corr[0]])        # swap for 2-cell coupling
-    dv = mu * (1.0 - x_corr ** 2) * v - x_corr + k_coupling * (x_other - x_corr)
+    x_other = jnp.array([x_corr[1], x_corr[0]])  # swap for 2-cell coupling
+    dv = mu * (1.0 - x_corr**2) * v - x_corr + k_coupling * (x_other - x_corr)
     v_new = v + dt * dv
     x_new = x_corr + dt * v_new
 
     new_state = {"x": x_new, "v": v_new}
-    mean = x_new                                       # (2,)
+    mean = x_new  # (2,)
     return new_state, mean
+
 
 model.DEFAULT_PARAMS = {
     "dt": 0.05,
@@ -284,8 +286,8 @@ model.DEFAULT_PARAMS = {
     "k_coupling": 0.1,
     "k_gain": [0.3, 0.3],
     "log_sigma_obs": [-1.5, -1.5],
-    "s0_x": [2.0, -2.0],           # antiphase initial condition
-    "s0_v": [0.0,  0.0],
+    "s0_x": [2.0, -2.0],  # antiphase initial condition
+    "s0_v": [0.0, 0.0],
 }
 ```
 
@@ -519,8 +521,8 @@ For Lorenz, if all three components' initial `s0_*` are zero, the model has no g
 
 In `apply_model`:
 ```python
-log_sigma_vec = dyn_params["log_sigma_obs"]     # (d,)
-log_sigma = jnp.broadcast_to(log_sigma_vec, means.shape)   # means: (T-1, d)
+log_sigma_vec = dyn_params["log_sigma_obs"]  # (d,)
+log_sigma = jnp.broadcast_to(log_sigma_vec, means.shape)  # means: (T-1, d)
 ```
 
 `jnp.broadcast_to((d,), (T-1, d))` broadcasts correctly *only* if the trailing axes align. This does — because the last axis of `means` is d — but if a project author writes `means` as `(d, T-1)` (channel-first) instead, the broadcast silently produces wrong shapes.

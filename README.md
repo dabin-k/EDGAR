@@ -336,8 +336,7 @@ Reference project: `projects/orientation_tuning/`.
 **Model signature.** `model*.py` defines:
 
 ```python
-def model(data, params):
-    ...
+def model(data, params): ...
 ```
 
 - `data`: dict of JAX arrays for one sample, e.g. `data["stimulus"]` of shape `(n_trials,)`.
@@ -348,8 +347,7 @@ def model(data, params):
 `param_est*.py` defines:
 
 ```python
-def parameter_estimator(data):
-    ...
+def parameter_estimator(data): ...
 ```
 
 Returns a parameter dict with the same keys as `model.DEFAULT_PARAMS`. Keep it simple — no `scipy.optimize` or `curve_fit`.
@@ -388,6 +386,7 @@ def model(state, y_prev, params):
     mean = new_state["y_last"]
     return new_state, mean
 
+
 model.DEFAULT_PARAMS = {
     "log_sigma_obs": 0.0,
     "s0_y_last": 0.0,
@@ -417,11 +416,18 @@ def model(state, y_prev, params):
     new_state = {"V": V_new, "w": w_new}
     return new_state, V_new
 
+
 model.DEFAULT_PARAMS = {
-    "dt": 0.05, "I0": 0.5, "eps": 0.08, "a": 0.7, "b": 0.8,
-    "k_V": 0.4, "k_w": 0.05,
+    "dt": 0.05,
+    "I0": 0.5,
+    "eps": 0.08,
+    "a": 0.7,
+    "b": 0.8,
+    "k_V": 0.4,
+    "k_w": 0.05,
     "log_sigma_obs": -1.5,
-    "s0_V": -1.0, "s0_w": -0.5,
+    "s0_V": -1.0,
+    "s0_w": -0.5,
 }
 ```
 
@@ -451,16 +457,17 @@ WARMUP_STEPS: int = 100
 
 def load_data(data_path="", T=2400, n_trajectories=32, seed=42, **kwargs):
     rng = np.random.default_rng(seed)
-    ys = np.stack([_synth_one_trajectory(rng, T, **kwargs)
-                   for _ in range(n_trajectories)])
+    ys = np.stack(
+        [_synth_one_trajectory(rng, T, **kwargs) for _ in range(n_trajectories)]
+    )
     split = n_trajectories // 2
     y_disc, y_val = jnp.asarray(ys[:split]), jnp.asarray(ys[split:])
     X_disc_train = {"y": y_disc}
-    X_disc_test  = {"y": y_disc}
-    X_val_train  = {"y": y_val}
-    X_val_test   = {"y": y_val}
+    X_disc_test = {"y": y_disc}
+    X_val_train = {"y": y_val}
+    X_val_test = {"y": y_val}
     X_eval = {
-        "y": jnp.asarray(ys[:4, :200]),          # short traces for dedup
+        "y": jnp.asarray(ys[:4, :200]),  # short traces for dedup
         "_sample_indices": np.arange(4),
         "_fingerprint_only": True,
     }
@@ -498,9 +505,9 @@ def apply_model(model_fn, data, params):
 
 def loss_fn(model_output, data):
     y = data["y"][:, 1:]
-    means      = model_output[:, WARMUP_STEPS:, 0]
+    means = model_output[:, WARMUP_STEPS:, 0]
     log_sigmas = model_output[:, WARMUP_STEPS:, 1]
-    tgt        = y[:, WARMUP_STEPS:]
+    tgt = y[:, WARMUP_STEPS:]
     nll = log_sigmas + 0.5 * ((tgt - means) / jnp.exp(log_sigmas)) ** 2
     return jnp.mean(nll, axis=-1)
 
@@ -511,7 +518,9 @@ def validate_step(model_fn, default_params, source=""):
     init_state_j = jax.tree_util.tree_map(jnp.asarray, init_state)
     dyn_params_j = jax.tree_util.tree_map(jnp.asarray, dyn_params)
     new_state, mean = model_fn(init_state_j, jnp.asarray(0.5), dyn_params_j)
-    assert jax.tree_util.tree_structure(init_state_j) == jax.tree_util.tree_structure(new_state)
+    assert jax.tree_util.tree_structure(init_state_j) == jax.tree_util.tree_structure(
+        new_state
+    )
     assert jnp.asarray(mean).shape == () and bool(jnp.isfinite(mean))
 ```
 

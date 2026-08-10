@@ -38,14 +38,14 @@ The framework then scans:
 
 ```python
 def apply_model(model_fn, data, params):
-    y = data["y"]                             # (n_samples, T)
-    u = data["u"]                             # (n_samples, T, d_u)
+    y = data["y"]  # (n_samples, T)
+    u = data["u"]  # (n_samples, T, d_u)
 
     def per_sample(y_traj, u_traj, p):
         init_state, dyn_params = _split_params_s0(p)
 
         def scan_step(state, inputs):
-            y_prev, u_prev = inputs           # y_prev: (), u_prev: (d_u,)
+            y_prev, u_prev = inputs  # y_prev: (), u_prev: (d_u,)
             new_state, mean = model_fn(state, y_prev, u_prev, dyn_params)
             return new_state, mean
 
@@ -83,9 +83,9 @@ A correct-in-principle LLM program:
 
 ```python
 def model(state, y_prev, u_prev, params):
-    x = state["x"]                                    # observable position
-    v = state["v"]                                    # hidden velocity
-    u_filt = state["u_filt"]                          # LLM-discovered latent filter
+    x = state["x"]  # observable position
+    v = state["v"]  # hidden velocity
+    u_filt = state["u_filt"]  # LLM-discovered latent filter
 
     mu, dt, K = params["mu"], params["dt"], params["K"]
     tau = params["tau"]
@@ -97,7 +97,7 @@ def model(state, y_prev, u_prev, params):
     # First-order low-pass on u — the "discovery":
     u_filt_new = u_filt + dt * (u_prev[0] - u_filt) / tau
 
-    dv = mu * (1.0 - x_corr ** 2) * v - x_corr + K * u_filt_new
+    dv = mu * (1.0 - x_corr**2) * v - x_corr + K * u_filt_new
     v_new = v + dt * dv
     x_new = x_corr + dt * v_new
 
@@ -107,9 +107,15 @@ def model(state, y_prev, u_prev, params):
 
 
 model.DEFAULT_PARAMS = {
-    "mu": 2.0, "dt": 0.05, "K": 1.0, "tau": 0.3, "k_gain": 0.3,
+    "mu": 2.0,
+    "dt": 0.05,
+    "K": 1.0,
+    "tau": 0.3,
+    "k_gain": 0.3,
     "log_sigma_obs": -1.5,
-    "s0_x": 2.0, "s0_v": 0.0, "s0_u_filt": 0.0,
+    "s0_x": 2.0,
+    "s0_v": 0.0,
+    "s0_u_filt": 0.0,
 }
 ```
 
@@ -267,7 +273,8 @@ Recap of the fingerprint path (verified in `edgar/evolution/island.py:329-368`):
 y_i = p_i.eval_fingerprint.flatten()
 y_j = p_j.eval_fingerprint.flatten()
 # shape guard
-if y_i.shape != y_j.shape: return False
+if y_i.shape != y_j.shape:
+    return False
 cosine = np.dot(y_i, y_j) / (np.linalg.norm(y_i) * np.linalg.norm(y_j) + 1e-6)
 return bool(cosine >= cosine_tol)
 ```
