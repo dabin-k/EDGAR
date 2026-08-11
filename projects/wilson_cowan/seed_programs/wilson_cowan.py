@@ -1,4 +1,5 @@
 import numpy as np
+import jax.numpy as jnp
 
 H = 1/30000
 
@@ -62,3 +63,39 @@ model.DEFAULT_PARAMS = {
     'XE' : 1.0,
     'XI' : 1.0
 }
+
+
+def model_jax(state_prev, y_prev, params):
+    '''JAX version of the Wilson-Cowan dynamics update (see `model`).'''
+    E_max = params['E_max']
+    I_max = params['I_max']
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+
+    C_E = params['C_E']  # constant input to the excitatory population
+    C_I = params['C_I']  # constant input to the inhibitory population
+
+    XE = params['XE']  # transient input to the excitatory population
+    XI = params['XI']  # transient input to the inhibitory population
+
+    E_prev = y_prev['E_prev']
+    I_prev = y_prev['I_prev']
+    stim_E_prev = y_prev['stim_E_prev']
+    stim_I_prev = y_prev['stim_I_prev']
+
+    E_dot = -E_prev + (E_max - E_prev) * jnp.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E_prev), 0)
+    E_dot /= tau_E
+    I_dot = -I_prev + (I_max - I_prev) * jnp.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I_prev), 0)
+    I_dot /= tau_I
+    E = E_prev + H * E_dot
+    I = I_prev + H * I_dot
+
+    new_state = {}
+    return new_state, (E, I)
+
+
+model_jax.DEFAULT_PARAMS = model.DEFAULT_PARAMS
