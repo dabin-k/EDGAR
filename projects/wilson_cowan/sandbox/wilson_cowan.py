@@ -3,8 +3,8 @@ import pathlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-repo_root = pathlib.Path(__file__).parent.parent
-sys.path.append(str(repo_root / "projects" / "wilson_cowan"))
+project_root = pathlib.Path(__file__).parent.parent
+sys.path.append(str(project_root))
 from data_loader.load_data import load_data
 
 if __name__ == "__main__":
@@ -69,6 +69,6 @@ if __name__ == "__main__":
     axes[1, 1].legend()
 
     plt.tight_layout()
-    output_img = repo_root / "sandbox" / "wilson_cowan_responses.png"
+    output_img = project_root / "sandbox" / "wilson_cowan_responses.png"
     plt.savefig(output_img, dpi=150)
     print(f"Saved response plot to {output_img}")

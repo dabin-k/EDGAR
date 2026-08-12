@@ -1,4 +1,3 @@
-import asyncio
 from edgar.io.config import Config
 from edgar.io.task_spec import TaskSpec
 from edgar.scoring.scoring import _get_params, _eval_loss, _optimize
@@ -29,10 +28,10 @@ def _params_dict(mat: np.ndarray) -> dict:
     """(n, 12) rows in PARAM order -> {key: (n,) jnp array}."""
     return {k: jnp.asarray(mat[:, j]) for j, k in enumerate(PARAM_KEYS)}
 
-async def main():
+def main():
     # Use absolute path for robustness in sandbox
     project_root = Path(__file__).parent.parent
-    path = project_root / "projects" / "wilson_cowan" / "config.yaml"
+    path = project_root / "config.yaml"
 
     print(f"Loading config from: {path}")
     config = Config.from_yaml(path)
@@ -85,24 +84,26 @@ async def main():
     loss = _eval_loss(model_fn, spec.loss_fn, true_pd, X_discover[1], spec.apply_model_fn)
     print(f"\nInitial loss, true params, test split: {loss:.4f}")
 
-    #     # Optimize on train split (X_discover[0]) using loss_fn_train
-    #     print("\nOptimizing parameters...")
-    #     params = _optimize(
-    #         model_fn,
-    #         loss_fn_train,
-    #         params_init,
-    #         X_discover[0],
-    #         spec.scoring["gradient_descent"],
-    #     )
+    # Optimize on train split (X_discover[0]) using loss_fn_train
+    print("\nOptimizing parameters...")
+    params = _optimize(
+        model_fn,
+        spec.loss_fn,
+        params_init,
+        X_discover[0],
+        spec.scoring["gradient_descent"],
+        spec.apply_model_fn
+    )
 
-    #     print("\nOptimized Parameters:")
-    #     for k, v in params.items():
-    #         print(f"  {k}: shape {v.shape if hasattr(v, 'shape') else type(v)}")
+    print("\nOptimized Parameters:")
+    for k, v in params.items():
+        print(f"  {k}: {v}")
 
-    #     # Evaluate final loss on test split (X_discover[1]) using loss_fn_test
-    #     final_loss = _eval_loss(model_fn, loss_fn_test, params, X_discover[1])
-    #     print(f"\nFinal loss: {final_loss:.4f}")
+    final_loss = _eval_loss(model_fn, spec.loss_fn, params, X_discover[0], spec.apply_model_fn)
+    print(f"\nFinal loss on train split: {final_loss:.4f}")
+    final_loss = _eval_loss(model_fn, spec.loss_fn, params, X_discover[1], spec.apply_model_fn)
+    print(f"\nFinal loss on test split: {final_loss:.4f}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
