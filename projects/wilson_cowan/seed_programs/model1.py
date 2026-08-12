@@ -53,17 +53,14 @@ def model(state_prev, y_prev, params):
     return new_state, (E, I)
 
 model.DEFAULT_PARAMS = {
-    'tau_E' : 300.0, # time constant for excitatory population
-    'tau_I' : 300.0, # time constant for inhibitory population
-    'W_EE' : 0.01,  # weight of excitatory to excitatory connections
-    'W_IE' : 0.01,  # weight of inhibitory to excitatory connections
-    'W_EI' : 0.01,  # weight of excitatory to inhibitory connections
-    'W_II' : 0.01,  # weight of inhibitory to inhibitory connections
-    'E_max' : 20.0,
-    'I_max' : 20.0,
-    'C_E' : 0.001,
-    'C_I' : 0.001,
-    'XE' : 1.0,
-    'XI' : 1.0,
+    "tau_E": 60.0,
+    "tau_I": 120.0,
+    "C_E": 1.0,
+    "C_I": 1.0,
+    "XE": 3.0,
+    "XI": 1.0,
+    "tau_S": 300.0,
+    "W_ES": 0.5,
+    "W_IS": 0.5,
+    "s0_S": 1.0,  # learnable initial value of the latent S (GD-fit per sample; seeds the scan carry)
 }
-
