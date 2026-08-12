@@ -17,9 +17,21 @@ Prediction is one-step-ahead and teacher-forced: the prediction of ``y[t]`` is p
 with everything at ``t-1`` (``E[t-1], I[t-1], stim_E[t-1], stim_I[t-1]``). The scan
 inputs are the ``[:-1]`` slice; the targets are ``[1:]``.
 
-Loss is per-channel-normalized MSE, averaged over both stim conditions and time, so E
-and I (which live on different scales) contribute comparably. There is no observation-
-noise parameter and no ``s0_*`` initial-state parameters.
+Loss is a heteroscedastic Gaussian NLL, averaged over stim conditions and time. The
+observation noise is signal-dependent (the generator uses ``std = 0.1·sqrt(mean)``, so
+``var ∝ mean``), which is large in the evoked transient and small at the ~0 resting
+baseline. We model ``var_t = phi · max(mean_t, EPS_MEAN)`` with a single learnable
+coefficient ``phi = exp(log_noise_coef)`` per sample, **shared across E and I** — so each
+channel's variance follows its own predicted mean and the "natural weighting" of E vs I
+falls out of the physics. This down-weights the high-variance transient by exactly the
+right amount (the principled alternative to discarding the onset window) and replaces the
+old per-sample ``scale`` term. The data is left in raw units so ``var ∝ mean`` is
+meaningful and the mechanistic parameters stay interpretable.
+
+``log_noise_coef`` reaches the (params-free) ``loss_fn`` the same way ``fhn_excitable``
+threads its noise param: ``apply_model`` reads it from ``params`` and appends it as a
+third output channel, which ``loss_fn`` reads back. The model function itself never sees
+it. There are no ``s0_*`` initial-state parameters.
 
 Cross-validation is over the 12 repeats: ``simulate_data.save_kfold_splits`` writes
 ``wc_fold{f}.npz`` files, each holding a repeat-averaged ``train_data`` / ``test_data``
@@ -31,6 +43,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+# Floor on the mean inside the noise variance ``var = phi · max(mean, EPS_MEAN)``. The
+# resting baseline is ~0 (and predictions can dip slightly negative), so this keeps the
+# variance strictly positive; ~0.1 is around the resting activity level.
+EPS_MEAN = 0.1
 
 
 # ── EDGAR entry points ──
@@ -79,11 +97,9 @@ def load_data(
         sI = np.broadcast_to(stimuli[None, :, :, 1], (n, n_stim, T))
         return jnp.asarray(sE), jnp.asarray(sI)
 
-    # Per-(sample, stim) channel scale = std over time on the TRAIN window, reused for
-    # both train and test so the normalisation is identical across the split.
-    train_E_scale = np.maximum(train_data[..., 0].std(axis=-1), 1e-6)  # (n_samples, n_stim)
-    train_I_scale = np.maximum(train_data[..., 1].std(axis=-1), 1e-6)
-
+    # No per-sample scale: the heteroscedastic NLL (see loss_fn) sets each residual's
+    # weight from the fitted noise variance ``phi · mean_t``, which subsumes what the old
+    # ``scale`` term did. The data is passed through in raw units.
     def _build(split_data: np.ndarray, idx: np.ndarray) -> dict:
         n = len(idx)
         sE, sI = _stim_arrays(n)
@@ -93,8 +109,6 @@ def load_data(
             "I": jnp.asarray(split_data[idx, :, :, 1]),
             "stim_E": sE,
             "stim_I": sI,
-            "E_scale": jnp.asarray(train_E_scale[idx]),      # (n, n_stim)
-            "I_scale": jnp.asarray(train_I_scale[idx]),
         }
 
     X_disc_train = _build(train_data, disc_idx)
@@ -144,11 +158,22 @@ def apply_model(model_fn, data, params):
     pytree natively). vmaps over samples (axis 0, matched to per-sample ``params``) and,
     inside, over the two stim conditions (params are shared across conditions — same
     cell). Returns ``(n_samples, n_stim, T-1, 2)``: predicted (E, I) at each step.
+
+    Models with a hidden state (e.g. the WCS slow variable ``S``) expose an
+    ``INITIAL_STATE`` attribute that seeds the scan carry; stateless models (base WC)
+    have none, so the carry starts as an empty dict exactly as before.
+
+    The fitted per-sample observation-noise coefficient ``log_noise_coef`` is read from
+    ``params`` and appended as a constant third channel, so the params-free ``loss_fn``
+    can recover it. Output is ``(n_samples, n_stim, T-1, 3)``: ``(E, I, log_noise_coef)``.
+    The model function itself never sees ``log_noise_coef``.
     """
     E = data["E"]        # (n, n_stim, T)
     I = data["I"]
     sE = data["stim_E"]
     sI = data["stim_I"]
+
+    init_state = getattr(model_fn, "INITIAL_STATE", {})
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
         def per_stim(E_c, I_c, sE_c, sI_c):
@@ -164,29 +189,40 @@ def apply_model(model_fn, data, params):
                 E_next, I_next = mean
                 return new_state, jnp.stack([E_next, I_next])
 
-            _, means = jax.lax.scan(step, {}, xs)  # (T-1, 2)
+            _, means = jax.lax.scan(step, init_state, xs)  # (T-1, 2)
             return means
 
-        return jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)  # (n_stim, T-1, 2)
+        means = jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)   # (n_stim, T-1, 2)
+        log_nc = jnp.broadcast_to(p["log_noise_coef"], means.shape[:-1] + (1,))
+        return jnp.concatenate([means, log_nc], axis=-1)   # (n_stim, T-1, 3)
 
     return jax.vmap(per_sample, in_axes=(0, 0, 0, 0, 0))(E, I, sE, sI, params)
 
 
 def loss_fn(model_output, data):
-    """Per-channel-normalized MSE, averaged over stim conditions and time.
+    """Heteroscedastic Gaussian NLL, averaged over stim conditions and time.
 
-    ``model_output`` is ``(n, n_stim, T-1, 2)``. Targets are the ``[1:]`` slice of the
-    observed E/I. Each channel's squared error is divided by that channel's scale
-    (per (sample, stim), from the train window) so E and I contribute comparably.
-    Returns one loss per sample ``(n,)``.
+    ``model_output`` is ``(n, n_stim, T-1, 3)``: ``(E_hat, I_hat, log_noise_coef)``, where
+    ``log_noise_coef`` is the per-sample fitted noise coefficient carried through by
+    ``apply_model``. Targets are the ``[1:]`` slice of the observed E/I.
+
+    The observation variance is signal-dependent: ``var = phi · max(mean, EPS_MEAN)`` with
+    ``phi = exp(log_noise_coef)`` shared by E and I. Each channel is weighted by its own
+    predicted mean, so the high-variance evoked transient is smoothly down-weighted and the
+    low-noise baseline dominates the fit. The mean inside the variance is detached
+    (``stop_gradient``) so the model cannot lower the loss by inflating its predicted mean to
+    buy variance; ``phi`` still gets a gradient through the ``log`` term. Returns ``(n,)``.
     """
     E_hat = model_output[..., 0]      # (n, n_stim, T-1)
     I_hat = model_output[..., 1]
+    log_nc = model_output[..., 2]
     E_tgt = data["E"][:, :, 1:]
     I_tgt = data["I"][:, :, 1:]
-    E_scale = data["E_scale"][:, :, None]  # (n, n_stim, 1)
-    I_scale = data["I_scale"][:, :, None]
 
-    e2 = ((E_hat - E_tgt) / E_scale) ** 2
-    i2 = ((I_hat - I_tgt) / I_scale) ** 2
-    return jnp.mean(e2 + i2, axis=(1, 2))  # (n,)
+    phi = jnp.exp(log_nc)
+    var_E = phi * jnp.maximum(jax.lax.stop_gradient(E_hat), EPS_MEAN)
+    var_I = phi * jnp.maximum(jax.lax.stop_gradient(I_hat), EPS_MEAN)
+
+    nll_E = 0.5 * (jnp.log(var_E) + (E_tgt - E_hat) ** 2 / var_E)
+    nll_I = 0.5 * (jnp.log(var_I) + (I_tgt - I_hat) ** 2 / var_I)
+    return jnp.mean(nll_E + nll_I, axis=(1, 2))  # (n,)

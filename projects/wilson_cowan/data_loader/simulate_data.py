@@ -9,6 +9,7 @@ Signature of each model should be : initial_state, parameters -> time_series of 
 Both initial state and parameters are dictionaries of float values.
 '''
 import os
+from typing import Optional
 
 import numpy as np
 
@@ -274,65 +275,50 @@ def lin_model(initial_state, parameters, stimuli, time_steps, h=0.01):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Data synthesis + k-fold split generation (only the base Wilson-Cowan model)
+# Data synthesis + k-fold split generation
+#
+# A single model registry (MODELS) lets us synthesise data from either the base
+# Wilson-Cowan model or the slow-inhibition variant. Each entry pairs a model
+# function with a defaults module that supplies the simulation grid, per-sample
+# parameter medians/MADs, and the initial state. Only the observed E, I channels
+# are saved (any hidden state, e.g. the WCS slow variable S, is dropped), so the
+# data contract stays (n_samples, 2, n_repeats, n_times, 2) for every model.
 # ────────────────────────────────────────────────────────────────────────────
+from . import wilson_cowan_defaults as wc_defaults
+from . import wilson_cowan_slow_defaults as wcs_defaults
 
-DEFAULT_RAW_PATH = "/home/dabin/data/wc_simulations/wilson_cowan.npz"
-
-N_SAMPLES = 8          # cells / animals; parameters are fit per sample
-N_REPEATS = 12         # noisy repeats per (sample, stim condition)
-
-DT = 1 / 30            # sampling interval, ms per bin (1/30 ms)
-N_TIMES_MS = 650
-N_TIMES = int(N_TIMES_MS / DT)
-STIM_ONSET_MS = 50
-STIM_DUR_MS = 2        # boxcar pulse width, ms
-
-STIM_ONSET = int(STIM_ONSET_MS / DT)
-STIM_DUR = int(STIM_DUR_MS / DT)
-
-H = DT / 1000          # integration step used by the generator (ms)
-
-# Per-sample parameters are drawn uniformly on [median - MAD, median + MAD].
-PARAM_MEDIAN = {
-    'tau_E': 0.0011,
-    'tau_I': 0.0065,
-    'W_EE': 0.0396,
-    'W_IE': 0.0277,
-    'W_EI': 0.0074,
-    'W_II': 0.0014,
-    'E_max': 29.5,
-    'I_max': 39.9,
-    'C_E': 0.0018,
-    'C_I': 0.0134,
-    'XE': 3.51,
-    'XI': 1.26,
+MODELS = {
+    "wilson_cowan": {
+        "model_fn": wilson_cowan_model,
+        "defaults": wc_defaults,
+        "fold_prefix": "wc",
+    },
+    "wilson_cowan_slow": {
+        "model_fn": wilson_cowan_slow_inhibition_model,
+        "defaults": wcs_defaults,
+        "fold_prefix": "wcs",
+    },
 }
 
-PARAM_MAD = {
-    'tau_E': 0.0002,
-    'tau_I': 0.0019,
-    'W_EE': 0.0162,
-    'W_IE': 0.0111,
-    'W_EI': 0.0033,
-    'W_II': 0.0115,
-    'E_max': 13.1,
-    'I_max': 16.4,
-    'C_E': 0.0016,
-    'C_I': 0.0115,
-    'XE': 2.10,
-    'XI': 0.86,
-}
+DATA_ROOT = "/home/dabin/data/wc_simulations"
+
+
+def _raw_path(model: str, noiseless: bool = False) -> str:
+    """Default output path for a model's raw dataset (noiseless twin in a subdir)."""
+    sub = "noiseless" if noiseless else ""
+    return os.path.join(DATA_ROOT, sub, f"{model}.npz")
 
 
 def _generate_parameters(param_medians, param_mad, n_samples, random_seed=0):
-    """(n_samples, n_params) array sampled uniformly on [median-MAD, median+MAD]."""
+    """(n_samples, n_params) array; each param ~ Normal(median, 0.2*MAD), clipped >=0."""
     rng = np.random.default_rng(random_seed)
     parameters = np.zeros((n_samples, len(param_medians)))
     for sample_idx in range(n_samples):
         for param_idx, (param_name, median) in enumerate(param_medians.items()):
             mad = param_mad[param_name]
-            parameters[sample_idx, param_idx] = rng.uniform(median - mad, median + mad)
+            parameters[sample_idx, param_idx] = rng.normal(median, 0.2 * mad)
+    # ensure that no parameter is negative
+    parameters = np.maximum(parameters, 0)
     return parameters
 
 
@@ -351,41 +337,125 @@ def _add_noise(mean, random_seed=0):
     noise_std = 0.1 * np.sqrt(mean)
     return mean + rng.normal(0, noise_std, size=mean.shape)
 
+def _cv_gaussian_smooth(repeats):
+    """Smooth the repeats with a Gaussian kernel.
+    Choose the smoothing bandwidth dynamically by performing a grid search. 
 
-def save_data(output_path: str = DEFAULT_RAW_PATH):
-    """Simulate the raw Wilson-Cowan dataset and save it.
+    The input repeats will contain m number of repeats. 
+    Iterate through the repeats, and for each repeat smooth the repeat with bandwidth b and compute the MSE between the smoothed repeat and the mean of the remaining repeats. 
+    Perform this for a range of bandwidths and choose the bandwidth that minimizes the MSE.
 
-    Writes ``data`` (n_samples, 2, n_repeats, n_times, 2), ``stimuli``
-    (2, n_times, 2) and ``params`` (n_samples, n_params). The two stim conditions
-    are an excitatory pulse (drive to E) and an inhibitory pulse (drive to I).
+    Parameters
+    ----------
+    repeats : (n_repeats, n_times, 2) array of noisy repeats.
+
+    Returns
+    -------
+    repeats : (n_repeats, n_times, 2) array of smoothed repeats.
+    bandwidth : float, the optimal bandwidth used for smoothing.
     """
-    params = _generate_parameters(PARAM_MEDIAN, PARAM_MAD, N_SAMPLES)
+    from scipy.ndimage import gaussian_filter1d
 
-    exc_stimuli = np.zeros((N_TIMES, 2))
-    exc_stimuli[STIM_ONSET:STIM_ONSET + STIM_DUR, 0] = 1  # pulse to E population
-    inh_stimuli = np.zeros((N_TIMES, 2))
-    inh_stimuli[STIM_ONSET:STIM_ONSET + STIM_DUR, 1] = 1  # pulse to I population
+    bandwidth_range = np.geomspace(1, 15, 8) # range of bandwidths to search over
+    mse_list = []
+    for b in bandwidth_range:
+        errs = []
+        for i in range(repeats.shape[0]):
+            # smoothen the current repeat
+            smoothed_repeat = gaussian_filter1d(repeats[i], sigma=b, axis=0)
+            # compute the mean of the remaining repeats
+            remaining_mean = np.mean(np.delete(repeats, i, axis=0), axis=0)
+            # compute the MSE between the smoothed repeat and the mean of the remaining repeats
+            mse = np.mean((smoothed_repeat - remaining_mean) ** 2)
+            errs.append(mse)
+        mse_list.append(np.mean(errs))
+    optimal_bandwidth = bandwidth_range[np.argmin(mse_list)]
+    smoothed_repeats = np.zeros_like(repeats)
+    for i in range(repeats.shape[0]):
+        smoothed_repeats[i] = gaussian_filter1d(repeats[i], sigma=optimal_bandwidth, axis=0)
+    return smoothed_repeats, optimal_bandwidth
+
+def generate_data(
+    model: str = "wilson_cowan",
+    noiseless: bool = False,
+    params: Optional[np.ndarray] = None,
+    random_seed: int = 0,
+):
+    """Simulate a raw dataset for the chosen model.
+
+    Returns ``data`` (n_samples, 2, n_repeats, n_times, 2), ``stimuli``
+    (2, n_times, 2) and ``params`` (n_samples, n_params). The two stim conditions
+    are an excitatory pulse (drive to E) and an inhibitory pulse (drive to I). Only
+    the observed E, I channels are kept; any hidden state (e.g. the WCS slow
+    variable S) is dropped so the last axis is always 2.
+
+    ``model`` selects an entry in ``MODELS``; the simulation grid, per-sample
+    parameter medians/MADs and initial state all come from that model's defaults
+    module. Pass ``params`` (n_samples, n_params) to override sampling.
+
+    If ``noiseless`` is True the observation noise is skipped, so every repeat is
+    the identical clean response. Averaging the repeats into k-fold train/test
+    then yields train == test — the setup for the GD parameter-recovery sanity
+    check (no cross-validation, just "can GD hit the true params on clean data").
+    """
+    cfg = MODELS[model]
+    defaults = cfg["defaults"]
+    model_fn = cfg["model_fn"]
+
+    n_repeats = defaults.N_REPEATS
+    n_times = defaults.N_TIMES
+
+    if params is None:
+        params = _generate_parameters(
+            defaults.PARAM_MEDIAN, defaults.PARAM_MAD, defaults.N_SAMPLES,
+            random_seed=random_seed,
+        )
+
+    exc_stimuli = np.zeros((n_times, 2))
+    exc_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 0] = 1  # pulse to E
+    inh_stimuli = np.zeros((n_times, 2))
+    inh_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 1] = 1  # pulse to I
     stimuli = np.stack([exc_stimuli, inh_stimuli], axis=0)
 
-    initial_state = {'E': 1.0, 'I': 1.0}  # hard-coded, shared across samples
+    initial_state = defaults.INITIAL_STATE  # hard-coded, shared across samples
+    param_names = list(defaults.PARAM_MEDIAN.keys())
 
-    data = np.zeros((N_SAMPLES, 2, N_REPEATS, N_TIMES, 2))
-    param_names = list(PARAM_MEDIAN.keys())
+    n_samples = len(params)
+    data = np.zeros((n_samples, 2, n_repeats, n_times, 2))
     for i, p in enumerate(params):
         p = dict(zip(param_names, p))
         for j, stim in enumerate(stimuli):
-            activity = wilson_cowan_model(initial_state, p, stim, N_TIMES, h=H)
-            for k in range(N_REPEATS):
-                data[i, j, k] = _add_noise(activity, random_seed=i * N_REPEATS + k)
+            activity = model_fn(initial_state, p, stim, n_times, h=defaults.H)
+            activity = activity[:, :2]  # keep observed E, I; drop any hidden state
+            for k in range(n_repeats):
+                if noiseless:
+                    data[i, j, k] = activity
+                else:
+                    data[i, j, k] = _add_noise(activity, random_seed=i * n_repeats + k)
+    return data, stimuli, params
+
+def save_data(
+    model: str = "wilson_cowan",
+    output_path: Optional[str] = None,
+    noiseless: bool = False,
+    params: Optional[np.ndarray] = None,
+):
+    """Simulate the raw dataset for ``model`` and save it as an npz.
+
+    ``output_path`` defaults to ``DATA_ROOT/{model}.npz`` (noiseless twin under a
+    ``noiseless/`` subdir).
+    """
+    output_path = output_path or _raw_path(model, noiseless=noiseless)
+    data, stimuli, params = generate_data(model=model, noiseless=noiseless, params=params)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     np.savez(output_path, data=data, params=params, stimuli=stimuli)
     return output_path
 
-
 def save_kfold_splits(
-    raw_path: str = DEFAULT_RAW_PATH,
+    raw_path: str,
     out_dir: str | None = None,
+    fold_prefix: str = "wc",
     n_folds: int = 3,
     seed: int = 0,
 ):
@@ -397,8 +467,8 @@ def save_kfold_splits(
     of shape (n_samples, 2, n_times, 2). Parameters are cross-validated by fitting
     on ``train_data`` and evaluating on the held-out ``test_data``.
 
-    Writes ``wc_fold{f}.npz`` (train_data, test_data, stimuli, params, fold,
-    test_repeats, train_repeats) and returns the list of paths.
+    Writes ``{fold_prefix}_fold{f}.npz`` (train_data, test_data, stimuli, params,
+    fold, test_repeats, train_repeats) and returns the list of paths.
     """
     raw = np.load(raw_path)
     data = raw["data"]        # (n_samples, 2, n_repeats, n_times, 2)
@@ -423,7 +493,7 @@ def save_kfold_splits(
         train_idx = np.sort(np.setdiff1d(np.arange(n_repeats), test_idx))
         test_data = data[:, :, test_idx].mean(axis=2)    # (n_samples, 2, n_times, 2)
         train_data = data[:, :, train_idx].mean(axis=2)
-        out_path = os.path.join(out_dir, f"wc_fold{f}.npz")
+        out_path = os.path.join(out_dir, f"{fold_prefix}_fold{f}.npz")
         np.savez(
             out_path,
             train_data=train_data,
@@ -438,10 +508,27 @@ def save_kfold_splits(
     return paths
 
 
-if __name__ == "__main__":
-    # Regenerate the raw dataset only if it is missing, then (re)build the folds.
-    if not os.path.exists(DEFAULT_RAW_PATH):
-        print(f"[simulate_data] raw dataset missing -> generating {DEFAULT_RAW_PATH}")
-        save_data(DEFAULT_RAW_PATH)
-    for p in save_kfold_splits():
+def build_dataset(model: str, noiseless: bool = False):
+    """(Re)generate a model's raw dataset if missing, then (re)build its k-folds."""
+    fold_prefix = MODELS[model]["fold_prefix"]
+    raw_path = _raw_path(model, noiseless=noiseless)
+    tag = "noiseless " if noiseless else ""
+    if not os.path.exists(raw_path):
+        print(f"[simulate_data] {tag}raw dataset missing -> generating {raw_path}")
+        save_data(model=model, noiseless=noiseless)
+    for p in save_kfold_splits(raw_path=raw_path, fold_prefix=fold_prefix):
         print(f"[simulate_data] wrote {p}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Simulate WC / WCS datasets and k-fold splits.")
+    ap.add_argument("--model", default="wilson_cowan", choices=list(MODELS),
+                    help="which dynamical-system model to simulate")
+    args = ap.parse_args()
+
+    # Noisy dataset + folds.
+    build_dataset(args.model, noiseless=False)
+    # Noiseless twin (train == test) for the GD parameter-recovery sanity check.
+    build_dataset(args.model, noiseless=True)
