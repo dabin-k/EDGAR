@@ -28,10 +28,11 @@ llms:
   max_tokens: 10000
 
 scoring:
+  timeout_s: 300.0
   param_penalty_weight: 0.001
   gradient_descent:
-    max_iter: 500          # match the sibling state-space projects (was inheriting 1000)
-    learning_rate: 0.005
+    max_iter: 200          # match the sibling state-space projects (was inheriting 1000)
+    learning_rate: 0.001
     gradient_clip_norm: 5.0 # pre-Adam global-norm clip; needed for long lax.scan backprop
 
 project_params:

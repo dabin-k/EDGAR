@@ -64,7 +64,7 @@ model:
     module-level constant, NOT a learnable parameter.
 
     * HIDDEN STATE IS OPTIONAL. Both E and I are observed, so you do NOT need a
-    hidden variable. `state` is a dict; if you use none, return `new_state = {}`.
+    hidden variable. `state` is a dict; if you use none, return `new_state = {{}}`.
     If a slow process helps (e.g. a slowly accumulating adaptation / slow
     inhibition variable that is NOT directly observed), you MAY carry it: add a
     class-style attribute `model.INITIAL_STATE = {{"S": <float>}}`, read
@@ -82,6 +82,49 @@ model:
     observation variance as `exp(log_noise_coef) * max(mean, 0.1)` and fits it per cell by
     gradient descent. Your model body does NOT read or use `log_noise_coef` — just declare
     it in `DEFAULT_PARAMS` so it becomes a learnable parameter.
+
+    '
+  image_analysis_instructions: '**Image Analysis Instructions:**
+
+    This image is a 2x2 diagnostic grid that identifies WHICH dynamical term your
+    model is missing and in WHICH equation. It is computed from the one-step
+    prediction errors (residuals): r_E = observed_E - predicted_E, and r_I =
+    observed_I - predicted_I. Under teacher forcing these residuals are approximately
+    the sum of the true terms your model left out, so any leftover structure points
+    directly at a term you should add.
+
+    READING THE GRID. The TOP row shows the excitatory error r_E; the BOTTOM row
+    shows the inhibitory error r_I. The LEFT column plots the error against the
+    previous excitatory activity E[t-1]; the RIGHT column plots it against the
+    previous inhibitory activity I[t-1]. So each panel answers one question: does the
+    leftover error in this population depend on the previous value of that variable?
+    The two DIAGONAL panels (r_E vs E, and r_I vs I) test for a missing SELF term
+    (self-decay, self-excitation, or a saturation ceiling). The two OFF-DIAGONAL
+    panels (r_E vs I, and r_I vs E) test for a missing CROSS term that couples the two
+    populations. Each colored line is one example population (labelled "sample"); a
+    real effect points the same way across all of them.
+
+    HOW TO READ A PANEL. In each panel the leftover error (vertical) is plotted
+    directly against the previous value of one variable (horizontal). If the model
+    has captured that variable''s contribution, the error does not depend on it: the
+    binned line is FLAT and sits on zero. If a term in that variable is missing, the
+    line SLOPES. The number in each panel title is the correlation (between -1 and +1)
+    between the error and that variable — a plain measure of how strong the leftover
+    dependence is; ignore panels whose value is near zero. A caveat: E and I tend to
+    rise and fall together, so a genuine dependence on one variable can leak a weaker
+    slope into the panel for the other. Trust the STRONGER of the two panels in a row,
+    and weigh the diagonal (self) against the off-diagonal (cross) rather than reading
+    each panel in isolation.
+
+    * Upward slope: the model under-predicts that population when the variable is high
+
+    * Downward slope: the model over-predicts that population when the variable is high
+
+    * A curved (rather than straight) trend means the missing term is NONLINEAR, for
+    example an activity-dependent gain or a saturation, not a plain linear term.
+
+    Use this to create a new model that adds exactly the indicated term(s) and beats
+    the parent models.
 
     '
 parameter_estimator:
@@ -120,7 +163,8 @@ jax_translator_model:
     exactly. Do NOT collapse `(E, I)` into an array.
 
     * `y_prev` is a dict with keys `E_prev`, `I_prev`, `stim_E_prev`,
-    `stim_I_prev`. Read from it exactly as the numpy model does.
+    `stim_I_prev`. stim_E_prev and stim_I_prev are 0 if no stimulus, 1 if stimulus present.
+    Read from it exactly as the numpy model does.
 
     * `state` and `new_state` are dicts with the SAME keys throughout the scan
     (possibly empty). Do not add, remove, or rename keys. If the model defines
