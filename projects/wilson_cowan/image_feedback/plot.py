@@ -142,7 +142,47 @@ def plot_model_fits(
 
     resids = [("r_E", rE), ("r_I", rI)]
     regs = [("E[t-1]", E_prev), ("I[t-1]", I_prev)]
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9), squeeze=False)
+
+    # Layout: a top strip of trajectory panels (data vs model, for two randomly
+    # chosen samples — each split into an E and an I panel) sits above the 2x2
+    # residual-diagnostic grid.
+    fig = plt.figure(figsize=(12, 12.5))
+    gs = fig.add_gridspec(
+        3, 1, height_ratios=[1.0, 2.0, 2.0],
+        hspace=0.35, top=0.9, bottom=0.06, left=0.08, right=0.97,
+    )
+
+    # ── Top strip: two random samples, each as an E (left) and I (right) panel ────
+    n_traj = min(2, n_show)
+    traj_rows = np.sort(np.random.default_rng().choice(n_show, n_traj, replace=False))
+    T_full = true_E.shape[1]
+    T_show = T_full if window <= 0 else int(min(window, T_full))
+    t_true = np.arange(T_show)
+    t_pred = np.arange(1, T_show)
+    top_gs = gs[0].subgridspec(1, 2 * n_traj, wspace=0.35)
+    for k, r in enumerate(traj_rows):
+        for ci, (chan, obs, pred, mcolor) in enumerate([
+            ("E", true_E, pred_E, "tab:red"),
+            ("I", true_I, pred_I, "tab:blue"),
+        ]):
+            ax = fig.add_subplot(top_gs[0, 2 * k + ci])
+            ax.plot(t_true, obs[r, :T_show], color="0.35", lw=0.8, label="data")
+            ax.plot(t_pred, pred[r, :T_show - 1], color=mcolor, lw=0.8,
+                    alpha=0.9, label="model")
+            ax.set_title(f"{sample_labels[r]} — {chan}", fontsize=9)
+            ax.set_xlabel("time bin", fontsize=8)
+            ax.tick_params(labelsize=7)
+            if ci == 0:
+                ax.set_ylabel("activity", fontsize=8)
+            if k == 0 and ci == 0:
+                ax.legend(fontsize=6, loc="upper right")
+
+    # ── Bottom: 2x2 residual cross-dependence grid ───────────────────────────────
+    grid_gs = gs[1:3].subgridspec(2, 2, hspace=0.3, wspace=0.22)
+    axes = np.empty((2, 2), dtype=object)
+    for ri in range(2):
+        for ci in range(2):
+            axes[ri, ci] = fig.add_subplot(grid_gs[ri, ci])
     for ri, (rname, R) in enumerate(resids):
         for ci, (xname, X) in enumerate(regs):
             ax = axes[ri, ci]
@@ -150,7 +190,7 @@ def plot_model_fits(
             lo, hi = np.percentile(X.ravel(), [0.5, 99.5])
             edges = np.linspace(lo, hi, n_bins + 1)      # shared bins across samples
             for s in range(n_show):
-                ax.scatter(X[s], R[s], s=2, alpha=0.12, color=colors[s],
+                ax.scatter(X[s], R[s], s=5, alpha=0.2, color=colors[s],
                            edgecolors="none", rasterized=True)
             for s in range(n_show):                       # binned line per sample, on top
                 cx, cy = _binned_mean(X[s], R[s], edges)
@@ -170,11 +210,8 @@ def plot_model_fits(
                 ax.legend(fontsize=7, loc="upper left", title="sample")
     fig.suptitle(
         f"wilson_cowan residual cross-dependence — stim {si}"
-        + (f"  |  {model_name}" if model_name else "")
-        + "\nsloped line => missing term in that variable"
-        + "  (off-diagonal => missing cross-population coupling)",
-        fontsize=11,
+        + (f"  |  {model_name}" if model_name else ""),
+        fontsize=11, y=0.965,
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(save_path, dpi=130, bbox_inches="tight", facecolor="white")
     plt.close(fig)

@@ -18,14 +18,14 @@ def parameter_estimator(data):
     I_amp = max(float(I.max() - I_base), 0.1)
 
     return {
-        "tau_E": 0.002,
-        "tau_I": 0.004,
+        "tau_E": 60.0,
+        "tau_I": 120.0,
         "C_E": E_base,
         "C_I": I_base,
         "XE": E_amp,
         "XI": I_amp,
         # Latent-inhibition params (model1 reads these) — small positive defaults, GD refines.
-        "tau_S": 0.01,
+        "tau_S": 300.0,
         "W_ES": 0.001,
         "W_IS": 0.001,
         # Obs-noise coef init log(0.01) (matches the generative var = 0.01*mean); GD refines.

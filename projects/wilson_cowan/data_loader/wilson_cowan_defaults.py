@@ -1,25 +1,33 @@
 N_SAMPLES = 8          # cells / animals; parameters are fit per sample
 N_REPEATS = 12         # noisy repeats per (sample, stim condition)
 
-DT = 1 / 30            # sampling interval, ms per bin (1/30 ms)
-N_TIMES_MS = 350       # simulate 0-350ms (shortened from 650 to speed up GD)
-N_TIMES = int(N_TIMES_MS / DT)
-STIM_ONSET_MS = 50
-STIM_DUR_MS = 2        # boxcar pulse width, ms
+# Let DT = 1, but in reality this was set up with the reasonable expectation that the 
+# measuring frequency is 30kHz. So DT = 1/30 in ms. 
+# For a recording of length 350ms, this requires 350*30 = 10500 time points.
+# 50ms stim onset equates to 50*30 = 1500 time points.
+# Pulse duration is one of (2, 3, 4, 5) ms, which equates to (60, 90, 120, 150) time points.
 
-STIM_ONSET = int(STIM_ONSET_MS / DT)
-STIM_DUR = int(STIM_DUR_MS / DT)
+# DT = 1
+# N_TIMES = 10500
+# STIM_ONSET = 1000
+# STIM_DUR = 60 
+# H = 1.0       # integration step
 
-H = DT / 1000          # integration step used by the generator (ms)
+# Make it shorter for testing 
+DT = 1
+N_TIMES = 800
+STIM_ONSET = 200
+STIM_DUR = 30
+H = 1.0       # integration step
 
 # Per-sample parameters are drawn uniformly on [median - MAD, median + MAD].
 PARAM_MEDIAN = {
-    'tau_E': 0.0011,
-    'tau_I': 0.0065,
+    'tau_E': 33.0,
+    'tau_I': 195.0,
     'W_EE': 0.0396,
     'W_IE': 0.0277,
     'W_EI': 0.0074,
-    'W_II': 0.0014,
+    'W_II': 0.0014, 
     'E_max': 29.5,
     'I_max': 39.9,
     'C_E': 0.0018,
@@ -29,8 +37,8 @@ PARAM_MEDIAN = {
 }
 
 PARAM_MAD = {
-    'tau_E': 0.0002,
-    'tau_I': 0.0019,
+    'tau_E': 6.0,
+    'tau_I': 57.0,
     'W_EE': 0.0162,
     'W_IE': 0.005, # make this small
     'W_EI': 0.0033,

@@ -1,7 +1,7 @@
 import numpy as np
 import jax.numpy as jnp
 
-H = 1/30000
+H = 1.0  # integration step; time is unitless (dt=1), so tau values are in time bins
 
 
 # Wilson-Cowan model 
@@ -50,8 +50,8 @@ def model(state_prev, y_prev, params):
     return new_state, (E, I)
 
 model.DEFAULT_PARAMS = {
-    'tau_E' : 0.001, # time constant for excitatory population
-    'tau_I' : 0.001, # time constant for inhibitory population
+    'tau_E' : 300.0, # time constant for excitatory population
+    'tau_I' : 300.0, # time constant for inhibitory population
     'W_EE' : 0.01,  # weight of excitatory to excitatory connections
     'W_IE' : 0.01,  # weight of inhibitory to excitatory connections
     'W_EI' : 0.01,  # weight of excitatory to inhibitory connections

@@ -16,7 +16,7 @@ model:
     circuit** with two interacting populations: an **excitatory** population E and
     an **inhibitory** population I. Both are FULLY OBSERVED at every timestep. A
     brief external **stimulus pulse** is delivered to the circuit early in each
-    trajectory (there are two stimulus conditions — a pulse to E, and a pulse to
+    trajectory (there are two stimulus conditions — a pulse to E or a pulse to
     I).
 
     At each step you are given the PREVIOUS observation (E[t-1], I[t-1]) together
@@ -34,7 +34,8 @@ model:
 
     Below are {num_parents} models, sorted from worst to best. *Analyze* their
     progression, *generalize* what lowers the loss, and *create* a new model that
-    beats all of them.
+    beats all of them. Take your time - think carefully about what type of dynamics
+    might be missing in the earlier model and how to capture it.
     '
   code_guidelines: '**Code Generation Guidelines:**
 
@@ -57,7 +58,7 @@ model:
     * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
     derivative. Compute a rate of change and take one Euler step with the fixed
     sampling interval, e.g.
-        H = 1 / 30000   # integration step (module-level constant; matches the data)
+        H = 1.0   # integration step (module-level constant; time is unitless, dt=1)
         E_dot = (-E_prev + drive_E) / tau_E
         E = E_prev + H * E_dot
     and return `E` (and likewise `I`). `H` is the known sampling grid — keep it a
@@ -86,23 +87,17 @@ model:
     '
   image_analysis_instructions: '**Image Analysis Instructions:**
 
-    This image is a 2x2 diagnostic grid that identifies WHICH dynamical term your
-    model is missing and in WHICH equation. It is computed from the one-step
-    prediction errors (residuals): r_E = observed_E - predicted_E, and r_I =
-    observed_I - predicted_I. Under teacher forcing these residuals are approximately
+    The image has two parts. The TOP strip shows two randomly chosen example
+    populations, each split into an E panel (left) and an I panel (right) showing that
+    population''s activity over time. Use these only for a quick sense of the
+    overall fit — because prediction is one-step-ahead and teacher-forced, a decent and
+    a badly-wrong model both track the data closely here.
+
+    The 2x2 grid BELOW plots the one-step prediction errors (residuals) : 
+    r_E = observed_E - predicted_E against the previous value of E or I, and 
+    similarly for r_I. Under teacher forcing these residuals are approximately
     the sum of the true terms your model left out, so any leftover structure points
     directly at a term you should add.
-
-    READING THE GRID. The TOP row shows the excitatory error r_E; the BOTTOM row
-    shows the inhibitory error r_I. The LEFT column plots the error against the
-    previous excitatory activity E[t-1]; the RIGHT column plots it against the
-    previous inhibitory activity I[t-1]. So each panel answers one question: does the
-    leftover error in this population depend on the previous value of that variable?
-    The two DIAGONAL panels (r_E vs E, and r_I vs I) test for a missing SELF term
-    (self-decay, self-excitation, or a saturation ceiling). The two OFF-DIAGONAL
-    panels (r_E vs I, and r_I vs E) test for a missing CROSS term that couples the two
-    populations. Each colored line is one example population (labelled "sample"); a
-    real effect points the same way across all of them.
 
     HOW TO READ A PANEL. In each panel the leftover error (vertical) is plotted
     directly against the previous value of one variable (horizontal). If the model
@@ -115,13 +110,6 @@ model:
     slope into the panel for the other. Trust the STRONGER of the two panels in a row,
     and weigh the diagonal (self) against the off-diagonal (cross) rather than reading
     each panel in isolation.
-
-    * Upward slope: the model under-predicts that population when the variable is high
-
-    * Downward slope: the model over-predicts that population when the variable is high
-
-    * A curved (rather than straight) trend means the missing term is NONLINEAR, for
-    example an activity-dependent gain or a saturation, not a plain linear term.
 
     Use this to create a new model that adds exactly the indicated term(s) and beats
     the parent models.
@@ -172,7 +160,7 @@ jax_translator_model:
     the scan carry.
 
     * Preserve `model.DEFAULT_PARAMS` verbatim. Preserve any module-level
-    integration constant (e.g. `H = 1 / 30000`) as a Python literal.
+    integration constant (e.g. `H = 1.0`) as a Python literal.
 
     * Replace all boolean indexing / Python `max`/`min` on array values with
     `jnp.maximum` / `jnp.minimum` / `jnp.where`. Use `jnp.clip` for clipping — not

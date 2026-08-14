@@ -378,8 +378,10 @@ def _cv_gaussian_smooth(repeats):
 def generate_data(
     model: str = "wilson_cowan",
     noiseless: bool = False,
+    warmup_period: int = 0,
     params: Optional[np.ndarray] = None,
-    random_seed: int = 0,
+    stimuli : Optional[np.ndarray] = None,
+    random_seed: int = 0,    
 ):
     """Simulate a raw dataset for the chosen model.
 
@@ -397,6 +399,9 @@ def generate_data(
     the identical clean response. Averaging the repeats into k-fold train/test
     then yields train == test — the setup for the GD parameter-recovery sanity
     check (no cross-validation, just "can GD hit the true params on clean data").
+
+    If there is a warmup period, prepend ``warmup_period`` time steps of zeros to the stimuli and 
+    the same number of time bins to n_times. And then discard the warmup period from the output data. 
     """
     cfg = MODELS[model]
     defaults = cfg["defaults"]
@@ -411,11 +416,16 @@ def generate_data(
             random_seed=random_seed,
         )
 
-    exc_stimuli = np.zeros((n_times, 2))
-    exc_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 0] = 1  # pulse to E
-    inh_stimuli = np.zeros((n_times, 2))
-    inh_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 1] = 1  # pulse to I
-    stimuli = np.stack([exc_stimuli, inh_stimuli], axis=0)
+    if stimuli is None:
+        exc_stimuli = np.zeros((n_times, 2))
+        exc_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 0] = 1  # pulse to E
+        inh_stimuli = np.zeros((n_times, 2))
+        inh_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 1] = 1  # pulse to I
+        stimuli = np.stack([exc_stimuli, inh_stimuli], axis=0)
+
+    if warmup_period > 0:
+        n_times += warmup_period
+        stimuli = np.pad(stimuli, ((0, 0), (warmup_period, 0), (0, 0)), mode='constant', constant_values=0)
 
     initial_state = defaults.INITIAL_STATE  # hard-coded, shared across samples
     param_names = list(defaults.PARAM_MEDIAN.keys())
@@ -432,6 +442,11 @@ def generate_data(
                     data[i, j, k] = activity
                 else:
                     data[i, j, k] = _add_noise(activity, random_seed=i * n_repeats + k)
+
+    if warmup_period > 0:
+        data = data[:, :, :, warmup_period:, :]  # discard warmup period
+        stimuli = stimuli[:, warmup_period:, :]
+        
     return data, stimuli, params
 
 def save_data(

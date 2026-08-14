@@ -1,6 +1,6 @@
 import numpy as np
 
-H = 1 / 30000  # integration step (matches the data-generating grid)
+H = 1.0  # integration step (matches the data-generating grid; time is unitless, dt=1)
 
 
 def model(state, y_prev, params):
@@ -48,13 +48,13 @@ def model(state, y_prev, params):
 model.INITIAL_STATE = {'S': 1.0}
 
 model.DEFAULT_PARAMS = {
-    "tau_E": 0.002,
-    "tau_I": 0.004,
+    "tau_E": 60.0,
+    "tau_I": 120.0,
     "C_E": 1.0,
     "C_I": 1.0,
     "XE": 3.0,
     "XI": 1.0,
-    "tau_S": 0.01,
+    "tau_S": 300.0,
     "W_ES": 0.5,
     "W_IS": 0.5,
     "log_noise_coef": -4.6052,  # log(0.01): fitted obs-noise coef, var = exp(·)·max(mean, EPS_MEAN)

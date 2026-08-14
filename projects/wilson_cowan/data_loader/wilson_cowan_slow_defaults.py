@@ -5,24 +5,31 @@
 N_SAMPLES = 8          # cells / animals; parameters are fit per sample
 N_REPEATS = 12         # noisy repeats per (sample, stim condition)
 
-# p26 : times considered : -50ms to 600ms. I suspect stimulus was shown at 0ms
-DT = 1/30 # 1/30ms
-N_TIMES_MS = 350
-N_TIMES = int(N_TIMES_MS / DT)
-STIM_ONSET_MS = 50
-STIM_DUR_MS = 2 # one of 1, 2, 4
+# Let DT = 1, but in reality this was set up with the reasonable expectation that the 
+# measuring frequency is 30kHz. So DT = 1/30 in ms. 
+# For a recording of length 350ms, this requires 350*30 = 10500 time points.
+# 50ms stim onset equates to 50*30 = 1500 time points.
+# Pulse duration is one of (2, 3, 4, 5) ms, which equates to (60, 90, 120, 150) time points.
 
-STIM_ONSET = int(STIM_ONSET_MS / DT)
-STIM_DUR = int(STIM_DUR_MS / DT)
+# DT = 1
+# N_TIMES = 10500
+# STIM_ONSET = 1000
+# STIM_DUR = 60 
+# H = 1.0       # integration step
 
-H = DT / 1000 # in ms
+# Make it shorter for testing 
+DT = 1
+N_TIMES = 8000
+STIM_ONSET = 500
+STIM_DUR = 90 
+H = 1.0       # integration step
 
 # Wilson-Cowan with slow inhibition model parameters - p23 of paper.
 # Per-sample parameters are drawn from a normal centred on the median with
 # std = 0.2 * MAD (see simulate_data._generate_parameters).
 PARAM_MEDIAN = {
-    'tau_E' : 0.0011, # time constant for excitatory population
-    'tau_I' : 0.0026, # time constant for inhibitory population
+    'tau_E' : 33.00, # time constant for excitatory population
+    'tau_I' : 78.00, # time constant for inhibitory population
     'W_EE' : 0.0101,  # weight of excitatory to excitatory connections
     'W_IE' : 0.0098,  # weight of inhibitory to excitatory connections
     'W_EI' : 0.0012,  # weight of excitatory to inhibitory connections
@@ -31,7 +38,7 @@ PARAM_MEDIAN = {
     'I_max' : 113.8,
     'C_E' : 0.0014,
     'C_I' : 0.0030,
-    'tau_S' : 0.0586, # time constant of the slow inhibition variable S
+    'tau_S' : 586.0*3, # time constant of the slow inhibition variable S
     'W_ES' : 0.0018,  # slow inhibition onto excitatory population
     'W_IS' : 0.0016,  # slow inhibition onto inhibitory population
     'XE' : 1.64,
@@ -39,8 +46,8 @@ PARAM_MEDIAN = {
 }
 
 PARAM_MAD = {
-    'tau_E' : 0.0002,
-    'tau_I' : 0.0011, # time constant for inhibitory population
+    'tau_E' : 6.0,
+    'tau_I' : 33.0, # time constant for inhibitory population
     'W_EE' : 0.0068,  # weight of excitatory to excitatory connections
     'W_IE' : 0.0065,  # weight of inhibitory to excitatory connections
     'W_EI' : 0.0008,  # weight of excitatory to inhibitory connections
@@ -49,7 +56,7 @@ PARAM_MAD = {
     'I_max' : 64.8,
     'C_E' : 0.0013,
     'C_I' : 0.0022,
-    'tau_S' : 0.0349, # time constant of the slow inhibition variable S
+    'tau_S' : 349*3, # time constant of the slow inhibition variable S
     'W_ES' : 0.0017,  # slow inhibition onto excitatory population
     'W_IS' : 0.0015,  # slow inhibition onto inhibitory population
     'XE' : 1.25,

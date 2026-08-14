@@ -1,7 +1,7 @@
 import numpy as np
 import jax.numpy as jnp
 
-H = 1 / 30000
+H = 1.0  # integration step; time is unitless (dt=1), so tau values are in time bins
 
 
 # Wilson-Cowan model WITH slow inhibition (WCS).
@@ -62,8 +62,8 @@ def model(state_prev, y_prev, params):
 
 
 model.DEFAULT_PARAMS = {
-    'tau_E': 0.001,  # time constant for excitatory population
-    'tau_I': 0.001,  # time constant for inhibitory population
+    'tau_E': 300.,  # time constant for excitatory population
+    'tau_I': 200.,  # time constant for inhibitory population
     'W_EE': 0.01,   # weight of excitatory to excitatory connections
     'W_IE': 0.01,   # weight of inhibitory to excitatory connections
     'W_EI': 0.01,   # weight of excitatory to inhibitory connections
@@ -72,7 +72,7 @@ model.DEFAULT_PARAMS = {
     'I_max': 20.0,
     'C_E': 0.001,
     'C_I': 0.001,
-    'tau_S': 0.01,
+    'tau_S': 300,
     'W_ES': 0.001,
     'W_IS': 0.001,
     'XE': 1.0,

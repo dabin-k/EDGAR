@@ -18,8 +18,8 @@ def parameter_estimator(data):
     I_amp = max(float(I.max() - I_base), 0.1)
 
     return {
-        "tau_E": 0.002,
-        "tau_I": 0.004,
+        "tau_E": 60.0,
+        "tau_I": 120.0,
         "W_EE": 0.02,
         "W_EI": 0.01,
         "W_IE": 0.02,
