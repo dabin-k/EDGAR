@@ -284,20 +284,38 @@ def lin_model(initial_state, parameters, stimuli, time_steps, h=0.01):
 # are saved (any hidden state, e.g. the WCS slow variable S, is dropped), so the
 # data contract stays (n_samples, 2, n_repeats, n_times, 2) for every model.
 # ────────────────────────────────────────────────────────────────────────────
-from . import wilson_cowan_defaults as wc_defaults
-from . import wilson_cowan_slow_defaults as wcs_defaults
 
-MODELS = {
-    "wilson_cowan": {
-        "model_fn": wilson_cowan_model,
-        "defaults": wc_defaults,
-        "fold_prefix": "wc",
-    },
-    "wilson_cowan_slow": {
-        "model_fn": wilson_cowan_slow_inhibition_model,
-        "defaults": wcs_defaults,
-        "fold_prefix": "wcs",
-    },
+#DEFAULT_RAW_PATH = "/home/dabin/data/wc_simulations/wilson_cowan.npz"
+DEFAULT_RAW_PATH = "/home/rajah/datasets/wc_synthetic/wilson_cowan.npz"
+
+N_SAMPLES = 8          # cells / animals; parameters are fit per sample
+N_REPEATS = 12         # noisy repeats per (sample, stim condition)
+
+DT = 1 / 30            # sampling interval, ms per bin (1/30 ms)
+N_TIMES_MS = 650
+N_TIMES = int(N_TIMES_MS / DT)
+STIM_ONSET_MS = 50
+STIM_DUR_MS = 2        # boxcar pulse width, ms
+
+STIM_ONSET = int(STIM_ONSET_MS / DT)
+STIM_DUR = int(STIM_DUR_MS / DT)
+
+H = DT / 1000          # integration step used by the generator (ms)
+
+# Per-sample parameters are drawn uniformly on [median - MAD, median + MAD].
+PARAM_MEDIAN = {
+    'tau_E': 0.0011,
+    'tau_I': 0.0065,
+    'W_EE': 0.0396,
+    'W_IE': 0.0277,
+    'W_EI': 0.0074,
+    'W_II': 0.0014,
+    'E_max': 29.5,
+    'I_max': 39.9,
+    'C_E': 0.0018,
+    'C_I': 0.0134,
+    'XE': 3.51,
+    'XI': 1.26,
 }
 
 DATA_ROOT = "/home/dabin/data/wc_simulations"
@@ -316,9 +334,7 @@ def _generate_parameters(param_medians, param_mad, n_samples, random_seed=0):
     for sample_idx in range(n_samples):
         for param_idx, (param_name, median) in enumerate(param_medians.items()):
             mad = param_mad[param_name]
-            parameters[sample_idx, param_idx] = rng.normal(median, 0.2 * mad)
-    # ensure that no parameter is negative
-    parameters = np.maximum(parameters, 0)
+            parameters[sample_idx, param_idx] = rng.uniform(max(0.0, median - mad), median + mad)
     return parameters
 
 
