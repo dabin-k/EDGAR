@@ -32,3 +32,4 @@ cluster_logs/
 # Local symlinks / scratch artifacts (keep runs reproducible in task_spec git_dirty)
 data
 test_image.png
+docs/**
