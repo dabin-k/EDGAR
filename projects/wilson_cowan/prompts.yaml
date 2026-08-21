@@ -5,10 +5,11 @@
 #     tuple (E, I).
 #   * `y_prev` is a DICT that also carries the external stimulus.
 #   * The loss is a heteroscedastic Gaussian NLL (observation variance grows with
-#     activity); every model exposes a GD-fitted `log_noise_coef` param, but there
-#     are NO `s0_*` initial-state parameters.
+#     activity); every model exposes a GD-fitted `log_noise_coef` param.
 #   * Both populations are FULLY OBSERVED, so a hidden variable is optional
-#     (not required as it is for the excitable FHN task).
+#     (not required as it is for the excitable FHN task). If a model DOES carry a
+#     hidden variable, its initial value is a learnable `s0_*` param (GD-fit per
+#     sample) — E and I are observed, so they never get an `s0_*`.
 # The contract below is defined by data_loader/load_data.py (the source of truth).
 
 model:
@@ -67,10 +68,13 @@ model:
     * HIDDEN STATE IS OPTIONAL. Both E and I are observed, so you do NOT need a
     hidden variable. `state` is a dict; if you use none, return `new_state = {{}}`.
     If a slow process helps (e.g. a slowly accumulating adaptation / slow
-    inhibition variable that is NOT directly observed), you MAY carry it: add a
-    class-style attribute `model.INITIAL_STATE = {{"S": <float>}}`, read
-    `state["S"]`, and return `new_state` with the SAME keys. The framework seeds
-    the scan carry from `model.INITIAL_STATE`.
+    inhibition variable that is NOT directly observed), you MAY carry it: read
+    `state["S"]`, return `new_state` with the SAME keys, and declare its INITIAL
+    VALUE as an `s0_`-prefixed float in `DEFAULT_PARAMS`, e.g. `"s0_S": <float>`.
+    The framework strips the `s0_` prefix and seeds the scan carry with it, and the
+    initial value is OPTIMISED BY GRADIENT DESCENT per sample (so pick any sensible
+    starting value). E and I are observed, so do NOT add `s0_` for them — only for
+    hidden state keys.
 
     * CRITICAL: everything is a scalar. Use pure scalar arithmetic — no
     `np.arange`, no slicing, no dynamic shapes.
@@ -138,7 +142,9 @@ parameter_estimator:
     * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`.
     Missing or extra keys will cause your estimator to be rejected. All values must
     be plain Python floats. This INCLUDES `log_noise_coef` — a fine initial estimate is
-    `float(np.log(0.01))`; gradient descent refines it.
+    `float(np.log(0.01))`; gradient descent refines it. It ALSO includes any
+    `s0_`-prefixed keys (learnable initial values of hidden-state variables): return a
+    sensible float (the model''s default is fine); gradient descent refines it.
 
     * Sensible, cheap estimates (no fitting — just statistics of the traces):
 
@@ -163,12 +169,12 @@ jax_translator_model:
     Read from it exactly as the numpy model does.
 
     * `state` and `new_state` are dicts with the SAME keys throughout the scan
-    (possibly empty). Do not add, remove, or rename keys. If the model defines
-    `model.INITIAL_STATE`, preserve it verbatim — the framework uses it to seed
-    the scan carry.
+    (possibly empty). Do not add, remove, or rename keys.
 
-    * Preserve `model.DEFAULT_PARAMS` verbatim. Preserve any module-level
-    integration constant (e.g. `H = 1.0`) as a Python literal.
+    * Preserve `model.DEFAULT_PARAMS` verbatim, INCLUDING any `s0_`-prefixed keys
+    (the learnable initial values of hidden-state variables — the framework strips
+    the prefix to seed the scan carry). Preserve any module-level integration
+    constant (e.g. `H = 1.0`) as a Python literal.
 
     * Replace all boolean indexing / Python `max`/`min` on array values with
     `jnp.maximum` / `jnp.minimum` / `jnp.where`. Use `jnp.clip` for clipping — not

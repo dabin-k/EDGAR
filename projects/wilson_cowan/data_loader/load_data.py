@@ -31,7 +31,15 @@ meaningful and the mechanistic parameters stay interpretable.
 ``log_noise_coef`` reaches the (params-free) ``loss_fn`` the same way ``fhn_excitable``
 threads its noise param: ``apply_model`` reads it from ``params`` and appends it as a
 third output channel, which ``loss_fn`` reads back. The model function itself never sees
-it. There are no ``s0_*`` initial-state parameters.
+it.
+
+Hidden-state initial values are learnable, per-sample GD parameters, declared with the
+``s0_`` prefix (as in ``fhn_excitable``): a model with a latent ``S`` puts ``s0_S`` in its
+``DEFAULT_PARAMS``, and ``apply_model`` strips the prefix (``_split_params_s0``) and seeds
+the scan carry with it. E and I are fully observed (teacher-forced), so they need no ``s0_``.
+Stateless models declare no ``s0_`` keys and get an empty carry. Note: the test split
+currently reuses the train-fitted ``s0`` (engine default); re-fitting ``s0`` per split is a
+part-2 change tied to the fold-averaging CV redesign.
 
 Cross-validation is over the 12 repeats: ``simulate_data.save_kfold_splits`` writes
 ``wc_fold{f}.npz`` files, each holding a repeat-averaged ``train_data`` / ``test_data``
@@ -151,6 +159,23 @@ def load_data(
     )
 
 
+def _split_params_s0(params: dict) -> tuple[dict, dict]:
+    """Strip ``s0_``-prefixed keys → initial hidden-state dict; rest is dyn params.
+
+    Only strips keys of the form ``s0_<name>`` with ``<name>`` non-empty. The initial
+    values are ordinary GD parameters (per sample); stripping them here just routes them
+    into the scan carry instead of the model's ``params``. Mirrors ``fhn_excitable``.
+    """
+    init_state = {}
+    dyn_params = {}
+    for k, v in params.items():
+        if k.startswith("s0_") and len(k) > 3:
+            init_state[k.removeprefix("s0_")] = v
+        else:
+            dyn_params[k] = v
+    return init_state, dyn_params
+
+
 def apply_model(model_fn, data, params):
     """Teacher-forced one-step-ahead scan of ``model_fn`` over every (sample, stim).
 
@@ -159,23 +184,25 @@ def apply_model(model_fn, data, params):
     inside, over the two stim conditions (params are shared across conditions — same
     cell). Returns ``(n_samples, n_stim, T-1, 2)``: predicted (E, I) at each step.
 
-    Models with a hidden state (e.g. the WCS slow variable ``S``) expose an
-    ``INITIAL_STATE`` attribute that seeds the scan carry; stateless models (base WC)
-    have none, so the carry starts as an empty dict exactly as before.
+    Hidden-state initial values are learnable, per-sample GD parameters declared with the
+    ``s0_`` prefix. ``_split_params_s0`` strips them into the scan carry (per sample) and
+    hands the rest to ``model_fn``; a model with a latent ``S`` seeds the carry from
+    ``s0_S``. Stateless models (base WC) declare no ``s0_`` keys, so the carry is an empty
+    dict exactly as before. E and I are observed (teacher-forced), so they carry no ``s0_``.
 
-    The fitted per-sample observation-noise coefficient ``log_noise_coef`` is read from
-    ``params`` and appended as a constant third channel, so the params-free ``loss_fn``
-    can recover it. Output is ``(n_samples, n_stim, T-1, 3)``: ``(E, I, log_noise_coef)``.
-    The model function itself never sees ``log_noise_coef``.
+    The fitted per-sample observation-noise coefficient ``log_noise_coef`` is not ``s0_``
+    prefixed, so it stays in ``dyn_params``; it is appended as a constant third channel so
+    the params-free ``loss_fn`` can recover it. Output is ``(n_samples, n_stim, T-1, 3)``:
+    ``(E, I, log_noise_coef)``. The model function itself never sees ``log_noise_coef``.
     """
     E = data["E"]        # (n, n_stim, T)
     I = data["I"]
     sE = data["stim_E"]
     sI = data["stim_I"]
 
-    init_state = getattr(model_fn, "INITIAL_STATE", {})
-
     def per_sample(E_s, I_s, sE_s, sI_s, p):
+        init_state, dyn_params = _split_params_s0(p)
+
         def per_stim(E_c, I_c, sE_c, sI_c):
             xs = {
                 "E_prev": E_c[:-1],
@@ -185,7 +212,7 @@ def apply_model(model_fn, data, params):
             }
 
             def step(state, y_prev):
-                new_state, mean = model_fn(state, y_prev, p)
+                new_state, mean = model_fn(state, y_prev, dyn_params)
                 E_next, I_next = mean
                 return new_state, jnp.stack([E_next, I_next])
 
@@ -193,7 +220,7 @@ def apply_model(model_fn, data, params):
             return means
 
         means = jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)   # (n_stim, T-1, 2)
-        log_nc = jnp.broadcast_to(p["log_noise_coef"], means.shape[:-1] + (1,))
+        log_nc = jnp.broadcast_to(dyn_params["log_noise_coef"], means.shape[:-1] + (1,))
         return jnp.concatenate([means, log_nc], axis=-1)   # (n_stim, T-1, 3)
 
     return jax.vmap(per_sample, in_axes=(0, 0, 0, 0, 0))(E, I, sE, sI, params)
