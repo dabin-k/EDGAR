@@ -31,3 +31,5 @@ cluster_logs/
 # Local symlinks / scratch artifacts (keep runs reproducible in task_spec git_dirty)
 data
 test_image.png
+# REMOVE THIS BEFORE PR
+projects/wilson_cowan/scripts/*
