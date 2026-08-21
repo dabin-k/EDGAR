@@ -11,12 +11,12 @@ io:
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
-  n_generations: 2
-  n_islands: 2
-  batch_size: 2
+  n_generations: 6
+  n_islands: 4
+  batch_size: 4
   critical_population_size: 6
-  n_migrants: 1
-  topology: [1, 0]
+  n_migrants: 2
+  topology: [1, 2, 3, 0]
 
 llms:
   num_parents: 2
@@ -29,7 +29,7 @@ llms:
   max_tokens: 10000
 
 scoring:
-  timeout_s: 300.0
+  timeout_s: 600.0
   param_penalty_weight: 0.01
   gradient_descent:
     max_iter: 200          # match the sibling state-space projects (was inheriting 1000)
