@@ -10,8 +10,14 @@ This renders the "option 4" grid: each residual channel (r_E, r_I) plotted
 against every lag-1 observable (E[t-1], I[t-1]) — the raw cross-dependence.
     * DIAGONAL  (r_E vs E, r_I vs I): a missing/wrong SELF term.
     * OFF-DIAG  (r_E vs I, r_I vs E): a missing CROSS-coupling term.
-A flat line at r~0 means that regressor is captured; a slope means a term in
-that variable is missing.
+A structureless cloud around r~0 means that regressor is captured; a residual
+that trends with the regressor means a term in that variable is missing. The
+pooled Pearson r in each panel title is a scalar summary of that trend.
+
+Points are coloured by TIME, with the colormap mapped to the detected stimulus-
+transient window (baseline dwarfs it in raw time and saturates to the ends). A
+colour-ordered loop => the residual depends on phase/history (a dynamic term),
+not just the instantaneous regressor value.
 
 Signature matches the other projects' `plot_model_fits` so the EDGAR image-
 feedback hook can call it unchanged.
@@ -29,24 +35,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt   # noqa: E402
 
 
-def _sample_colors(n):
-    """Stable per-sample color map (same color for a sample in every panel)."""
-    cmap = plt.get_cmap("tab10")
-    return [cmap(i % 10) for i in range(n)]
-
-
-def _binned_mean(x, y, edges, min_count: int = 20):
-    """Mean of y in shared bins of x; returns (centers, means) for populated bins."""
-    n_bins = len(edges) - 1
-    idx = np.clip(np.digitize(x, edges) - 1, 0, n_bins - 1)
-    cx, cy = [], []
-    for b in range(n_bins):
-        m = idx == b
-        if m.sum() > min_count:
-            cx.append(0.5 * (edges[b] + edges[b + 1])); cy.append(y[m].mean())
-    return np.array(cx), np.array(cy)
-
-
 def plot_model_fits(
     data,
     programs,
@@ -58,7 +46,6 @@ def plot_model_fits(
     max_show: int = 5,
     stim_index: int = 0,
     window: int = 0,
-    n_bins: int = 25,
 ):
     """Residual cross-dependence grid for the best program, one stim condition."""
     if not save_path:
@@ -138,7 +125,6 @@ def plot_model_fits(
     rI = true_I[:, 1:] - pred_I
     E_prev = true_E[:, :-1]
     I_prev = true_I[:, :-1]
-    colors = _sample_colors(n_show)
 
     resids = [("r_E", rE), ("r_I", rI)]
     regs = [("E[t-1]", E_prev), ("I[t-1]", I_prev)]
@@ -176,6 +162,21 @@ def plot_model_fits(
                 ax.set_ylabel("activity", fontsize=8)
             if k == 0 and ci == 0:
                 ax.legend(fontsize=6, loc="upper right")
+            ax.set_ylim(-0.1, 3.5)
+
+    # Colour the scatter by TIME so the hysteresis loops (rise vs fall of the pulse)
+    # are legible. Baseline dwarfs the transient in raw time, so map the colormap to
+    # the detected stimulus-transient window; pre/post baseline saturate to its ends.
+    tvec = np.tile(np.arange(1, T_full), n_show)          # residual time index, pooled
+    act = true_E + true_I
+    base = np.median(act, axis=1, keepdims=True)
+    thr = base + 0.05 * (act.max(axis=1, keepdims=True) - base)
+    active_cols = np.where((act > thr).any(axis=0))[0]
+    if active_cols.size:
+        t0, t1 = int(active_cols.min()), int(active_cols.max())
+    else:
+        t0, t1 = 1, T_full - 1
+    norm = plt.Normalize(vmin=max(t0, 1), vmax=max(t1, t0 + 1))
 
     # ── Bottom: 2x2 residual cross-dependence grid ───────────────────────────────
     grid_gs = gs[1:3].subgridspec(2, 2, hspace=0.3, wspace=0.22)
@@ -183,19 +184,13 @@ def plot_model_fits(
     for ri in range(2):
         for ci in range(2):
             axes[ri, ci] = fig.add_subplot(grid_gs[ri, ci])
+    sc = None
     for ri, (rname, R) in enumerate(resids):
         for ci, (xname, X) in enumerate(regs):
             ax = axes[ri, ci]
             ax.axhline(0.0, color="k", lw=0.6, alpha=0.4)
-            lo, hi = np.percentile(X.ravel(), [0.5, 99.5])
-            edges = np.linspace(lo, hi, n_bins + 1)      # shared bins across samples
-            for s in range(n_show):
-                ax.scatter(X[s], R[s], s=5, alpha=0.2, color=colors[s],
-                           edgecolors="none", rasterized=True)
-            for s in range(n_show):                       # binned line per sample, on top
-                cx, cy = _binned_mean(X[s], R[s], edges)
-                ax.plot(cx, cy, color=colors[s], lw=1.6,
-                        label=sample_labels[s] if (ri == 0 and ci == 0) else None)
+            sc = ax.scatter(X.ravel(), R.ravel(), c=tvec, cmap="turbo", norm=norm,
+                            s=5, alpha=0.35, edgecolors="none", rasterized=True)
             corr = np.corrcoef(X.ravel(), R.ravel())[0, 1]   # pooled r (summary)
             diag = ri == ci
             ax.set_title(f"{rname} vs {xname}   (r={corr:+.2f})"
@@ -206,10 +201,11 @@ def plot_model_fits(
                 ax.set_xlabel(xname)
             if ci == 0:
                 ax.set_ylabel(f"residual {rname}")
-            if ri == 0 and ci == 0:
-                ax.legend(fontsize=7, loc="upper left", title="sample")
+    cbar = fig.colorbar(sc, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+    cbar.set_label("time bin  (colour spans the stimulus transient)", fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
     fig.suptitle(
-        f"wilson_cowan residual cross-dependence — stim {si}"
+        f"Residual cross-dependence — stim {si}"
         + (f"  |  {model_name}" if model_name else ""),
         fontsize=11, y=0.965,
     )

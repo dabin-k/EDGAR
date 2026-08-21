@@ -99,17 +99,26 @@ model:
     the sum of the true terms your model left out, so any leftover structure points
     directly at a term you should add.
 
-    HOW TO READ A PANEL. In each panel the leftover error (vertical) is plotted
-    directly against the previous value of one variable (horizontal). If the model
-    has captured that variable''s contribution, the error does not depend on it: the
-    binned line is FLAT and sits on zero. If a term in that variable is missing, the
-    line SLOPES. The number in each panel title is the correlation (between -1 and +1)
-    between the error and that variable — a plain measure of how strong the leftover
-    dependence is; ignore panels whose value is near zero. A caveat: E and I tend to
-    rise and fall together, so a genuine dependence on one variable can leak a weaker
-    slope into the panel for the other. Trust the STRONGER of the two panels in a row,
-    and weigh the diagonal (self) against the off-diagonal (cross) rather than reading
-    each panel in isolation.
+    HOW TO READ A PANEL. In each panel the leftover error (vertical) is a scatter
+    against the previous value of one variable (horizontal). If the model has captured
+    that variable''s contribution, the error does not depend on it: the cloud is a
+    structureless band centred on zero. If a term in that variable is missing, the
+    cloud TRENDS with the variable (points drift up or down as it increases). The
+    number in each panel title is the correlation (between -1 and +1) between the error
+    and that variable — a plain measure of how strong the leftover dependence is;
+    ignore panels whose value is near zero. A caveat: E and I tend to rise and fall
+    together, so a genuine dependence on one variable can leak a weaker trend into the
+    panel for the other. Trust the STRONGER of the two panels in a row, and weigh the
+    diagonal (self) against the off-diagonal (cross) rather than reading each panel in
+    isolation.
+
+    COLOUR = TIME. The scatter points are coloured by time within the stimulus
+    transient (see the colorbar); baseline saturates to the ends. If the points at a
+    given horizontal position form a colour-ordered LOOP — one colour branch above and
+    a later-colour branch below — the error is not a static function of that variable
+    but depends on the PHASE / history (rise vs fall). That points to a DYNAMIC missing
+    term (a rate-of-change term or a slow hidden variable), not a plain function of the
+    instantaneous value.
 
     Use this to create a new model that adds exactly the indicated term(s) and beats
     the parent models.
@@ -142,8 +151,7 @@ parameter_estimator:
 
     '
 jax_translator_model:
-  code_guidelines: 'CRITICAL JAX compatibility requirements for the Wilson-Cowan
-    project:
+  code_guidelines: 'CRITICAL JAX compatibility requirements :
 
     * The model signature is `def model(state, y_prev, params)` and returns
     `(new_state, mean)` where `mean` is the Python tuple `(E, I)` of two jnp
