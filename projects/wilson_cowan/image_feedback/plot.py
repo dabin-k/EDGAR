@@ -75,8 +75,9 @@ def plot_model_fits(
     if params is None:
         params = [p.params for p in programs]
 
-    E = np.asarray(data["E"])                 # (n, n_stim, T)
-    I = np.asarray(data["I"])
+    target_y = np.asarray(data["target_y"])   # (n, n_stim, T, 2), last axis (E, I)
+    E = target_y[..., 0]                       # (n, n_stim, T)
+    I = target_y[..., 1]
     n_samples, n_stim, T = E.shape
     si = int(min(max(stim_index, 0), n_stim - 1))
 
@@ -103,18 +104,17 @@ def plot_model_fits(
     pred_E = np.empty((n_show, T - 1)); pred_I = np.empty((n_show, T - 1))
     for row, s in enumerate(show_idx):
         sample_data = {
-            "E": jnp.asarray(E[s:s + 1]),
-            "I": jnp.asarray(I[s:s + 1]),
+            "target_y": jnp.asarray(target_y[s:s + 1]),
             "stim_E": jnp.asarray(np.asarray(data["stim_E"])[s:s + 1]),
             "stim_I": jnp.asarray(np.asarray(data["stim_I"])[s:s + 1]),
         }
         sample_params = {
             k: jnp.asarray(np.asarray(v)[s:s + 1]) for k, v in params[best_j].items()
         }
-        out = np.asarray(apply_model(model_fn, sample_data, sample_params))
-        # out: (1, n_stim, T-1, 2) -> predicted (E, I) at t = 1..T-1
+        out = apply_model(model_fn, sample_data, sample_params)
+        pred = np.asarray(out["pred_y_1step"])
         true_E[row] = E[s, si]; true_I[row] = I[s, si]
-        pred_E[row] = out[0, si, :, 0]; pred_I[row] = out[0, si, :, 1]
+        pred_E[row] = pred[0, si, :, 0]; pred_I[row] = pred[0, si, :, 1]
 
     sample_labels = [f"sample {s}" for s in show_idx]
     loss_str = f"{losses[best_j]:.4f}" if losses[best_j] is not None else "n/a"

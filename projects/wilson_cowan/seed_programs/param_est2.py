@@ -8,8 +8,9 @@ def parameter_estimator(data):
     the recurrent weights start small and positive and are refined by gradient
     descent (their sign convention is fixed inside the model).
     """
-    E = np.asarray(data["E"], dtype=np.float64)   # (n_stim, T)
-    I = np.asarray(data["I"], dtype=np.float64)
+    target_y = np.asarray(data["target_y"], dtype=np.float64)  # (n_stim, T, 2), last axis (E, I)
+    E = target_y[..., 0]                          # (n_stim, T)
+    I = target_y[..., 1]
     b = max(1, E.shape[1] // 10)                  # pre-stimulus window
 
     E_base = float(E[:, :b].mean())
@@ -28,6 +29,4 @@ def parameter_estimator(data):
         "C_I": I_base,
         "XE": E_amp,
         "XI": I_amp,
-        # Obs-noise coef init log(0.01) (matches the generative var = 0.01*mean); GD refines.
-        "log_noise_coef": float(np.log(0.01)),
     }

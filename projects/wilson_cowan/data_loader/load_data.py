@@ -1,62 +1,110 @@
-"""EDGAR entry points for the Wilson-Cowan (WC) discovery task.
+"""EDGAR entry points for the Wilson-Cowan (WC) neural-dynamics training-objective benchmark.
 
-The underlying system (see ``simulate_data.py`` — the source of truth) is the base
-Wilson-Cowan model: two **fully observed** populations, excitatory ``E`` and
-inhibitory ``I``, driven by a per-timestep external stimulus (an excitatory pulse
-or an inhibitory pulse). There is no hidden variable.
-
-Contract for the LLM's program (see ``seed_programs/wilson_cowan.py``):
+The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``):
     ``model(state, y_prev, params) -> (new_state, mean)``
-    * ``y_prev`` is a **dict** ``{"E_prev","I_prev","stim_E_prev","stim_I_prev"}`` —
-      the previous observation bundled with the previous stimulus.
-    * ``new_state`` is an (empty) dict carry — the base model needs no hidden state.
+    * ``y_prev`` is a **dict** ``{"E_prev","I_prev","stim_E_prev","stim_I_prev"}`` — the previous
+      observation bundled with the previous stimulus.
+    * ``new_state`` is the hidden carry (an empty dict for the stateless base model; a model
+      with a latent ``S`` carries ``{"S": ...}``).
     * ``mean`` is ``(E, I)`` — the predicted next observation.
-    * ``params`` is a dict of the learnable WC parameters.
+    * ``params`` is a dict of learnable WC params. Hidden-state initial values are declared with
+      the ``s0_`` prefix; ``_split_params_s0`` strips them
+      into the scan carry and hands the rest to ``model``.
 
-Prediction is one-step-ahead and teacher-forced: the prediction of ``y[t]`` is paired
-with everything at ``t-1`` (``E[t-1], I[t-1], stim_E[t-1], stim_I[t-1]``). The scan
-inputs are the ``[:-1]`` slice; the targets are ``[1:]``.
+This module drives that single transition in the modes required by the four training
+objectives — teacher-forced one-step, autonomous rollout from anchors, and a full autonomous rollout — 
+and assembles``model_output`` dict that the loss functions consume. 
 
-Loss is a heteroscedastic Gaussian NLL, averaged over stim conditions and time. The
-observation noise is signal-dependent (the generator uses ``std = 0.1·sqrt(mean)``, so
-``var ∝ mean``), which is large in the evoked transient and small at the ~0 resting
-baseline. We model ``var_t = phi · max(mean_t, EPS_MEAN)`` with a single learnable
-coefficient ``phi = exp(log_noise_coef)`` per sample, **shared across E and I** — so each
-channel's variance follows its own predicted mean and the "natural weighting" of E vs I
-falls out of the physics. This down-weights the high-variance transient by exactly the
-right amount (the principled alternative to discarding the onset window) and replaces the
-old per-sample ``scale`` term. The data is left in raw units so ``var ∝ mean`` is
-meaningful and the mechanistic parameters stay interpretable.
+The four objectives live in ``losses/`` (one file each). ``loss_fn`` dispatches to one of them by
+the objective set in the project ``config.yaml`` (``project_params.objective``, ``A``/``B``/``C``/
+``D``) so a benchmark run selects its objective without editing code. The rollout horizon/anchors
+and time-axis dt are likewise config-driven (``project_params.rollout_k`` / ``anchor_stride`` /
+``dt_seconds``); see the configuration note below for how they reach ``apply_model`` / ``loss_fn``.
 
-``log_noise_coef`` reaches the (params-free) ``loss_fn`` the same way ``fhn_excitable``
-threads its noise param: ``apply_model`` reads it from ``params`` and appends it as a
-third output channel, which ``loss_fn`` reads back. The model function itself never sees
-it.
-
-Hidden-state initial values are learnable, per-sample GD parameters, declared with the
-``s0_`` prefix (as in ``fhn_excitable``): a model with a latent ``S`` puts ``s0_S`` in its
-``DEFAULT_PARAMS``, and ``apply_model`` strips the prefix (``_split_params_s0``) and seeds
-the scan carry with it. E and I are fully observed (teacher-forced), so they need no ``s0_``.
-Stateless models declare no ``s0_`` keys and get an empty carry. Note: the test split
-currently reuses the train-fitted ``s0`` (engine default); re-fitting ``s0`` per split is a
-part-2 change tied to the fold-averaging CV redesign.
-
-Cross-validation is over the 12 repeats: ``simulate_data.save_kfold_splits`` writes
-``wc_fold{f}.npz`` files, each holding a repeat-averaged ``train_data`` / ``test_data``
-pair (shape ``(n_samples, 2, T, 2)``). ``load_data`` reads one such file and additionally
-splits the *samples* 50/50 into EDGAR's discover / validate sets.
+Cross-validation is over repeats: ``simulate_data.save_kfold_splits`` writes ``wc*_fold{f}.npz``
+files, each a repeat-averaged ``train_data`` / ``test_data`` pair (shape ``(n_samples, 2, T, 2)``);
+``load_data`` reads one and splits the *samples* 50/50 into EDGAR's discover / validate sets.
 """
 from __future__ import annotations
+
+import os
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from projects.wilson_cowan.data_loader.losses import (
+    loss_A_one_step_tf,
+    loss_B_rollout,
+    loss_C_latent_consistency,
+    loss_D_dynamics_aware,
+)
 
-# Floor on the mean inside the noise variance ``var = phi · max(mean, EPS_MEAN)``. The
-# resting baseline is ~0 (and predictions can dip slightly negative), so this keeps the
-# variance strictly positive; ~0.1 is around the resting activity level.
-EPS_MEAN = 0.1
+# ``loss_fn`` is cloudpickled to the scoring subprocess, which runs under the ``spawn`` start
+# method (edgar.scoring.scoring) and does NOT inherit the launcher's sys.path — so the default
+# pickle-by-reference of these ``projects.*`` loss modules could fail to re-import there. Force
+# them to serialize by value so the subprocess needs no ``projects`` import.
+try:
+    import importlib as _importlib
+    import cloudpickle as _cloudpickle
+
+    for _modname in (
+        "projects.wilson_cowan.data_loader.losses.loss_common",
+        "projects.wilson_cowan.data_loader.losses.loss_a_one_step",
+        "projects.wilson_cowan.data_loader.losses.loss_b_rollout",
+        "projects.wilson_cowan.data_loader.losses.loss_c_latent_consistency",
+        "projects.wilson_cowan.data_loader.losses.loss_d_dynamics_aware",
+    ):
+        _cloudpickle.register_pickle_by_value(_importlib.import_module(_modname))
+except Exception:
+    pass
+
+
+# ── Objective + rollout configuration ──
+# Precedence: explicit config kwarg > env var > built-in default (below).
+DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
+DEFAULT_ROLLOUT_K = 50        # autonomous-rollout horizon (bins)
+DEFAULT_ANCHOR_STRIDE = 200   # bins between rollout anchors
+DEFAULT_DT_SECONDS = 0.001    # bin width for the time axis
+
+_OBJECTIVES = {
+    "A": loss_A_one_step_tf,
+    "B": loss_B_rollout,
+    "C": loss_C_latent_consistency,
+    "D": loss_D_dynamics_aware,
+}
+
+
+def _rollout_anchors(T: int) -> tuple[np.ndarray, int]:
+    """Pick the start times for the autonomous-rollout training windows (objectives B/C/D).
+
+    Objectives B/C/D don't just roll the model out once from the start of the trajectory — they
+    roll it out from many starting points *along* the trajectory and average the error. Each such
+    starting time is an "anchor". From anchor ``a`` the model is seeded with the state inferred at
+    time ``a`` and then run autonomously (feeding its own predictions back) to predict the next
+    ``K`` steps, ``a+1 .. a+K``; those predictions are scored against the real data there.
+
+    This returns the anchor start indices and the horizon ``K`` (both driven by config
+    ``project_params.rollout_k`` / ``anchor_stride`` via env, see the top-of-module note):
+      * ``K``  = rollout length in bins = ``min(rollout_k, T-2)``.
+      * anchors = an evenly spaced grid ``0, anchor_stride, 2*anchor_stride, ...`` up to the last
+        start for which a full ``K``-step window still fits (``T-1-K``).
+
+    Example: ``T=8000``, ``rollout_k=50``, ``anchor_stride=200`` → ``K=50`` and anchors
+    ``[0, 200, 400, ..., 7800]`` (40 windows). The number of anchors ``A`` becomes the third axis
+    of ``pred_y_rollout`` ``[n, n_stim, A, K, 2]``. The grid is data-agnostic (depends only on the
+    length ``T``), so ``load_data`` and ``apply_model`` compute the identical set independently.
+    """
+    rollout_k = int(os.environ.get("EDGAR_WC_ROLLOUT_K", DEFAULT_ROLLOUT_K))
+    anchor_stride = int(os.environ.get("EDGAR_WC_ANCHOR_STRIDE", DEFAULT_ANCHOR_STRIDE))
+    K = int(min(rollout_k, max(1, T - 2)))
+    last_start = T - 1 - K
+    if last_start < 0:
+        return np.array([0], dtype=int), K
+    starts = np.arange(0, last_start + 1, anchor_stride, dtype=int)
+    if starts.size == 0:
+        starts = np.array([0], dtype=int)
+    return starts, K
 
 
 # ── EDGAR entry points ──
@@ -67,56 +115,86 @@ def load_data(
     sample_split_seed: int = 42,
     T_eval: int = 200,
     n_eval: int = 4,
+    objective: str | None = None,
+    rollout_k: int | None = None,
+    anchor_stride: int | None = None,
+    dt_seconds: float | None = None,
 ):
     """Load one k-fold file and return EDGAR's ``(discover, validate, X_eval)`` split.
 
-    ``data_path`` must point at a ``wc_fold{f}.npz`` produced by
-    ``simulate_data.save_kfold_splits``. The 8 samples are split 50/50 into discover
-    and validate; parameters are fit per sample on ``train_data`` and cross-validated
-    on the held-out (repeat-averaged) ``test_data``.
+    ``data_path`` points at a ``wc*_fold{f}.npz`` from ``simulate_data.save_kfold_splits``. The
+    ``n_samples`` samples are split 50/50 into discover / validate; params are fit per sample on
+    ``train_data`` and cross-validated on the held-out (repeat-averaged) ``test_data``.
 
-    Every top-level dict value is a plain array with axis 0 = n_samples (the per-sample
-    axis matched to per-sample params). ``"E"`` is the first key so the engine's
-    ``next(iter(data.values())).shape[0]`` sees n_samples. The per-step dict ``y_prev``
-    is assembled inside ``apply_model`` (a ``jax.lax.scan`` over a pytree), so no core
-    EDGAR change is needed.
+    Every top-level ``data`` value carries axis 0 = n_samples (matched to per-sample params);
+    ``"target_y"`` is first so the engine's ``next(iter(data.values())).shape[0]`` reads n_samples.
+    The dict carries ``target_y`` (both observed channels, last axis = (E, I)), the stimulus
+    (``stim_E``, ``stim_I``), the rollout targets ``target_y_future``, and ``time`` — all with a
+    leading n-axis so the param estimator's per-sample ``v[i]`` indexing stays valid. ``apply_model``
+    reads E/I back off ``target_y`` and assembles the per-step ``y_prev`` dict internally.
     """
     if not data_path:
         raise ValueError(
-            "wilson_cowan load_data requires data_path pointing to a wc_fold*.npz file "
+            "wilson_cowan load_data requires data_path pointing to a wc*_fold*.npz file "
             "(generate with simulate_data.save_kfold_splits)."
         )
+
+    # Republish config-provided settings to env so apply_model / loss_fn (separate exec namespaces)
+    # and spawned scoring workers pick them up. Config wins when given; otherwise env/default stand.
+    for _val, _env_key in (
+        (objective, "EDGAR_WC_OBJECTIVE"),
+        (rollout_k, "EDGAR_WC_ROLLOUT_K"),
+        (anchor_stride, "EDGAR_WC_ANCHOR_STRIDE"),
+        (dt_seconds, "EDGAR_WC_DT"),
+    ):
+        if _val is not None:
+            os.environ[_env_key] = str(_val)
+
     raw = np.load(data_path)
     train_data = np.asarray(raw["train_data"])  # (n_samples, 2, T, 2)  last axis = (E, I)
     test_data = np.asarray(raw["test_data"])
     stimuli = np.asarray(raw["stimuli"])         # (2, T, 2)  [stim_cond, T, (stim_E, stim_I)]
 
     n_samples, n_stim, T, _ = train_data.shape
+    anchor_starts, K = _rollout_anchors(T)
+    A = len(anchor_starts)
+
+    # Time axis in seconds, t=0 at stimulus onset (first bin where any stim channel is on). Used
+    # only by Objective D's response-feature windows; onset is data-derived here so it need not be
+    # recomputed under jit inside apply_model.
+    stim_on = np.nonzero(np.abs(stimuli).sum(axis=(0, 2)) > 0)[0]
+    onset_idx = int(stim_on[0]) if stim_on.size else 0
+    dt = float(os.environ.get("EDGAR_WC_DT", DEFAULT_DT_SECONDS))
+    time_axis = ((np.arange(T) - onset_idx) * dt).astype(np.float32)
 
     # 50/50 sample split → discover / validate (params are fit per sample).
     perm = np.random.default_rng(sample_split_seed).permutation(n_samples)
     disc_idx = np.sort(perm[: n_samples // 2])
     val_idx = np.sort(perm[n_samples // 2:])
 
-    # The stimulus is shared across samples; broadcast to (n, n_stim, T) per channel so
-    # every array carries the n_samples axis (axis 0) that vmap/params map over.
+    # The stimulus is shared across samples; broadcast to (n, n_stim, T) per channel so every
+    # array carries the n_samples axis (axis 0) that vmap / params map over.
     def _stim_arrays(n: int):
         sE = np.broadcast_to(stimuli[None, :, :, 0], (n, n_stim, T))
         sI = np.broadcast_to(stimuli[None, :, :, 1], (n, n_stim, T))
         return jnp.asarray(sE), jnp.asarray(sI)
 
-    # No per-sample scale: the heteroscedastic NLL (see loss_fn) sets each residual's
-    # weight from the fitted noise variance ``phi · mean_t``, which subsumes what the old
-    # ``scale`` term did. The data is passed through in raw units.
     def _build(split_data: np.ndarray, idx: np.ndarray) -> dict:
         n = len(idx)
         sE, sI = _stim_arrays(n)
+        target_y = jnp.asarray(split_data[idx])     # (n, n_stim, T, 2)
+        # Autonomous-rollout targets: for anchor a, the future window data[a+1 : a+1+K].
+        target_y_future = jnp.stack(
+            [target_y[:, :, a + 1: a + 1 + K, :] for a in anchor_starts], axis=2
+        )                                           # (n, n_stim, A, K, 2)
+        time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (n, T))
         return {
-            # "E" first: engine reads n_samples from next(iter(data.values())).shape[0].
-            "E": jnp.asarray(split_data[idx, :, :, 0]),      # (n, n_stim, T)
-            "I": jnp.asarray(split_data[idx, :, :, 1]),
+            # target_y first: engine reads n_samples from next(iter(data.values())).shape[0].
+            "target_y": target_y,
             "stim_E": sE,
             "stim_I": sI,
+            "target_y_future": target_y_future,
+            "time": time,
         }
 
     X_disc_train = _build(train_data, disc_idx)
@@ -125,8 +203,6 @@ def load_data(
     X_val_test = _build(test_data, val_idx)
 
     # X_eval: a small, short subset of the discover cells for fingerprint dedup.
-    # _sample_indices index positions WITHIN the discover set (the scorer does
-    # params[_sample_indices] against the per-discover-sample params).
     n_eval_actual = int(min(max(1, n_eval), len(disc_idx)))
     T_eval_actual = int(min(T_eval, T))
     eval_pos = np.sort(
@@ -134,19 +210,20 @@ def load_data(
             len(disc_idx), n_eval_actual, replace=False
         )
     )
-    disc_train_E = train_data[disc_idx, :, :, 0]
-    disc_train_I = train_data[disc_idx, :, :, 1]
+    disc_train = train_data[disc_idx]              # (n_disc, n_stim, T, 2)
     sE_eval, sI_eval = _stim_arrays(len(disc_idx))
     X_eval = {
-        "E": jnp.asarray(disc_train_E[eval_pos, :, :T_eval_actual]),
-        "I": jnp.asarray(disc_train_I[eval_pos, :, :T_eval_actual]),
+        "target_y": jnp.asarray(disc_train[eval_pos, :, :T_eval_actual, :]),
         "stim_E": sE_eval[eval_pos, :, :T_eval_actual],
         "stim_I": sI_eval[eval_pos, :, :T_eval_actual],
         "_sample_indices": eval_pos,
+        "_eval_fingerprint_key_name": "pred_y_1step",
     }
 
     print(
         f"[wilson_cowan] {data_path}: n_samples={n_samples}, n_stim={n_stim}, T={T}; "
+        f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
+        f"K={K}, anchors={A}; "
         f"discover/validate={len(disc_idx)}/{len(val_idx)} "
         f"(disc={disc_idx.tolist()}, val={val_idx.tolist()}); "
         f"X_eval n={n_eval_actual}, T={T_eval_actual}"
@@ -162,9 +239,9 @@ def load_data(
 def _split_params_s0(params: dict) -> tuple[dict, dict]:
     """Strip ``s0_``-prefixed keys → initial hidden-state dict; rest is dyn params.
 
-    Only strips keys of the form ``s0_<name>`` with ``<name>`` non-empty. The initial
-    values are ordinary GD parameters (per sample); stripping them here just routes them
-    into the scan carry instead of the model's ``params``. Mirrors ``fhn_excitable``.
+    Only strips keys of the form ``s0_<name>`` with ``<name>`` non-empty. The initial values are
+    ordinary GD parameters (per sample); stripping them here routes them into the scan carry
+    instead of the model's ``params``.
     """
     init_state = {}
     dyn_params = {}
@@ -176,80 +253,143 @@ def _split_params_s0(params: dict) -> tuple[dict, dict]:
     return init_state, dyn_params
 
 
+def _hidden_vec(state: dict, hkeys: list[str]):
+    """Flatten a hidden-carry dict into a vector in fixed ``hkeys`` order (``[0]`` if stateless)."""
+    if hkeys:
+        return jnp.stack([state[k] for k in hkeys])
+    return jnp.zeros((0,))
+
+
 def apply_model(model_fn, data, params):
-    """Teacher-forced one-step-ahead scan of ``model_fn`` over every (sample, stim).
+    """Drive the evolved transition in every mode the objectives need → the §8 ``model_output``.
 
-    Builds the per-step dict ``y_prev`` and scans over it (``jax.lax.scan`` handles the
-    pytree natively). vmaps over samples (axis 0, matched to per-sample ``params``) and,
-    inside, over the two stim conditions (params are shared across conditions — same
-    cell). Returns ``(n_samples, n_stim, T-1, 2)``: predicted (E, I) at each step.
+    vmaps over samples (axis 0, matched to per-sample ``params``) and, inside, over the two stim
+    conditions (params shared across conditions — same cell). The latent state is
+    ``z = [E, I, *sorted(hidden_carry)]`` (``z_dim = 2`` for the stateless base model, ``3`` for
+    the slow-``S`` variant). Returned dict, shapes ``[n, n_stim, ...]``:
 
-    Hidden-state initial values are learnable, per-sample GD parameters declared with the
-    ``s0_`` prefix. ``_split_params_s0`` strips them into the scan carry (per sample) and
-    hands the rest to ``model_fn``; a model with a latent ``S`` seeds the carry from
-    ``s0_S``. Stateless models (base WC) declare no ``s0_`` keys, so the carry is an empty
-    dict exactly as before. E and I are observed (teacher-forced), so they carry no ``s0_``.
+    * ``pred_y_1step``        ``[…, T-1, 2]`` — teacher-forced one-step prediction (data E/I fed in).
+    * ``z_inferred``          ``[…, T, z]``   — latent inferred along the teacher-forced trajectory.
+    * ``pred_y_rollout``      ``[…, A, K, 2]``— autonomous rollout from A anchors (own E/I fed back).
+    * ``z_rollout``           ``[…, A, K, z]``— latent along those autonomous rollouts.
+    * ``z_target_future``     ``[…, A, K, z]``— inferred latent at the same absolute times.
+    * ``pred_y_full_rollout`` ``[…, T, 2]``   — one full-length autonomous rollout (Objective D only;
+      a placeholder equal to the observed trajectory otherwise, to avoid a long autonomous
+      backprop scan the other objectives never read).
 
-    The fitted per-sample observation-noise coefficient ``log_noise_coef`` is not ``s0_``
-    prefixed, so it stays in ``dyn_params``; it is appended as a constant third channel so
-    the params-free ``loss_fn`` can recover it. Output is ``(n_samples, n_stim, T-1, 3)``:
-    ``(E, I, log_noise_coef)``. The model function itself never sees ``log_noise_coef``.
+    Always returns this dict (including for ``X_eval``); the engine's ``_eval_fingerprint`` reduces
+    it to the dedup fingerprint array using the field named by ``X_eval["_eval_fingerprint_key_name"]``
+    (``"pred_y_1step"`` here).
     """
-    E = data["E"]        # (n, n_stim, T)
-    I = data["I"]
+    target_y = data["target_y"]   # (n, n_stim, T, 2), last axis = (E, I)
+    E = target_y[..., 0]          # (n, n_stim, T)
+    I = target_y[..., 1]
     sE = data["stim_E"]
     sI = data["stim_I"]
 
+    T = E.shape[-1]
+    anchor_starts, K = _rollout_anchors(T)
+    want_full = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() == "D"
+
     def per_sample(E_s, I_s, sE_s, sI_s, p):
         init_state, dyn_params = _split_params_s0(p)
+        hkeys = sorted(init_state.keys())
 
         def per_stim(E_c, I_c, sE_c, sI_c):
-            xs = {
-                "E_prev": E_c[:-1],
-                "I_prev": I_c[:-1],
-                "stim_E_prev": sE_c[:-1],
-                "stim_I_prev": sI_c[:-1],
+            # ── Teacher-forced one-step pass (feed the data E/I into y_prev) ──
+            xs = (E_c[:-1], I_c[:-1], sE_c[:-1], sI_c[:-1])
+
+            def tf_step(state, inp):
+                E_p, I_p, sE_p, sI_p = inp
+                y_prev = {
+                    "E_prev": E_p, "I_prev": I_p,
+                    "stim_E_prev": sE_p, "stim_I_prev": sI_p,
+                }
+                new_state, mean = model_fn(state, y_prev, dyn_params)
+                E_n, I_n = mean
+                return new_state, (jnp.stack([E_n, I_n]), _hidden_vec(new_state, hkeys))
+
+            _, (means, hid_seq) = jax.lax.scan(tf_step, init_state, xs)  # (T-1,2), (T-1,nh)
+
+            obs = jnp.stack([E_c, I_c], axis=-1)                        # (T,2)
+            hid_full = jnp.concatenate(
+                [_hidden_vec(init_state, hkeys)[None, :], hid_seq], axis=0
+            )                                                          # (T,nh)
+            z_inferred = jnp.concatenate([obs, hid_full], axis=-1)     # (T,z)
+
+            # ── Autonomous rollout from each anchor (feed own E/I back; §7 free-running) ──
+            def rollout(a):
+                E0 = jax.lax.dynamic_slice_in_dim(E_c, a, 1, 0)[0]
+                I0 = jax.lax.dynamic_slice_in_dim(I_c, a, 1, 0)[0]
+                hid0 = jax.lax.dynamic_slice_in_dim(hid_full, a, 1, 0)[0]  # (nh,)
+                state0 = {k: hid0[i] for i, k in enumerate(hkeys)}
+                sE_win = jax.lax.dynamic_slice_in_dim(sE_c, a, K, 0)   # (K,)
+                sI_win = jax.lax.dynamic_slice_in_dim(sI_c, a, K, 0)
+
+                def r_step(carry, inp):
+                    state, E_p, I_p = carry
+                    sE_p, sI_p = inp
+                    y_prev = {
+                        "E_prev": E_p, "I_prev": I_p,
+                        "stim_E_prev": sE_p, "stim_I_prev": sI_p,
+                    }
+                    new_state, mean = model_fn(state, y_prev, dyn_params)
+                    E_n, I_n = mean
+                    y = jnp.stack([E_n, I_n])
+                    z = jnp.concatenate([y, _hidden_vec(new_state, hkeys)])
+                    return (new_state, E_n, I_n), (y, z)
+
+                _, (pred, zr) = jax.lax.scan(r_step, (state0, E0, I0), (sE_win, sI_win))
+                return pred, zr                                        # (K,2), (K,z)
+
+            pred_rollout, z_rollout = jax.vmap(rollout)(anchor_starts)  # (A,K,2), (A,K,z)
+
+            def gather_future(a):
+                return jax.lax.dynamic_slice_in_dim(z_inferred, a + 1, K, 0)  # (K,z)
+
+            z_target_future = jax.vmap(gather_future)(anchor_starts)   # (A,K,z)
+
+            # ── Full-length autonomous rollout (Objective D only) ──
+            if want_full:
+                def f_step(carry, inp):
+                    state, E_p, I_p = carry
+                    sE_p, sI_p = inp
+                    y_prev = {
+                        "E_prev": E_p, "I_prev": I_p,
+                        "stim_E_prev": sE_p, "stim_I_prev": sI_p,
+                    }
+                    new_state, mean = model_fn(state, y_prev, dyn_params)
+                    E_n, I_n = mean
+                    return (new_state, E_n, I_n), jnp.stack([E_n, I_n])
+
+                _, pred_full = jax.lax.scan(
+                    f_step, (init_state, E_c[0], I_c[0]), (sE_c[:-1], sI_c[:-1])
+                )                                                     # (T-1,2)
+                pred_full = jnp.concatenate([obs[:1], pred_full], axis=0)  # (T,2)
+            else:
+                pred_full = obs                                        # unused placeholder
+
+            return {
+                "pred_y_1step": means,
+                "z_inferred": z_inferred,
+                "pred_y_rollout": pred_rollout,
+                "z_rollout": z_rollout,
+                "z_target_future": z_target_future,
+                "pred_y_full_rollout": pred_full,
             }
 
-            def step(state, y_prev):
-                new_state, mean = model_fn(state, y_prev, dyn_params)
-                E_next, I_next = mean
-                return new_state, jnp.stack([E_next, I_next])
-
-            _, means = jax.lax.scan(step, init_state, xs)  # (T-1, 2)
-            return means
-
-        means = jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)   # (n_stim, T-1, 2)
-        log_nc = jnp.broadcast_to(dyn_params["log_noise_coef"], means.shape[:-1] + (1,))
-        return jnp.concatenate([means, log_nc], axis=-1)   # (n_stim, T-1, 3)
+        return jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)
 
     return jax.vmap(per_sample, in_axes=(0, 0, 0, 0, 0))(E, I, sE, sI, params)
 
 
 def loss_fn(model_output, data):
-    """Heteroscedastic Gaussian NLL, averaged over stim conditions and time.
+    """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C/D).
 
-    ``model_output`` is ``(n, n_stim, T-1, 3)``: ``(E_hat, I_hat, log_noise_coef)``, where
-    ``log_noise_coef`` is the per-sample fitted noise coefficient carried through by
-    ``apply_model``. Targets are the ``[1:]`` slice of the observed E/I.
-
-    The observation variance is signal-dependent: ``var = phi · max(mean, EPS_MEAN)`` with
-    ``phi = exp(log_noise_coef)`` shared by E and I. Each channel is weighted by its own
-    predicted mean, so the high-variance evoked transient is smoothly down-weighted and the
-    low-noise baseline dominates the fit. The mean inside the variance is detached
-    (``stop_gradient``) so the model cannot lower the loss by inflating its predicted mean to
-    buy variance; ``phi`` still gets a gradient through the ``log`` term. Returns ``(n,)``.
+    Returns ``(n,)``. The engine wraps this in ``jnp.mean(loss_fn(...))``; each objective returns
+    per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term. The
+    selection is read from the ``EDGAR_WC_OBJECTIVE`` env var that ``load_data`` republishes from
+    config.
     """
-    E_hat = model_output[..., 0]      # (n, n_stim, T-1)
-    I_hat = model_output[..., 1]
-    log_nc = model_output[..., 2]
-    E_tgt = data["E"][:, :, 1:]
-    I_tgt = data["I"][:, :, 1:]
-
-    phi = jnp.exp(log_nc)
-    var_E = phi * jnp.maximum(jax.lax.stop_gradient(E_hat), EPS_MEAN)
-    var_I = phi * jnp.maximum(jax.lax.stop_gradient(I_hat), EPS_MEAN)
-
-    nll_E = 0.5 * (jnp.log(var_E) + (E_tgt - E_hat) ** 2 / var_E)
-    nll_I = 0.5 * (jnp.log(var_I) + (I_tgt - I_hat) ** 2 / var_I)
-    return jnp.mean(nll_E + nll_I, axis=(1, 2))  # (n,)
+    objective = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper()
+    return _OBJECTIVES[objective](model_output, data)

@@ -54,5 +54,4 @@ model.DEFAULT_PARAMS = {
     "C_I": 1.0,
     "XE": 3.0,
     "XI": 1.0,
-    "log_noise_coef": -4.6052,  # log(0.01): fitted obs-noise coef, var = exp(·)·max(mean, EPS_MEAN)
 }

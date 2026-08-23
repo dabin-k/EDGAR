@@ -1000,7 +1000,7 @@ scientifically relevant perturbation dynamics
    - `dt` matches `time_axis`
 7. Plot a few trajectories before training.
 
-## Phase 1 — model
+## Phase 1 — model -- IGNORED, unclear what this section is supposed to achieve. 
 
 1. Implement `z = [E, I, hidden...]`.
 2. Implement `F_theta(z, u)`.

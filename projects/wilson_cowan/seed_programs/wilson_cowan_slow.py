@@ -78,7 +78,6 @@ model.DEFAULT_PARAMS = {
     'XE': 1.0,
     'XI': 1.0,
     's0_S': 1.0,  # learnable initial value of the latent S (GD-fit; seeds the scan carry)
-    'log_noise_coef': -4.6052,  # log(0.01): fitted obs-noise coef, var = exp(·)·max(mean, EPS_MEAN)
 }
 
 

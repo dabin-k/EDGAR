@@ -8,8 +8,9 @@ def parameter_estimator(data):
     baseline estimates the stimulus gain X_*. Time constants are left as small
     positive defaults for gradient descent to refine.
     """
-    E = np.asarray(data["E"], dtype=np.float64)   # (n_stim, T)
-    I = np.asarray(data["I"], dtype=np.float64)
+    target_y = np.asarray(data["target_y"], dtype=np.float64)  # (n_stim, T, 2), last axis (E, I)
+    E = target_y[..., 0]                          # (n_stim, T)
+    I = target_y[..., 1]
     b = max(1, E.shape[1] // 10)                  # pre-stimulus window
 
     E_base = float(E[:, :b].mean())
@@ -30,6 +31,4 @@ def parameter_estimator(data):
         "W_IS": 0.001,
         # Initial value of the latent S — learnable (s0_ prefix); GD refines from here.
         "s0_S": 1.0,
-        # Obs-noise coef init log(0.01) (matches the generative var = 0.01*mean); GD refines.
-        "log_noise_coef": float(np.log(0.01)),
     }

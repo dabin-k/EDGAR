@@ -4,8 +4,8 @@
 #   * WC observes TWO populations (E, I), not one scalar; the prediction is a
 #     tuple (E, I).
 #   * `y_prev` is a DICT that also carries the external stimulus.
-#   * The loss is a heteroscedastic Gaussian NLL (observation variance grows with
-#     activity); every model exposes a GD-fitted `log_noise_coef` param.
+#   * The loss is MSE-based (one of several training objectives — one-step and/or
+#     autonomous-rollout MSE)
 #   * Both populations are FULLY OBSERVED, so a hidden variable is optional
 #     (not required as it is for the excitable FHN task). If a model DOES carry a
 #     hidden variable, its initial value is a learnable `s0_*` param (GD-fit per
@@ -22,11 +22,10 @@ model:
 
     At each step you are given the PREVIOUS observation (E[t-1], I[t-1]) together
     with the PREVIOUS stimulus, and you must predict the next observation
-    (E[t], I[t]). Prediction is one-step-ahead and teacher-forced. Models are scored by a
-    Gaussian negative log-likelihood in which the observation noise GROWS WITH ACTIVITY
-    (variance proportional to the predicted mean); a per-cell noise level
-    `log_noise_coef` is fitted by gradient descent alongside your dynamical parameters.
-    The NLL is averaged over both stimulus conditions and over time. Lower is better.
+    (E[t], I[t]). Your transition is used both teacher-forced (one-step-ahead) and rolled
+    out autonomously (feeding its own predictions back). Models are scored by a mean-squared
+    error between predicted and observed E/I, averaged over both stimulus conditions and over
+    time. Lower is better.
 
     To do better your model must capture (a) how each population relaxes toward a
     baseline with its own time constant, (b) how the two populations DRIVE each
@@ -82,12 +81,6 @@ model:
     * Provide `model.DEFAULT_PARAMS`: a dict of sensible float initial values for
     EVERY key read from `params`. Values must be plain floats.
 
-    * Include `log_noise_coef` in `model.DEFAULT_PARAMS` (e.g. -4.6, i.e.
-    log(0.01)). This is the log observation-noise coefficient: the scorer models the
-    observation variance as `exp(log_noise_coef) * max(mean, 0.1)` and fits it per cell by
-    gradient descent. Your model body does NOT read or use `log_noise_coef` — just declare
-    it in `DEFAULT_PARAMS` so it becomes a learnable parameter.
-
     '
   image_analysis_instructions: '**Image Analysis Instructions:**
 
@@ -134,17 +127,17 @@ parameter_estimator:
     * Import any packages you use (use numpy as np).
 
     * Function signature must be `def parameter_estimator(data):`. `data` is ONE
-    cell''s training dict. The arrays are shaped `(n_stim, T)` — the two stimulus
-    conditions stacked along axis 0:
-        - `data["E"]`, `data["I"]`             — observed activity, `(n_stim, T)`
+    cell''s training dict; the two stimulus conditions are stacked along axis 0:
+        - `data["target_y"]`  — observed activity, `(n_stim, T, 2)`; the last axis is
+          (E, I), so `E = data["target_y"][..., 0]` and `I = data["target_y"][..., 1]`,
+          each `(n_stim, T)`.
         - `data["stim_E"]`, `data["stim_I"]`   — the stimulus, `(n_stim, T)`
 
     * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`.
     Missing or extra keys will cause your estimator to be rejected. All values must
-    be plain Python floats. This INCLUDES `log_noise_coef` — a fine initial estimate is
-    `float(np.log(0.01))`; gradient descent refines it. It ALSO includes any
-    `s0_`-prefixed keys (learnable initial values of hidden-state variables): return a
-    sensible float (the model''s default is fine); gradient descent refines it.
+    be plain Python floats. This includes any `s0_`-prefixed keys (learnable initial
+    values of hidden-state variables): return a sensible float (the model''s default is
+    fine); gradient descent refines it.
 
     * Sensible, cheap estimates (no fitting — just statistics of the traces):
 

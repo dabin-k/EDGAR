@@ -279,7 +279,19 @@ def _eval_fingerprint(model_fn, params, X_eval, apply_model_fn=apply_model_plain
     """
     sample_indices = X_eval["_sample_indices"]
     params_matched = jax.tree_util.tree_map(lambda p: p[sample_indices], params)
-    return apply_model_fn(model_fn, X_eval, params_matched)
+    out = apply_model_fn(model_fn, X_eval, params_matched)
+    # Fingerprint dedup (population/island) needs a flat array. A project whose apply_model returns
+    # a dict of named outputs names the field to fingerprint on via X_eval["_eval_fingerprint_key_name"]
+    # (set in its load_data, alongside "_sample_indices"); array-returning projects are unaffected.
+    if isinstance(out, dict):
+        fp_key = X_eval.get("_eval_fingerprint_key_name")
+        if fp_key is not None:
+            out = out[fp_key]
+        else:
+            out = jax.numpy.concatenate(
+                [jax.numpy.ravel(v) for v in jax.tree_util.tree_leaves(out)]
+            )
+    return out
 
 
 def _roll_carry(rollout_fn, model_fn, data_train, params):
