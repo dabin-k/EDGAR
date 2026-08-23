@@ -1032,6 +1032,7 @@ Do not implement all four before verifying that A and B learn sensible trajector
 0. Chop timeseries data to only -50ms to 400ms around the first stimulus (at t=0ms)
 1. 3-fold trial CV
 2. train A–D
+----
 3. run EDGAR
 4. evaluate held-out folds
 5. evaluate held-out IPIs where feasible

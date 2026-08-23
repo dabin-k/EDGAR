@@ -27,6 +27,7 @@ files, each a repeat-averaged ``train_data`` / ``test_data`` pair (shape ``(n_sa
 """
 from __future__ import annotations
 
+import glob as _glob
 import os
 
 import jax
@@ -41,6 +42,7 @@ from projects.wilson_cowan.data_loader.losses import (
 )
 from projects.wilson_cowan.data_loader.neural_data import (
     EXPERIMENT_TYPES,
+    _animal_id,
     build_cv_samples,
 )
 
@@ -126,8 +128,9 @@ def load_data(
     chop_pre_ms: float = -50.0,
     chop_post_ms: float = 400.0,
     max_conditions: int | None = None,
-    disc_types: list[str] | None = None,
-    val_types: list[str] | None = None,
+    cv_type: str = "k_fold",
+    train_types: list[str] | None = None,
+    test_types: list[str] | None = None,
 ):
     """Load one k-fold file and return EDGAR's ``(discover, validate, X_eval)`` split.
 
@@ -159,21 +162,22 @@ def load_data(
         if _val is not None:
             os.environ[_env_key] = str(_val)
 
-    raw = np.load(data_path, allow_pickle=True)
-
-    # Real opto session (Phase 4) vs synthetic wc*_fold*.npz
-    if any(k.endswith("__responses") for k in raw.files):
+    # Real opto sessions (Phase 4): data_path is a dir, glob, or single
+    real_paths = _resolve_mouse_paths(data_path)
+    if real_paths:
         return _load_real(
-            data_path=data_path,
+            paths=real_paths,
             sample_split_seed=sample_split_seed,
             T_eval=T_eval,
             n_eval=n_eval,
             chop=(chop_pre_ms / 1000.0, chop_post_ms / 1000.0),
             max_conditions=max_conditions,
-            disc_types=disc_types,
-            val_types=val_types,
+            cv_type=cv_type,
+            train_types=train_types,
+            test_types=test_types,
         )
 
+    raw = np.load(data_path, allow_pickle=True)
     train_data = np.asarray(raw["train_data"])  # (n_samples, 2, T, 2)  last axis = (E, I)
     test_data = np.asarray(raw["test_data"])
     stimuli = np.asarray(raw["stimuli"])         # (2, T, 2)  [stim_cond, T, (stim_E, stim_I)]
@@ -259,113 +263,141 @@ def load_data(
     )
 
 
+def _resolve_mouse_paths(data_path: str) -> list[str]:
+    """Resolve ``data_path`` to a sorted list of real ``population_rates_*_s1.npz`` sessions.
+
+    ``data_path`` may be a directory (globbed for the default pattern), a glob, or a single file.
+    Only files whose basename starts with ``population_rates_`` are treated as real sessions, so a
+    synthetic ``wc*_fold*.npz`` path resolves to ``[]`` and falls through to the synthetic loader.
+    """
+    if os.path.isdir(data_path):
+        matches = _glob.glob(os.path.join(data_path, "population_rates_*_s1.npz"))
+    else:
+        matches = _glob.glob(data_path)
+    return sorted(m for m in matches if os.path.basename(m).startswith("population_rates_"))
+
+
+def _read_n_folds(path: str) -> int:
+    """Number of trial-CV folds stored in a session npz (from ``n_folds`` or the responses shape)."""
+    d = np.load(path, allow_pickle=True)
+    if "n_folds" in d.files:
+        return int(d["n_folds"])
+    rkey = next(k for k in d.files if k.endswith("__responses"))
+    return int(np.asarray(d[rkey]).shape[1])
+
+
 def _load_real(
-    data_path: str,
+    paths: list[str],
     sample_split_seed: int,
     T_eval: int,
     n_eval: int,
     chop: tuple[float, float],
     max_conditions: int | None,
-    disc_types: list[str] | None = None,
-    val_types: list[str] | None = None,
+    cv_type: str = "k_fold",
+    train_types: list[str] | None = None,
+    test_types: list[str] | None = None,
 ):
-    """Real opto-session path for ``load_data``: chop + full trial CV → EDGAR's contract.
+    """Real opto path for ``load_data``: multiple mice → EDGAR's ``(discover, validate, X_eval)``.
 
-    **Mouse-level parameters.** One parameter set is fit per EDGAR sample, and here a sample is
-    one CV rotation of the mouse, NOT a single condition: the ``n_stim`` axis holds all of the
-    mouse's conditions (on that discover/validate side), so the fitted parameters must reproduce
-    every stimulus condition at once with a single ``F_theta``. Only the equation form is shared
-    across samples; the numeric parameters are refit per CV fold.
+    **Mouse-level parameters.** One parameter set is fit per EDGAR sample, and a sample is one
+    mouse (× CV rotation): the ``n_stim`` axis holds all of that mouse's conditions, so the fitted
+    parameters must reproduce every stimulus condition at once with a single ``F_theta``. Only the
+    equation form is shared across samples.
 
-    Layout: ``build_cv_samples`` is called once per held-out fold and the folds become the sample
-    axis (axis 0, ``n = n_folds``). For fold ``f`` the sample's ``*_train`` is the trial-weighted
-    mean of the other folds and ``*_test`` is fold ``f`` — the 3-fold trial CV, one param set per
-    rotation. Conditions sit on axis 1 (``n_stim``), each with its own stimulus.
+    **Discover/validate splits by mouse.** The sessions are split 50/50 into discover vs validate
+    mice (seeded by ``sample_split_seed``); the discovered equation is thus validated on held-out
+    *animals*. Because every dict is a dense ``(n_samples, n_stim, …)`` array, **all sessions must
+    share the same condition count** — a mismatch raises (curate the sessions to one protocol).
+
+    **Train/test within a sample** is set by ``cv_type`` (see ``build_cv_samples``):
+      * ``"k_fold"``   — one sample per ``(mouse, held-out fold)``; ``train`` = other folds'
+        trial-weighted mean, ``test`` = held-out fold (trial-noise CV, all condition types).
+      * ``"exp_cond"`` — one sample per mouse; ``train`` = ``train_types`` conditions, ``test`` =
+        disjoint ``test_types`` conditions (held-out-perturbation CV). ``train``/``test`` then have
+        different ``n_stim``.
 
     Args:
-        data_path: One ``population_rates_<animal>_s1.npz`` session file.
-        sample_split_seed: Seeds the random condition split and the ``X_eval`` subset, and is
-            passed to ``build_cv_samples`` as its subsample seed.
-        T_eval: Max trajectory length of the (short) ``X_eval`` fingerprint traces.
-        n_eval: Number of discover samples (CV folds) used for the ``X_eval`` fingerprint.
+        paths: Real session files (from ``_resolve_mouse_paths``); ≥2 for the mouse split.
+        sample_split_seed: Seeds the mouse discover/validate split, the ``build_cv_samples``
+            subsample, and the ``X_eval`` subset.
+        T_eval, n_eval: Length / number of discover samples for the ``X_eval`` fingerprint.
         chop: ``(pre_s, post_s)`` peri-stimulus window kept, in seconds.
-        max_conditions: Cap on conditions kept (deterministic subsample); ``None`` = all.
-        disc_types, val_types: If both given, the mouse's conditions are partitioned by
-            ``experiment_type`` into the discover vs validate ``n_stim`` sets (types in neither
-            list are dropped) — the §5 held-out-perturbation-class test (params fit on discover
-            conditions must, after a refit, also explain the held-out condition types). If either
-            is ``None``, conditions are split 50/50 at random.
+        max_conditions: Cap on conditions per split (deterministic subsample); ``None`` = all.
+        cv_type: ``"k_fold"`` or ``"exp_cond"``.
+        train_types, test_types: Experiment-type train/test partition, required for ``exp_cond``.
 
     Returns:
-        ``((X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval)`` — the EDGAR
-        ``(discover, validate, X_eval)`` contract. Each ``X_*`` dict carries ``target_y``
-        ``[n_folds, C, T, 2]``, ``stim_E``/``stim_I`` ``[n_folds, C, T]``, ``target_y_future``
-        ``[n_folds, C, A, K, 2]`` and ``time`` ``[n_folds, T]``, where ``C`` = number of
-        conditions on that discover/validate side.
+        ``((X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval)``. Each ``X_*`` dict
+        carries ``target_y`` ``[n, C, T, 2]``, ``stim_E``/``stim_I`` ``[n, C, T]``,
+        ``target_y_future`` ``[n, C, A, K, 2]`` and ``time`` ``[n, T]``; ``n`` = number of
+        (mouse × fold) samples on that side, ``C`` = that split's condition count.
     """
-    d = np.load(data_path, allow_pickle=True)
-    if "n_folds" in d.files:
-        n_folds = int(d["n_folds"])
-    else:
-        rkey = next(k for k in d.files if k.endswith("__responses"))
-        n_folds = int(np.asarray(d[rkey]).shape[1])
-
-    # One CVSamples per held-out fold; the shared subsample_seed makes the kept-condition set and
-    # its order identical across folds, so a condition sits at the same index in every fold.
-    cvs = [
-        build_cv_samples(
-            data_path, held_out_fold=f, chop=chop, max_conditions=max_conditions,
-            subsample_seed=sample_split_seed,
+    if len(paths) < 2:
+        raise ValueError(
+            f"mouse-level discover/validate needs >=2 sessions; got {len(paths)}: "
+            f"{[os.path.basename(p) for p in paths]}"
         )
-        for f in range(n_folds)
-    ]
-    n_conditions = len(cvs[0].meta)
-    time_axis = np.asarray(cvs[0].time).astype(np.float32)     # (T,) seconds, t=0 at onset
+
+    # Split mice 50/50 into discover / validate (held-out animals).
+    perm = np.random.default_rng(sample_split_seed).permutation(len(paths))
+    if len(paths) < 2:
+        raise ValueError(
+            f"Fewer than 2 samples; got {len(paths)}: "
+            f"{[os.path.basename(p) for p in paths]}"
+        )
+    n_val = max(1, len(paths) // 2)
+    val_paths = [paths[i] for i in sorted(perm[n_val:])]
+    disc_paths = [paths[i] for i in sorted(perm[:n_val])]
+
+    def _mouse_units(path: str) -> list:
+        """CV sample-units for one mouse: n_folds of them for k_fold, one for exp_cond."""
+        if cv_type == "k_fold":
+            return [
+                build_cv_samples(
+                    path, cv_type="k_fold", held_out_fold=f, chop=chop,
+                    max_conditions=max_conditions, subsample_seed=sample_split_seed,
+                )
+                for f in range(_read_n_folds(path))
+            ]
+        return [
+            build_cv_samples(
+                path, cv_type="exp_cond", train_types=train_types, test_types=test_types,
+                chop=chop, max_conditions=max_conditions, subsample_seed=sample_split_seed,
+            )
+        ]
+
+    disc_units = [u for p in disc_paths for u in _mouse_units(p)]
+    val_units = [u for p in val_paths for u in _mouse_units(p)]
+    all_units = disc_units + val_units
+
+    # Enforce a shared condition count across sessions (dense arrays can't be ragged), and a
+    # shared time grid. Report per-mouse counts on failure.
+    per_mouse = {u.train.meta[0]["animal_id"]: (u.train.n, u.test.n) for u in all_units}
+    if len({n for n, _ in per_mouse.values()}) != 1 or len({n for _, n in per_mouse.values()}) != 1:
+        raise ValueError(
+            "all sessions must have the same n_stim (condition count); per-mouse "
+            f"(train_n_stim, test_n_stim): {per_mouse}. Curate sessions to one protocol."
+        )
+    time_axis = np.asarray(all_units[0].time).astype(np.float32)   # (T,) seconds, t=0 at onset
+    for u in all_units:
+        if u.time.shape != time_axis.shape or not np.allclose(u.time, time_axis, atol=1e-9):
+            raise ValueError("sessions do not share a common time grid after chop")
     T = time_axis.shape[0]
     anchor_starts, K = _rollout_anchors(T)
     A = len(anchor_starts)
 
-    # Discover/validate split over CONDITIONS (indices shared across folds).
-    if disc_types is not None and val_types is not None:
-        disc_set, val_set = set(disc_types), set(val_types)
-        overlap = disc_set & val_set
-        if overlap:
-            raise ValueError(f"disc_types and val_types overlap: {sorted(overlap)}")
-        unknown = (disc_set | val_set) - set(EXPERIMENT_TYPES)
-        if unknown:
-            raise ValueError(
-                f"unknown experiment type(s) {sorted(unknown)}; "
-                f"valid types are {list(EXPERIMENT_TYPES)}"
-            )
-        types = [m["experiment_type"] for m in cvs[0].meta]
-        disc_cond = np.array([i for i, t in enumerate(types) if t in disc_set], dtype=int)
-        val_cond = np.array([i for i, t in enumerate(types) if t in val_set], dtype=int)
-        dropped = sorted(set(types) - disc_set - val_set)
-        if dropped:
-            print(f"[wilson_cowan/real] dropping conditions of unassigned type(s): {dropped}")
-        if disc_cond.size == 0 or val_cond.size == 0:
-            raise ValueError(
-                f"type split leaves an empty side (discover={disc_cond.size}, "
-                f"validate={val_cond.size}); present types: {sorted(set(types))}"
-            )
-    else:
-        perm = np.random.default_rng(sample_split_seed).permutation(n_conditions)
-        disc_cond = np.sort(perm[: n_conditions // 2])
-        val_cond = np.sort(perm[n_conditions // 2:])
-
-    def _build(kind: str, cond_idx: np.ndarray) -> dict:
-        # Sample axis (axis 0) = CV folds; n_stim axis (axis 1) = conditions (shared param set).
+    def _build(units: list, split: str) -> dict:
+        # Sample axis (axis 0) = mouse × CV rotation; n_stim axis (axis 1) = that mouse's conditions.
         target_y = jnp.asarray(
-            np.stack([getattr(cv, kind)[cond_idx] for cv in cvs], axis=0)
-        )                                                            # (n_folds, C, T, 2)
-        stim = cvs[0].stim[cond_idx]                                 # (C, T, 2); same for all folds
-        stim = np.broadcast_to(stim[None], (n_folds,) + stim.shape)  # (n_folds, C, T, 2)
-        sE = jnp.asarray(stim[..., 0])                              # (n_folds, C, T)
+            np.stack([getattr(u, split).target_y for u in units], axis=0)
+        )                                                            # (n, C, T, 2)
+        stim = np.stack([getattr(u, split).stim for u in units], axis=0)  # (n, C, T, 2)
+        sE = jnp.asarray(stim[..., 0])                              # (n, C, T)
         sI = jnp.asarray(stim[..., 1])
         target_y_future = jnp.stack(
             [target_y[:, :, a + 1: a + 1 + K, :] for a in anchor_starts], axis=2
-        )                                                            # (n_folds, C, A, K, 2)
-        time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (n_folds, T))
+        )                                                            # (n, C, A, K, 2)
+        time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (len(units), T))
         return {
             "target_y": target_y,
             "stim_E": sE,
@@ -374,21 +406,22 @@ def _load_real(
             "time": time,
         }
 
-    X_disc_train = _build("target_y_train", disc_cond)
-    X_disc_test = _build("target_y_test", disc_cond)
-    X_val_train = _build("target_y_train", val_cond)
-    X_val_test = _build("target_y_test", val_cond)
+    X_disc_train = _build(disc_units, "train")
+    X_disc_test = _build(disc_units, "test")
+    X_val_train = _build(val_units, "train")
+    X_val_test = _build(val_units, "test")
 
-    # X_eval: a small, short subset of the discover samples (CV folds) for fingerprint dedup.
-    n_eval_actual = int(min(max(1, n_eval), n_folds))
+    # X_eval: a small, short subset of the discover samples for fingerprint dedup.
+    n_disc_samples = len(disc_units)
+    n_eval_actual = int(min(max(1, n_eval), n_disc_samples))
     T_eval_actual = int(min(T_eval, T))
     eval_pos = np.sort(
         np.random.default_rng(sample_split_seed + 1).choice(
-            n_folds, n_eval_actual, replace=False
+            n_disc_samples, n_eval_actual, replace=False
         )
     )
-    disc_train = np.asarray(X_disc_train["target_y"])          # (n_folds, C, T, 2)
-    disc_sE = np.asarray(X_disc_train["stim_E"])               # (n_folds, C, T)
+    disc_train = np.asarray(X_disc_train["target_y"])          # (n, C, T, 2)
+    disc_sE = np.asarray(X_disc_train["stim_E"])               # (n, C, T)
     disc_sI = np.asarray(X_disc_train["stim_I"])
     X_eval = {
         "target_y": jnp.asarray(disc_train[eval_pos, :, :T_eval_actual, :]),
@@ -398,15 +431,16 @@ def _load_real(
         "_eval_fingerprint_key_name": "pred_y_1step",
     }
 
-    split_by = "type" if (disc_types is not None and val_types is not None) else "random"
+    disc_ids = [os.path.basename(p) for p in disc_paths]
+    val_ids = [os.path.basename(p) for p in val_paths]
     print(
-        f"[wilson_cowan/real] {data_path}: n_conditions={n_conditions}, n_folds={n_folds}, "
-        f"T={T}, chop={chop} s; "
+        f"[wilson_cowan/real] {len(paths)} sessions, cv_type={cv_type}, T={T}, chop={chop} s; "
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
-        f"K={K}, anchors={A}; "
-        f"mouse-level params; samples=n_folds={n_folds} per side; "
-        f"discover/validate conditions (n_stim)={len(disc_cond)}/{len(val_cond)} "
-        f"({split_by} split); X_eval n={n_eval_actual}, T={T_eval_actual}"
+        f"K={K}, anchors={A}; mouse-level params; "
+        f"discover mice={disc_ids} ({len(disc_units)} samples) / "
+        f"validate mice={val_ids} ({len(val_units)} samples); "
+        f"n_stim train/test={all_units[0].train.n}/{all_units[0].test.n}; "
+        f"X_eval n={n_eval_actual}, T={T_eval_actual}"
     )
 
     return (

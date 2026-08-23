@@ -2,17 +2,12 @@ run:
   random_seed: 42
 
 io:
-  # One k-fold file (from simulate_data.save_kfold_splits); point at *_fold1/2 to
-  # run the other folds. Passed to load_data as `data_path`.
-  # Baseline-returning, hand-engineered slow-WCS data (15-param ground truth). The training
-  # objective is MSE-based and selected below in project_params (see data_loader/load_data.py +
-  # data_loader/losses/).
   # data_path: "/home/dabin/data/wc_simulations/wcs_manual_fold0.npz"
   data_path: "/home/dabin/data/wc_simulations/wcs_fold0.npz"
-  # Phase 4 real opto data: point data_path at a population_rates_*_s1.npz and load_data
-  # auto-detects it (chops to -50..+400 ms, 3-fold trial CV, one sample per condition).
-  # Select the held-out fold and cap conditions for a smoke run via project_params below.
-  # data_path: "/home/dabin/code/ichun_opto/results/population_rates_M150605_ICTP1_s1.npz"
+  # Phase 4 real opto data: point data_path at a directory (or glob) of population_rates_*_s1.npz
+  # sessions and load_data auto-detects them. Samples = mice (one param set per mouse); discover
+  # vs validate splits by mouse, so >=2 sessions are required and all must share a condition count.
+  # data_path: "/home/dabin/code/ichun_opto/results"
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
@@ -42,7 +37,7 @@ scoring:
     gradient_clip_norm: 5.0 # pre-Adam global-norm clip; needed for long lax.scan backprop
 
 project_params:
-  sample_split_seed: 42   # 50/50 discover/validate split over the 8 samples
+  sample_split_seed: 42   # seeds the discover/validate split (mice for real data; samples for synthetic)
   T_eval: 200             # short window per cell for the fingerprint dedup
   n_eval: 4               # number of discover cells used for the fingerprint
   # Training-objective settings. load_data republishes these to env so apply_model / loss_fn
@@ -51,12 +46,13 @@ project_params:
   rollout_k: 50           # autonomous-rollout horizon, in bins (objectives B/C/D)
   anchor_stride: 200      # bins between rollout anchors (fewer = faster, coarser coverage)
   dt_seconds: 0.001       # bin width for the time axis (Objective D response-feature windows)
-  # Real opto data only (ignored for synthetic wc*_fold*.npz). Mouse-level params: one param set
-  # per CV fold spans all of the mouse's conditions (conditions are the n_stim axis); the n_folds
-  # trial-CV rotations are the sample axis, assembled inside load_data.
+  # Real opto data only (ignored for synthetic wc*_fold*.npz). 
   chop_pre_ms: -50.0      # Phase 4 §0: keep bins with chop_pre_ms <= t*1000 < chop_post_ms
   chop_post_ms: 400.0
-  # max_conditions: 8     # cap #conditions (n_stim) for fast smoke runs; unset = all
-  # Discover/validate split by experiment type - types in neither list are dropped)
-  disc_types: ["single_E", "single_I", "paired_EE", "paired_IE"]
-  val_types: ["paired_II", "paired_EI"]
+  # max_conditions: 8     # cap #conditions (n_stim) per split for fast smoke runs; unset = all
+  # Train/test split within each mouse-sample:
+  #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)
+  #   exp_cond — fit on train_types conditions, test on held-out test_types conditions
+  cv_type: "k_fold"
+  train_types: ["single_E", "single_I", "paired_EE", "paired_IE"]  # exp_cond only
+  test_types: ["paired_II", "paired_EI"]                            # exp_cond only
