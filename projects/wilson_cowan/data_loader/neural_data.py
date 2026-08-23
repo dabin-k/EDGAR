@@ -38,6 +38,10 @@ EXPERIMENT_TYPES = (
 # divided by the mean over -0.5..-0.1 s, so baseline ~ 1 there.
 BASELINE_WINDOW = (-0.5, -0.1)
 
+# keeping bins with ``chop_pre_s <= time < chop_post_s``. Defaults −50 ms .. +400 ms.
+CHOP_PRE_S = -0.05
+CHOP_POST_S = 0.40
+
 _ANIMAL_RE = re.compile(r"population_rates_(.+)_s1\.npz$")
 
 
@@ -205,6 +209,157 @@ def load_neural_dataset(
         time=jnp.asarray(time),
         dt=dt,
         sample_weight=sample_weight,
+        meta=meta,
+    )
+
+
+@dataclass
+class CVSamples:
+    """3-fold-trial-CV samples from one real session, in the shape ``load_data`` consumes.
+
+    Each kept ``(experiment_type, condition)`` is one sample with its own stimulus (``n_stim=1``
+    at the EDGAR level). ``target_y_train``/``target_y_test``/``stim`` are ``[N, T, 2]`` (last
+    axis (E, I) for responses, (u_E, u_I) for the stimulus); ``time`` is the chopped ``[T]`` grid
+    (seconds, t=0 at onset). ``meta`` is a length-``N`` list aligned to axis 0.
+    """
+    target_y_train: np.ndarray   # [N, T, 2]  trial-weighted mean over the TRAIN folds
+    target_y_test: np.ndarray    # [N, T, 2]  the single held-out fold
+    stim: np.ndarray             # [N, T, 2]
+    time: np.ndarray             # [T]
+    held_out_fold: int
+    meta: list[dict]
+
+
+def build_cv_samples(
+    path: str,
+    held_out_fold: int = 0,
+    chop: tuple[float, float] = (CHOP_PRE_S, CHOP_POST_S),
+    max_conditions: int | None = None,
+    subsample_seed: int = 0,
+) -> CVSamples:
+    """Build 3-fold-trial-CV samples from one ``population_rates_*_s1.npz``.
+
+    The saved responses are ``(n_conditions, n_folds, 2, n_bins)``: each condition's trials were
+    deterministically partitioned into ``n_folds`` (=3) folds and trial-averaged per fold.
+    This function assembles ONE cross-validation split of that fold structure — load data runs 
+    all three held_out_fold values to create 3 (train, test) splits per session.
+
+    For that one split, each kept ``(experiment_type, condition)`` becomes one output sample
+    (index along axis 0 of the returned arrays), carrying:
+
+    * ``target_y_test``  = the mean trace of the single held-out fold ``held_out_fold``.
+    * ``target_y_train`` = the trial-count-weighted mean over the *other* folds (§4 convention:
+      weight each training fold by its ``n_trials_per_fold``). Same stimulus condition as the test
+      trace, but disjoint trials — so fitting on ``train`` and scoring on ``test`` measures
+      robustness to trial noise (§5 primary CV).
+
+    Every trace is first chopped (§0) to ``chop[0] <= time < chop[1]`` seconds around onset (t=0),
+    and the stimulus channels ``(u_E, u_I)`` are built per condition (§3) on the same grid.
+    Conditions with an empty fold (a 0 in ``n_trials_per_fold`` → an all-NaN fold, DATA.md) are
+    dropped, so both train and test are always well defined.
+
+    Args:
+        path: Path to one ``population_rates_<animal>_s1.npz`` session file (DATA.md layout).
+        held_out_fold: Which CV fold (0-based) is the held-out *test* fold; the remaining folds
+            form the *train* set. Rotate this over ``range(n_folds)`` for full 3-fold CV. Must be
+            in ``[0, n_folds)`` or a ``ValueError`` is raised.
+        chop: ``(pre_s, post_s)`` peri-stimulus window in seconds; bins with
+            ``pre_s <= time < post_s`` are kept. Defaults to ``(-0.05, 0.40)``.
+        max_conditions: If set, cap the number of kept conditions to this many (a deterministic
+            random subset), for fast smoke runs. Each condition is one sample here (single
+            held-out fold), so this equals the returned sample count ``N``. ``None`` keeps all.
+        subsample_seed: RNG seed for the ``max_conditions`` subsample (ignored when it is ``None``).
+
+    Returns:
+        A ``CVSamples`` for this single held-out fold, with:
+
+        * ``target_y_train`` ``[N, T, 2]`` — per-condition train trace, last axis (E, I).
+        * ``target_y_test``  ``[N, T, 2]`` — per-condition held-out-fold trace, last axis (E, I).
+        * ``stim``           ``[N, T, 2]`` — per-condition stimulus, last axis (u_E, u_I).
+        * ``time``           ``[T]``       — the chopped time grid (seconds, t=0 at onset).
+        * ``held_out_fold``  the ``held_out_fold`` used, echoed back.
+        * ``meta``           length-``N`` list of per-condition metadata dicts (animal, type,
+          condition index, held-out fold, ipi/dur, driven populations, trial count).
+
+        where ``N`` = number of kept conditions and ``T`` = number of bins in the chop window.
+
+    Raises:
+        ValueError: if ``held_out_fold`` is out of range, the chop window keeps no bins, or the
+            session has no condition with all folds non-empty.
+    """
+    animal_id = _animal_id(path)
+    d = np.load(path, allow_pickle=True)
+    lo, hi = chop
+
+    train_y: list[np.ndarray] = []
+    test_y: list[np.ndarray] = []
+    stim: list[np.ndarray] = []
+    meta: list[dict] = []
+    time_chopped: np.ndarray | None = None
+
+    for etype in EXPERIMENT_TYPES:
+        rkey = f"{etype}__responses"
+        if rkey not in d.files:
+            continue
+        resp = np.asarray(d[rkey])                       # (n_cond, n_folds, 2, n_bins)
+        time_axis = np.asarray(d[f"{etype}__time_axis"], dtype=np.float64)
+        conditions = json.loads(str(d[f"{etype}__conditions"]))
+
+        n_cond, n_folds, _, _ = resp.shape
+        if not 0 <= held_out_fold < n_folds:
+            raise ValueError(f"held_out_fold={held_out_fold} out of range for n_folds={n_folds}")
+        mask = (time_axis >= lo) & (time_axis < hi)      # (n_bins,)
+        if not mask.any():
+            raise ValueError(f"chop window {chop} keeps no bins of {etype} time axis")
+        train_folds = [f for f in range(n_folds) if f != held_out_fold]
+
+        for c in range(n_cond):
+            cond = conditions[c]
+            w = np.asarray(cond["n_trials_per_fold"], dtype=np.float64)
+            if np.any(w <= 0):
+                continue                                 # empty fold -> all-NaN; skip condition
+            wt = w[train_folds]
+            tr = np.tensordot(wt, resp[c, train_folds], axes=(0, 0)) / wt.sum()  # (2, n_bins)
+            te = resp[c, held_out_fold]                  # (2, n_bins)
+            if np.isnan(tr).any() or np.isnan(te).any():
+                continue
+
+            u = make_stimulus(time_axis, cond)           # (n_bins, 2)
+            train_y.append(tr[:, mask].T.astype(np.float32))   # (T, 2) = (E, I)
+            test_y.append(te[:, mask].T.astype(np.float32))
+            stim.append(u[mask].astype(np.float32))            # (T, 2) = (u_E, u_I)
+            if time_chopped is None:
+                time_chopped = time_axis[mask].astype(np.float32)
+            meta.append({
+                "animal_id": animal_id,
+                "experiment_type": etype,
+                "condition_index": c,
+                "held_out_fold": held_out_fold,
+                "ipi_ms": cond["ipi_ms"],
+                "dur_ms": cond["dur_ms"],
+                "first_pop": cond["first_pop"],
+                "second_pop": cond["second_pop"],
+                "n_trials": cond["n_trials"],
+            })
+
+    if not train_y:
+        raise ValueError(f"no valid (all-folds-nonempty) conditions in {path}")
+
+    if max_conditions is not None and len(train_y) > max_conditions:
+        keep = np.sort(np.random.default_rng(subsample_seed).choice(
+            len(train_y), int(max_conditions), replace=False))
+        train_y = [train_y[i] for i in keep]
+        test_y = [test_y[i] for i in keep]
+        stim = [stim[i] for i in keep]
+        meta = [meta[i] for i in keep]
+
+    assert time_chopped is not None
+    return CVSamples(
+        target_y_train=np.stack(train_y),
+        target_y_test=np.stack(test_y),
+        stim=np.stack(stim),
+        time=time_chopped,
+        held_out_fold=held_out_fold,
         meta=meta,
     )
 

@@ -9,6 +9,10 @@ io:
   # data_loader/losses/).
   # data_path: "/home/dabin/data/wc_simulations/wcs_manual_fold0.npz"
   data_path: "/home/dabin/data/wc_simulations/wcs_fold0.npz"
+  # Phase 4 real opto data: point data_path at a population_rates_*_s1.npz and load_data
+  # auto-detects it (chops to -50..+400 ms, 3-fold trial CV, one sample per condition).
+  # Select the held-out fold and cap conditions for a smoke run via project_params below.
+  # data_path: "/home/dabin/code/ichun_opto/results/population_rates_M150605_ICTP1_s1.npz"
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
@@ -47,3 +51,11 @@ project_params:
   rollout_k: 50           # autonomous-rollout horizon, in bins (objectives B/C/D)
   anchor_stride: 200      # bins between rollout anchors (fewer = faster, coarser coverage)
   dt_seconds: 0.001       # bin width for the time axis (Objective D response-feature windows)
+  # Real opto data only (ignored for synthetic wc*_fold*.npz). All n_folds trial-CV rotations
+  # are assembled inside load_data (each condition appears once per held-out fold).
+  chop_pre_ms: -50.0      # Phase 4 §0: keep bins with chop_pre_ms <= t*1000 < chop_post_ms
+  chop_post_ms: 400.0
+  # max_conditions: 8     # cap #conditions per fold for fast smoke runs; unset = all
+  # Discover/validate split by experiment type - types in neither list are dropped)
+  disc_types: ["single_E", "single_I", "paired_EE", "paired_IE"]
+  val_types: ["paired_II", "paired_EI"]
