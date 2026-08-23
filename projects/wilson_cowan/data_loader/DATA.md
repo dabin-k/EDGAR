@@ -2,7 +2,7 @@
 
 Saved E/I mean population firing rates , grouped by experiment type and stimulus condition.
 Produced by `regenerate_population_rates.py` from `data_loader.get_population_responses`.
-Live in `results/`.
+Live in `/home/dabin/code/ichun_opto/results/`.
 
 ## Naming convention
 - `population_rates_<animal_id>_s<session>.npz`
