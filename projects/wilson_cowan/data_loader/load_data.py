@@ -271,30 +271,37 @@ def _load_real(
 ):
     """Real opto-session path for ``load_data``: chop + full trial CV → EDGAR's contract.
 
-    Assembles full ``n_folds``-fold CV by calling ``neural_data.build_cv_samples`` once per
-    held-out fold and stacking the ``(train, test)`` sets, so each condition appears once per
-    rotation. Every ``(condition, held-out fold)`` is one EDGAR sample (``n_stim=1``, own
-    stimulus): the held-out fold is ``*_test``, the trial-weighted mean of the others is
-    ``*_train`` (params fit per sample on train, scored on test).
+    **Mouse-level parameters.** One parameter set is fit per EDGAR sample, and here a sample is
+    one CV rotation of the mouse, NOT a single condition: the ``n_stim`` axis holds all of the
+    mouse's conditions (on that discover/validate side), so the fitted parameters must reproduce
+    every stimulus condition at once with a single ``F_theta``. Only the equation form is shared
+    across samples; the numeric parameters are refit per CV fold.
+
+    Layout: ``build_cv_samples`` is called once per held-out fold and the folds become the sample
+    axis (axis 0, ``n = n_folds``). For fold ``f`` the sample's ``*_train`` is the trial-weighted
+    mean of the other folds and ``*_test`` is fold ``f`` — the 3-fold trial CV, one param set per
+    rotation. Conditions sit on axis 1 (``n_stim``), each with its own stimulus.
 
     Args:
         data_path: One ``population_rates_<animal>_s1.npz`` session file.
         sample_split_seed: Seeds the random condition split and the ``X_eval`` subset, and is
             passed to ``build_cv_samples`` as its subsample seed.
         T_eval: Max trajectory length of the (short) ``X_eval`` fingerprint traces.
-        n_eval: Number of discover samples used for the ``X_eval`` fingerprint.
+        n_eval: Number of discover samples (CV folds) used for the ``X_eval`` fingerprint.
         chop: ``(pre_s, post_s)`` peri-stimulus window kept, in seconds.
-        max_conditions: Cap on conditions kept per fold (deterministic subsample); ``None`` = all.
-        disc_types, val_types: If both given, assign each condition to discover/validate by its
-            ``experiment_type`` (types in neither list are dropped) — the §5 held-out-perturbation
-            -class test. If either is ``None``, split conditions 50/50 at random. The split is
-            always over *conditions*, so a condition's folds never straddle discover/validate.
+        max_conditions: Cap on conditions kept (deterministic subsample); ``None`` = all.
+        disc_types, val_types: If both given, the mouse's conditions are partitioned by
+            ``experiment_type`` into the discover vs validate ``n_stim`` sets (types in neither
+            list are dropped) — the §5 held-out-perturbation-class test (params fit on discover
+            conditions must, after a refit, also explain the held-out condition types). If either
+            is ``None``, conditions are split 50/50 at random.
 
     Returns:
         ``((X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval)`` — the EDGAR
         ``(discover, validate, X_eval)`` contract. Each ``X_*`` dict carries ``target_y``
-        ``[n, 1, T, 2]``, ``stim_E``/``stim_I`` ``[n, 1, T]``, ``target_y_future``
-        ``[n, 1, A, K, 2]`` and ``time`` ``[n, T]``; ``n = n_folds * (#conditions on that side)``.
+        ``[n_folds, C, T, 2]``, ``stim_E``/``stim_I`` ``[n_folds, C, T]``, ``target_y_future``
+        ``[n_folds, C, A, K, 2]`` and ``time`` ``[n_folds, T]``, where ``C`` = number of
+        conditions on that discover/validate side.
     """
     d = np.load(data_path, allow_pickle=True)
     if "n_folds" in d.files:
@@ -346,19 +353,19 @@ def _load_real(
         disc_cond = np.sort(perm[: n_conditions // 2])
         val_cond = np.sort(perm[n_conditions // 2:])
 
-    def _stack(attr: str, cond_idx: np.ndarray) -> np.ndarray:
-        """Stack one CVSamples array over all folds, restricted to ``cond_idx`` → (n_folds*n, …)."""
-        return np.concatenate([getattr(cv, attr)[cond_idx] for cv in cvs], axis=0)
-
     def _build(kind: str, cond_idx: np.ndarray) -> dict:
-        target_y = jnp.asarray(_stack(kind, cond_idx))[:, None, :, :]   # (n, 1, T, 2)
-        stim = _stack("stim", cond_idx)                                 # (n, T, 2)
-        sE = jnp.asarray(stim[:, None, :, 0])                           # (n, 1, T)
-        sI = jnp.asarray(stim[:, None, :, 1])
+        # Sample axis (axis 0) = CV folds; n_stim axis (axis 1) = conditions (shared param set).
+        target_y = jnp.asarray(
+            np.stack([getattr(cv, kind)[cond_idx] for cv in cvs], axis=0)
+        )                                                            # (n_folds, C, T, 2)
+        stim = cvs[0].stim[cond_idx]                                 # (C, T, 2); same for all folds
+        stim = np.broadcast_to(stim[None], (n_folds,) + stim.shape)  # (n_folds, C, T, 2)
+        sE = jnp.asarray(stim[..., 0])                              # (n_folds, C, T)
+        sI = jnp.asarray(stim[..., 1])
         target_y_future = jnp.stack(
             [target_y[:, :, a + 1: a + 1 + K, :] for a in anchor_starts], axis=2
-        )                                                              # (n, 1, A, K, 2)
-        time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (target_y.shape[0], T))
+        )                                                            # (n_folds, C, A, K, 2)
+        time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (n_folds, T))
         return {
             "target_y": target_y,
             "stim_E": sE,
@@ -372,18 +379,16 @@ def _load_real(
     X_val_train = _build("target_y_train", val_cond)
     X_val_test = _build("target_y_test", val_cond)
 
-    n_disc = X_disc_train["target_y"].shape[0]                 # = n_folds * len(disc_cond)
-
-    # X_eval: a small, short subset of the discover samples for fingerprint dedup.
-    n_eval_actual = int(min(max(1, n_eval), n_disc))
+    # X_eval: a small, short subset of the discover samples (CV folds) for fingerprint dedup.
+    n_eval_actual = int(min(max(1, n_eval), n_folds))
     T_eval_actual = int(min(T_eval, T))
     eval_pos = np.sort(
         np.random.default_rng(sample_split_seed + 1).choice(
-            n_disc, n_eval_actual, replace=False
+            n_folds, n_eval_actual, replace=False
         )
     )
-    disc_train = np.asarray(X_disc_train["target_y"])          # (n_disc, 1, T, 2)
-    disc_sE = np.asarray(X_disc_train["stim_E"])               # (n_disc, 1, T)
+    disc_train = np.asarray(X_disc_train["target_y"])          # (n_folds, C, T, 2)
+    disc_sE = np.asarray(X_disc_train["stim_E"])               # (n_folds, C, T)
     disc_sI = np.asarray(X_disc_train["stim_I"])
     X_eval = {
         "target_y": jnp.asarray(disc_train[eval_pos, :, :T_eval_actual, :]),
@@ -396,12 +401,12 @@ def _load_real(
     split_by = "type" if (disc_types is not None and val_types is not None) else "random"
     print(
         f"[wilson_cowan/real] {data_path}: n_conditions={n_conditions}, n_folds={n_folds}, "
-        f"n_stim=1, T={T}, chop={chop} s; "
+        f"T={T}, chop={chop} s; "
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
         f"K={K}, anchors={A}; "
-        f"discover/validate conditions={len(disc_cond)}/{len(val_cond)} ({split_by} split) "
-        f"→ samples={n_disc}/{X_val_train['target_y'].shape[0]}; "
-        f"X_eval n={n_eval_actual}, T={T_eval_actual}"
+        f"mouse-level params; samples=n_folds={n_folds} per side; "
+        f"discover/validate conditions (n_stim)={len(disc_cond)}/{len(val_cond)} "
+        f"({split_by} split); X_eval n={n_eval_actual}, T={T_eval_actual}"
     )
 
     return (
