@@ -18,8 +18,10 @@ and assembles``model_output`` dict that the loss functions consume.
 The four objectives live in ``losses/`` (one file each). ``loss_fn`` dispatches to one of them by
 the objective set in the project ``config.yaml`` (``project_params.objective``, ``A``/``B``/``C``/
 ``D``) so a benchmark run selects its objective without editing code. The rollout horizon/anchors
-and time-axis dt are likewise config-driven (``project_params.rollout_k`` / ``anchor_stride`` /
-``dt_seconds``); see the configuration note below for how they reach ``apply_model`` / ``loss_fn``.
+are likewise config-driven (``project_params.rollout_k`` / ``anchor_stride``); see the
+configuration note below for how they reach ``apply_model`` / ``loss_fn``. The time-axis dt is
+inferred from each session's stored ``time_axis`` on the real opto path; ``dt_seconds`` is only a
+bin->seconds convention for the synthetic files, which store no time axis.
 
 Cross-validation is over repeats: ``simulate_data.save_kfold_splits`` writes ``wc*_fold{f}.npz``
 files, each a repeat-averaged ``train_data`` / ``test_data`` pair (shape ``(n_samples, 2, T, 2)``);
@@ -29,10 +31,20 @@ from __future__ import annotations
 
 import glob as _glob
 import os
+import sys
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# ``uv run edgar`` console-script entry point. Put the repo root on the path so all invocations work.
+_this = globals().get("__file__")
+_repo_root = (
+    os.path.abspath(os.path.join(os.path.dirname(_this), "..", "..", ".."))  # <root>/projects/wilson_cowan/data_loader/
+    if _this else os.getcwd()  # exec'd: EDGAR is always launched from the repo root (relative config path)
+)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 from projects.wilson_cowan.data_loader.losses import (
     loss_A_one_step_tf,
@@ -71,7 +83,8 @@ except Exception:
 DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
 DEFAULT_ROLLOUT_K = 50        # autonomous-rollout horizon (bins)
 DEFAULT_ANCHOR_STRIDE = 200   # bins between rollout anchors
-DEFAULT_DT_SECONDS = 0.001    # bin width for the time axis
+DEFAULT_DT_SECONDS = 0.001    # SYNTHETIC-only fallback bin width; real data infers dt from time_axis
+DEFAULT_WARMUP_BINS = 0       # burn-in bins excluded from the loss (plan §6); 0 = no burn-in
 
 _OBJECTIVES = {
     "A": loss_A_one_step_tf,
@@ -93,23 +106,29 @@ def _rollout_anchors(T: int) -> tuple[np.ndarray, int]:
     This returns the anchor start indices and the horizon ``K`` (both driven by config
     ``project_params.rollout_k`` / ``anchor_stride`` via env, see the top-of-module note):
       * ``K``  = rollout length in bins = ``min(rollout_k, T-2)``.
-      * anchors = an evenly spaced grid ``0, anchor_stride, 2*anchor_stride, ...`` up to the last
-        start for which a full ``K``-step window still fits (``T-1-K``).
+      * anchors = an evenly spaced grid ``w, w+anchor_stride, w+2*anchor_stride, ...`` up to the
+        last start for which a full ``K``-step window still fits (``T-1-K``), where ``w`` is the
+        warmup offset ``EDGAR_WC_WARMUP_BINS``. Starting the grid at ``w`` keeps every
+        scored rollout window out of the burn-in region, so the burn-in is excluded from B/C/D
+        loss without any per-window masking (Objective A masks its own one-step window).
 
-    Example: ``T=8000``, ``rollout_k=50``, ``anchor_stride=200`` → ``K=50`` and anchors
-    ``[0, 200, 400, ..., 7800]`` (40 windows). The number of anchors ``A`` becomes the third axis
-    of ``pred_y_rollout`` ``[n, n_stim, A, K, 2]``. The grid is data-agnostic (depends only on the
-    length ``T``), so ``load_data`` and ``apply_model`` compute the identical set independently.
+    Example: ``T=8000``, ``rollout_k=50``, ``anchor_stride=200``, ``warmup_bins=0`` → ``K=50`` and
+    anchors ``[0, 200, 400, ..., 7800]`` (40 windows). The number of anchors ``A`` becomes the
+    third axis of ``pred_y_rollout`` ``[n, n_stim, A, K, 2]``. The grid is data-agnostic (depends
+    only on ``T`` and the env settings), so ``load_data`` and ``apply_model`` compute the identical
+    set independently.
     """
     rollout_k = int(os.environ.get("EDGAR_WC_ROLLOUT_K", DEFAULT_ROLLOUT_K))
     anchor_stride = int(os.environ.get("EDGAR_WC_ANCHOR_STRIDE", DEFAULT_ANCHOR_STRIDE))
+    warmup_bins = int(os.environ.get("EDGAR_WC_WARMUP_BINS", DEFAULT_WARMUP_BINS))
     K = int(min(rollout_k, max(1, T - 2)))
     last_start = T - 1 - K
     if last_start < 0:
         return np.array([0], dtype=int), K
-    starts = np.arange(0, last_start + 1, anchor_stride, dtype=int)
+    first_start = int(min(max(0, warmup_bins), last_start))   # clamp burn-in offset into range
+    starts = np.arange(first_start, last_start + 1, anchor_stride, dtype=int)
     if starts.size == 0:
-        starts = np.array([0], dtype=int)
+        starts = np.array([first_start], dtype=int)
     return starts, K
 
 
@@ -125,7 +144,8 @@ def load_data(
     rollout_k: int | None = None,
     anchor_stride: int | None = None,
     dt_seconds: float | None = None,
-    chop_pre_ms: float = -50.0,
+    warmup_steps_ms: float = 0.0,
+    chop_pre_ms: float = -150.0,
     chop_post_ms: float = 400.0,
     max_conditions: int | None = None,
     cv_type: str = "k_fold",
@@ -170,6 +190,7 @@ def load_data(
             sample_split_seed=sample_split_seed,
             T_eval=T_eval,
             n_eval=n_eval,
+            warmup_steps_ms=warmup_steps_ms,
             chop=(chop_pre_ms / 1000.0, chop_post_ms / 1000.0),
             max_conditions=max_conditions,
             cv_type=cv_type,
@@ -183,6 +204,16 @@ def load_data(
     stimuli = np.asarray(raw["stimuli"])         # (2, T, 2)  [stim_cond, T, (stim_E, stim_I)]
 
     n_samples, n_stim, T, _ = train_data.shape
+
+    # Synthetic wc*_fold*.npz files store NO time axis (unitless bins, H=1 in the generator), so
+    # here dt is a config-supplied bin->seconds convention (`dt_seconds`, default 1 ms), not
+    # inferred. The real opto path (`_load_real`) instead infers dt from each session's stored
+    # time_axis — see the dt handling there.
+    dt = float(os.environ.get("EDGAR_WC_DT", DEFAULT_DT_SECONDS))
+    # Warmup offset (bins) → env, so _rollout_anchors (here + in apply_model) skips the burn-in.
+    warmup_bins = int(round((warmup_steps_ms / 1000.0) / dt)) if warmup_steps_ms else 0
+    os.environ["EDGAR_WC_WARMUP_BINS"] = str(warmup_bins)
+
     anchor_starts, K = _rollout_anchors(T)
     A = len(anchor_starts)
 
@@ -191,7 +222,6 @@ def load_data(
     # recomputed under jit inside apply_model.
     stim_on = np.nonzero(np.abs(stimuli).sum(axis=(0, 2)) > 0)[0]
     onset_idx = int(stim_on[0]) if stim_on.size else 0
-    dt = float(os.environ.get("EDGAR_WC_DT", DEFAULT_DT_SECONDS))
     time_axis = ((np.arange(T) - onset_idx) * dt).astype(np.float32)
 
     # 50/50 sample split → discover / validate (params are fit per sample).
@@ -250,7 +280,7 @@ def load_data(
     print(
         f"[wilson_cowan] {data_path}: n_samples={n_samples}, n_stim={n_stim}, T={T}; "
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
-        f"K={K}, anchors={A}; "
+        f"K={K}, anchors={A}, warmup_bins={warmup_bins}; "
         f"discover/validate={len(disc_idx)}/{len(val_idx)} "
         f"(disc={disc_idx.tolist()}, val={val_idx.tolist()}); "
         f"X_eval n={n_eval_actual}, T={T_eval_actual}"
@@ -291,6 +321,7 @@ def _load_real(
     sample_split_seed: int,
     T_eval: int,
     n_eval: int,
+    warmup_steps_ms: float,
     chop: tuple[float, float],
     max_conditions: int | None,
     cv_type: str = "k_fold",
@@ -383,6 +414,11 @@ def _load_real(
         if u.time.shape != time_axis.shape or not np.allclose(u.time, time_axis, atol=1e-9):
             raise ValueError("sessions do not share a common time grid after chop")
     T = time_axis.shape[0]
+
+    dt_s = float(time_axis[1] - time_axis[0]) if T > 1 else DEFAULT_DT_SECONDS
+    warmup_bins = int(round((warmup_steps_ms / 1000.0) / dt_s)) if warmup_steps_ms else 0
+    os.environ["EDGAR_WC_WARMUP_BINS"] = str(warmup_bins)
+
     anchor_starts, K = _rollout_anchors(T)
     A = len(anchor_starts)
 
@@ -436,7 +472,8 @@ def _load_real(
     print(
         f"[wilson_cowan/real] {len(paths)} sessions, cv_type={cv_type}, T={T}, chop={chop} s; "
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
-        f"K={K}, anchors={A}; mouse-level params; "
+        f"K={K}, anchors={A}, warmup_bins={warmup_bins} (first anchor @ {anchor_starts[0]}); "
+        f"mouse-level params; "
         f"discover mice={disc_ids} ({len(disc_units)} samples) / "
         f"validate mice={val_ids} ({len(val_units)} samples); "
         f"n_stim train/test={all_units[0].train.n}/{all_units[0].test.n}; "

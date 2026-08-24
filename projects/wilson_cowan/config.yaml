@@ -3,11 +3,11 @@ run:
 
 io:
   # data_path: "/home/dabin/data/wc_simulations/wcs_manual_fold0.npz"
-  data_path: "/home/dabin/data/wc_simulations/wcs_fold0.npz"
+  # data_path: "/home/dabin/data/wc_simulations/wcs_fold0.npz"
   # Phase 4 real opto data: point data_path at a directory (or glob) of population_rates_*_s1.npz
   # sessions and load_data auto-detects them. Samples = mice (one param set per mouse); discover
   # vs validate splits by mouse, so >=2 sessions are required and all must share a condition count.
-  # data_path: "/home/dabin/code/ichun_opto/results"
+  data_path: "/home/dabin/code/ichun_opto/results"
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
@@ -23,8 +23,10 @@ llms:
   # model_llm: claude-code-headless
   # param_est_llm: claude-code-headless
   # jax_model_translator_llm: claude-code-headless
-  model_llm: gemini-3.6-flash
-  param_est_llm: gemini-3.6-flash
+  # model_llm: gemini-3.6-flash
+  # param_est_llm: gemini-3.6-flash
+  model_llm : gemini-2.5-flash-lite # while testing
+  param_est_llm: gemini-2.5-flash-lite # while testing
   jax_model_translator_llm: gemini-2.5-flash-lite
   max_tokens: 10000
 
@@ -45,10 +47,12 @@ project_params:
   objective: "A"          # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
   rollout_k: 50           # autonomous-rollout horizon, in bins (objectives B/C/D)
   anchor_stride: 200      # bins between rollout anchors (fewer = faster, coarser coverage)
-  dt_seconds: 0.001       # bin width for the time axis (Objective D response-feature windows)
-  # Real opto data only (ignored for synthetic wc*_fold*.npz). 
-  chop_pre_ms: -50.0      # Phase 4 §0: keep bins with chop_pre_ms <= t*1000 < chop_post_ms
+  dt_seconds: 0.001       # SYNTHETIC-only bin->seconds convention (synthetic npz has no time axis).
+  # Real opto data only (ignored for synthetic wc*_fold*.npz).
+  chop_pre_ms: -150.0     # Phase 4 §0: keep bins with chop_pre_ms <= t*1000 < chop_post_ms
   chop_post_ms: 400.0
+  # Loss not computed during warmup steps
+  warmup_steps_ms: 100.0
   # max_conditions: 8     # cap #conditions (n_stim) per split for fast smoke runs; unset = all
   # Train/test split within each mouse-sample:
   #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)

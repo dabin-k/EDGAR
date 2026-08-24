@@ -250,9 +250,9 @@ Because the folds are almost evenly split, equal fold weighting is also acceptab
 
 The saved files contain `n_folds = 3` and a deterministic trial-to-fold split.
 
-## Primary cross-validation
+Two CV flavors are implemented, dispatched by `cv_type`:
 
-Use three-fold CV:
+## `k_fold` — trial CV
 
 ```text
 train on 2 folds
@@ -260,58 +260,59 @@ test on 1 fold
 rotate test fold
 ```
 
-Within each CV run, the model sees the same stimulus conditions in train and test, but the target PSTHs come from disjoint sets of trials.
+The model sees the same stimulus conditions in train and test, but the target
+PSTHs come from disjoint sets of trials. Evaluates robustness to trial noise.
 
-This evaluates robustness to trial noise.
+## `exp_cond` — held-out-condition CV
 
-## Stronger secondary test: held-out perturbation conditions
+Train on `train_types`, test on a disjoint `test_types`; each split is an
+all-trials condition mean. Because the intended object is a dynamical law that
+should generalize across perturbations, this is more informative than another
+random time-point split.
 
-For paired-pulse experiments, also evaluate generalization to unseen IPIs.
+Do not assume every animal has the same set of conditions/IPIs.
 
-For example:
+## Mice as samples
 
-```text
-train on a subset of paired-condition IPIs
-test on held-out IPIs
-```
-
-Do this identically for all training objectives.
-
-This is scientifically more informative than another random time-point split because the intended object is a dynamical law that should generalize across perturbations.
-
-Do not assume every animal has the same set of IPIs.
+`load_data` resolves a dir/glob/file to multiple `population_rates_*_s1.npz`
+sessions and treats **each mouse as one sample** (one param set spanning all its
+conditions on the n_stim axis). Discover/validate split by animal (held-out
+mice), so ≥2 sessions are required. All sessions must share a condition count —
+dense arrays can't be ragged — else it raises. Within a mouse, train/test is set
+by `cv_type` (`k_fold`: per (mouse, fold); `exp_cond`: per mouse).
 
 ---
 
-# 6. Initial state / burn-in
+# 6. Initial state / burn-in — DONE
 
-The pre-stimulus interval is useful for synchronizing hidden state.
+The pre-stimulus interval is used to synchronize hidden state before scoring.
 
-Default strategy:
+Implemented strategy (config `project_params.warmup_steps_ms`, default 100 ms; chop
+`chop_pre_ms=-150`):
 
 ```text
-burn-in window: -0.5 s to 0 s
-scored response: 0 s onward
+burn-in window: -150 ms .. -50 ms   (the first warmup_steps_ms of the chopped window)
+scored response: -50 ms onward
 ```
 
 During burn-in:
 
-- clamp observed coordinates `E, I` to the measured data
-- allow hidden coordinates to evolve
-- do not include burn-in error in the headline loss unless needed
+- observed coordinates `E, I` are clamped to the measured data (teacher-forced pass), and the
+  autonomous rollouts are seeded from the inferred latent, so hidden coordinates evolve.
+- the burn-in error is **not** included in the loss.
 
-At `t = 0`, the model has a hidden state inferred from the pre-stimulus baseline.
+Mechanism (see `load_data`): `warmup_steps_ms` is converted to `warmup_bins` and republished to
+`EDGAR_WC_WARMUP_BINS`. Two consumers exclude the burn-in:
 
-This avoids learning a separate free initial latent vector for every trajectory.
+- **Objective A** (one-step): `loss_A_one_step_tf` drops the first `warmup_bins` one-step
+  predictions (`pred_y_1step[:, :, w:]` vs `target_y[:, :, 1+w:]`).
+- **Objectives B/C/D** (rollout): `_rollout_anchors` starts the anchor grid at `warmup_bins`, so
+  no scored rollout window lies in the burn-in region (no per-window masking needed). Objective D's
+  response-feature windows are already post-stimulus (`time>=0`), so the burn-in never enters them.
 
-Because the rates are baseline-normalised, a simple alternative for the very first implementation is:
-
-```python
-z_init[:2] = target_y[0]
-z_init[2:] = 0.0
-```
-
-followed by the pre-stimulus burn-in.
+The initial hidden state itself is a learnable `s0_*` param (GD-fit per sample); the burn-in lets
+that seed settle under the real pre-stimulus data before the first scored step. Because the rates
+are baseline-normalised, the observed coordinates start at the measured `target_y[0]`.
 
 ---
 
@@ -353,7 +354,7 @@ This gives a clean comparison while keeping exactly the same `F_theta`.
 
 # 8. Model-output interface
 
-Recommended common output:
+Common output emitted by `apply_model`:
 
 ```python
 model_output = {
@@ -362,6 +363,9 @@ model_output = {
 
     # autonomous predictions starting from selected anchors
     "pred_y_rollout": ...,     # [B, A, K, 2]
+
+    # one full post-stimulus autonomous rollout per sample (Objective D only)
+    "pred_y_full_rollout": ...,  # [B, T, 2]
 
     # latent state inferred using the observed trajectory / clamping
     "z_inferred": ...,         # [B, T, z_dim]
@@ -383,18 +387,25 @@ A = number of rollout anchor times
 K = rollout horizon in bins
 ```
 
-The corresponding loss input can be:
+`pred_y_full_rollout` is gated to Objective D (the others never read it, so a
+full-length autonomous backprop is skipped). Rollout windows start at evenly
+spaced `_rollout_anchors` (an `anchor_stride` grid); their count is the `A` axis.
+
+The corresponding loss input:
 
 ```python
 data = {
-    "target_y": ...,             # [B, T, 2]
+    "target_y": ...,             # [B, T, 2]  last axis = (E, I)
     "target_y_future": ...,      # [B, A, K, 2]
-    "u": ...,                    # [B, T, 2]
+    "stim_E": ...,               # [B, T]
+    "stim_I": ...,               # [B, T]
+    "time": ...,                 # [B, T]
     "sample_weight": ...,        # [B]
 }
 ```
 
-The training code, not the NPZ loader, can construct `target_y_future` windows from `target_y`.
+E/I are read off `target_y` (no separate `E`/`I` keys). `target_y_future`
+windows are built by the training code, not the NPZ loader.
 
 ---
 
@@ -716,7 +727,8 @@ They are:
 
 Therefore Poisson NLL is not the appropriate default likelihood.
 
-Use MSE for the primary benchmark.
+Use MSE for the primary benchmark. NLL has been removed from `apply_model`, all
+seed programs, and `prompts.yaml`; the four objectives are MSE-based.
 
 A Gaussian likelihood with fixed variance is effectively equivalent to scaled MSE.
 
@@ -986,7 +998,7 @@ scientifically relevant perturbation dynamics
 
 # 17. Implementation order
 
-## Phase 0 — data loader
+## Phase 0 — data loader — DONE
 
 1. Load every available `population_rates_*_s1.npz`.
 2. Enumerate available experiment types rather than assuming they exist.
@@ -1000,18 +1012,13 @@ scientifically relevant perturbation dynamics
    - `dt` matches `time_axis`
 7. Plot a few trajectories before training.
 
-## Phase 1 — model -- IGNORED, unclear what this section is supposed to achieve. 
+`F_theta` is the EDGAR-evolved transition `model(state, y_prev, params)`; the four
+objectives are its scoring loss (`apply_model` drives it teacher-forced and
+autonomously, `z = [E, I, *sorted(hidden)]`).
 
-1. Implement `z = [E, I, hidden...]`.
-2. Implement `F_theta(z, u)`.
-3. Implement Euler step.
-4. Implement clamped teacher-forced step.
-5. Implement autonomous step.
-6. Implement pre-stimulus burn-in.
+## Phase 2 — objectives — DONE
 
-## Phase 2 — objectives
-
-Implement in this order:
+Implemented in this order, one file each under `losses/`:
 
 ```text
 A → B → C → D
@@ -1029,13 +1036,13 @@ Do not implement all four before verifying that A and B learn sensible trajector
 
 ## Phase 4 — real neural data
 
-0. Chop timeseries data to only -50ms to 400ms around the first stimulus (at t=0ms)
-1. 3-fold trial CV
-2. train A–D
-----
+0. Chop to −150 ms .. +400 ms around first stimulus (t=0) — DONE (`chop_pre_ms/chop_post_ms`),
+   with a `warmup_steps_ms=100` burn-in (−150..−50 ms) excluded from the loss — DONE (§6).
+1. Trial CV (`k_fold`) + held-out-condition CV (`exp_cond`), mice as samples — DONE (§5).
+2. train A–D — DONE (real path verified to reduce held-out loss for A–D).
 3. run EDGAR
 4. evaluate held-out folds
-5. evaluate held-out IPIs where feasible
+5. evaluate held-out conditions/IPIs where feasible
 6. compare equation simplicity and dynamical fidelity
 
 ---
@@ -1065,6 +1072,17 @@ Evaluate out to:
 ```
 
 Keep the first pass small. Do not perform large hyperparameter sweeps before confirming that the training objectives produce meaningfully different EDGAR equations.
+
+## Config surface
+
+These live in `config.yaml` `project_params`: `objective` (A/B/C/D), `rollout_k`,
+`anchor_stride`, `dt_seconds`, `warmup_steps_ms` (burn-in excluded from the loss, §6),
+`chop_pre_ms` / `chop_post_ms` (real-data peri-stimulus window), `cv_type`
+(`k_fold`/`exp_cond`), `train_types` / `test_types`, and a dir/glob/file `data_path`.
+`load_data` republishes them to `EDGAR_WC_*` env vars so spawn workers inherit the static ints
+(`rollout_k`, `anchor_stride`, `warmup_bins` can't ride the traced data dict — `warmup_steps_ms`
+is converted to `EDGAR_WC_WARMUP_BINS` using the data's dt). Override per run with e.g.
+`--project_params.objective=B` or `--project_params.warmup_steps_ms=0`.
 
 ---
 
