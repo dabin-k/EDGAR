@@ -1,60 +1,104 @@
 import numpy as np
+import jax.numpy as jnp
 
-H = 1.0  # integration step (matches the data-generating grid; time is unitless, dt=1)
 
-
-def model(state, y_prev, params):
-    """Leaky E/I integrators with a latent inhibition variable. 
-
-    Each population relaxes toward a constant baseline drive with its own time
-    constant.
+# Wilson-Cowan model 
+def model(state_prev, y_prev, params):
+    ''' Dynamics update function with non-linearity 
 
     Equation : 
-        tau_E * dE/dt = -E + C_E + XE * stim_E - W_ES * S 
-        tau_I * dI/dt = -I + C_I + XI * stim_I - W_IS * S
-    where 
+        tau_E * dE/dt = -E + (E_max - E) * max(W_EE*E - W_EI*I + C_E + XE*stim_E, 0)
+        tau_I * dI/dt = -I + (I_max - I) * max(W_IE*E - W_II*I + C_I + XI*stim_I, 0)
+
         C_E and C_I : constant baseline drive to the excitatory and inhibitory populations, respectively,
         stim_E and stim_I : binary variable that is 1 when the stimulus is present and 0 otherwise,
-        XE and XI : transient input strengths to the excitatory and inhibitory populations, respectively,
-        W_ES and W_IS : weights of the slow inhibition S onto the excitatory and inhibitory populations, respectively.
 
-        state contains one latent variable S, which is a leaky integrator for the difference between the excitatory and inhibitory populations,
-        and follows the dynamics: 
-           tau_S * dS/dt = -S + (E - I)
-    """
-    E_prev = y_prev["E_prev"]
-    I_prev = y_prev["I_prev"]
-    stim_E_prev = y_prev["stim_E_prev"] # 0 if no stimulus, 1 if stimulus present
-    stim_I_prev = y_prev["stim_I_prev"] # 0 if no stimulus, 1 if stimulus present
+    Args:
+        state_prev: a dictionary representing the previous state of the system -- not used in this function, but included for compatibility with the EDGAR framework
+        y_prev: tuple of ((E_prev, I_prev), (stim_E_prev, stim_I_prev)) representing the previous state and previous stimuli
+        params: dictionary of model parameters
 
-    E_transient_input_strength = params["XE"] * stim_E_prev
-    I_transient_input_strength = params["XI"] * stim_I_prev
+    '''
+    E_max = params['E_max']
+    I_max = params['I_max']
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
 
-    S_prev = state["S"]  # latent variable
-    S_dot = (-S_prev + (E_prev - I_prev)) / params["tau_S"]
-    S = S_prev + H * S_dot
+    C_E = params['C_E'] # constant input to the excitatory population
+    C_I = params['C_I'] # constant input to the inhibitory population    
 
-    drive_E = params["C_E"] + E_transient_input_strength - params["W_ES"] * S_prev
-    drive_I = params["C_I"] + I_transient_input_strength - params["W_IS"] * S_prev
+    XE = params['XE'] # transient input to the excitatary population 
+    XI = params['XI'] # transient input to the inhibitory population
+    
+    ## p27 : inhibitory pulse is considered slower and is applied with an alpha function in the paper. For now use a boxcar function for both
+    # tau_alpha = parameters['tau_alpha'] # time constant for alpha function for inhibitory input
+    # XI_drive = XI * _alpha_drive(stimuli[:, 1], tau_alpha, h)
 
-    E_dot = (-E_prev + drive_E) / params["tau_E"]
-    I_dot = (-I_prev + drive_I) / params["tau_I"]
+    E_prev = y_prev['E_prev']
+    I_prev = y_prev['I_prev']
+    stim_E_prev = y_prev['stim_E_prev']
+    stim_I_prev = y_prev['stim_I_prev']
 
-    E = E_prev + H * E_dot
-    I = I_prev + H * I_dot
+    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E_prev), 0)
+    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I_prev), 0)
+    E = E_prev + E_dot/tau_E
+    I = I_prev + I_dot/tau_I
 
-    return {"S": S}, (E, I)
-
+    # hard code new state as empty state 
+    new_state = {}
+    return new_state, (E, I)
 
 model.DEFAULT_PARAMS = {
-    "tau_E": 60.0,
-    "tau_I": 120.0,
-    "C_E": 1.0,
-    "C_I": 1.0,
-    "XE": 3.0,
-    "XI": 1.0,
-    "tau_S": 300.0,
-    "W_ES": 0.5,
-    "W_IS": 0.5,
-    "s0_S": 1.0,  # learnable initial value of the latent S (GD-fit per sample; seeds the scan carry)
+    'tau_E' : 300.0, # time constant for excitatory population
+    'tau_I' : 300.0, # time constant for inhibitory population
+    'W_EE' : 0.01,  # weight of excitatory to excitatory connections
+    'W_IE' : 0.01,  # weight of inhibitory to excitatory connections
+    'W_EI' : 0.01,  # weight of excitatory to inhibitory connections
+    'W_II' : 0.01,  # weight of inhibitory to inhibitory connections
+    'E_max' : 20.0,
+    'I_max' : 20.0,
+    'C_E' : 0.001,
+    'C_I' : 0.001,
+    'XE' : 1.0,
+    'XI' : 1.0,
 }
+
+
+def model_jax(state_prev, y_prev, params):
+    '''JAX version of the Wilson-Cowan dynamics update (see `model`).'''
+    E_max = params['E_max']
+    I_max = params['I_max']
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+
+    C_E = params['C_E']  # constant input to the excitatory population
+    C_I = params['C_I']  # constant input to the inhibitory population
+
+    XE = params['XE']  # transient input to the excitatory population
+    XI = params['XI']  # transient input to the inhibitory population
+
+    E_prev = y_prev['E_prev']
+    I_prev = y_prev['I_prev']
+    stim_E_prev = y_prev['stim_E_prev']
+    stim_I_prev = y_prev['stim_I_prev']
+
+    E_dot = -E_prev + (E_max - E_prev) * jnp.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E_prev), 0)
+    E_dot /= tau_E
+    I_dot = -I_prev + (I_max - I_prev) * jnp.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I_prev), 0)
+    I_dot /= tau_I
+    E = E_prev + E_dot
+    I = I_prev + I_dot
+
+    new_state = {}
+    return new_state, (E, I)
+
+
+model_jax.DEFAULT_PARAMS = model.DEFAULT_PARAMS
