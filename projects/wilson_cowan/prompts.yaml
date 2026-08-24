@@ -15,17 +15,17 @@
 model:
   base: 'You are an AI scientist learning the dynamics of a **coupled neural
     circuit** with two interacting populations: an **excitatory** population E and
-    an **inhibitory** population I. Both are FULLY OBSERVED at every timestep. A
-    brief external **stimulus pulse** is delivered to the circuit early in each
-    trajectory (there are two stimulus conditions — a pulse to E or a pulse to
-    I).
-
+    an **inhibitory** population I. Your job is to discover a new model of the circuit
+    that predicts the next activity of both populations given their previous activity. 
+    
     At each step you are given the PREVIOUS observation (E[t-1], I[t-1]) together
     with the PREVIOUS stimulus, and you must predict the next observation
-    (E[t], I[t]). Your transition is used both teacher-forced (one-step-ahead) and rolled
-    out autonomously (feeding its own predictions back). Models are scored by a mean-squared
-    error between predicted and observed E/I, averaged over both stimulus conditions and over
-    time. Lower is better.
+    (E[t], I[t]). The stimulus is a transient pulse that drives either E or I, and your 
+    model should be able to describe the population activity under different experimental 
+    conditions - single pulse, paired pulse, pulses with different duration, and so on. 
+    
+    Models are scored by a mean-squared error between predicted and observed E/I, averaged 
+    over both stimulus conditions and over time. Lower is better.
 
     To do better your model must capture (a) how each population relaxes toward a
     baseline with its own time constant, (b) how the two populations DRIVE each
@@ -50,36 +50,33 @@ model:
         - `y_prev["stim_E_prev"]` — external drive to E at t-1 (1 during pulse, 0 otherwise) 
         - `y_prev["stim_I_prev"]` — external drive to I at t-1 (1 during pulse, 0 otherwise)
 
+    * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
+    derivative. Compute a rate of change and take one Euler step with the fixed
+    sampling interval, e.g.
+        E_dot = (-E_prev + drive_E) / tau_E
+        E = E_prev + E_dot
+    and return `E` (and likewise `I`).
+
     * OUTPUT: return the tuple `(new_state, mean)` where `mean` is the tuple
     `(E, I)` — your prediction of the next excitatory and inhibitory activity. Do
     NOT return a scalar, a single array, or a distribution: return `(E, I)` as two
     scalars.
 
-    * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
-    derivative. Compute a rate of change and take one Euler step with the fixed
-    sampling interval, e.g.
-        H = 1.0   # integration step (module-level constant; time is unitless, dt=1)
-        E_dot = (-E_prev + drive_E) / tau_E
-        E = E_prev + H * E_dot
-    and return `E` (and likewise `I`). `H` is the known sampling grid — keep it a
-    module-level constant, NOT a learnable parameter.
-
     * HIDDEN STATE IS OPTIONAL. Both E and I are observed, so you do NOT need a
     hidden variable. `state` is a dict; if you use none, return `new_state = {{}}`.
-    If a slow process helps (e.g. a slowly accumulating adaptation / slow
-    inhibition variable that is NOT directly observed), you MAY carry it: read
-    `state["S"]`, return `new_state` with the SAME keys, and declare its INITIAL
-    VALUE as an `s0_`-prefixed float in `DEFAULT_PARAMS`, e.g. `"s0_S": <float>`.
-    The framework strips the `s0_` prefix and seeds the scan carry with it, and the
-    initial value is OPTIMISED BY GRADIENT DESCENT per sample (so pick any sensible
-    starting value). E and I are observed, so do NOT add `s0_` for them — only for
-    hidden state keys.
-
-    * CRITICAL: everything is a scalar. Use pure scalar arithmetic — no
-    `np.arange`, no slicing, no dynamic shapes.
+    If a slow process helps (e.g. a slowly accumulating adaptation that is NOT directly 
+    observed), you MAY carry it: read it from `state`, and return `new_state` with the SAME keys.
 
     * Provide `model.DEFAULT_PARAMS`: a dict of sensible float initial values for
     EVERY key read from `params`. Values must be plain floats.
+
+    * MANDATORY `s0_` RULE — EVERY new latent variable REQUIRES a matching `s0_`
+    param. For EACH key `X` you read from `state` (i.e. every hidden variable your
+    model introduces), you MUST add a matching `"s0_X"` float to
+    `model.DEFAULT_PARAMS`. The name must match the state key EXACTLY:
+    `state["S"]` ⇒ `"s0_S"`, `state["F_E"]` ⇒ `"s0_F_E"`.
+    These are the learnable initial values of your hidden-state variables which will be optimised. 
+    The model will fail with infinite loss if you do not provide a matching `s0_` param for every hidden variable.
 
     '
   image_analysis_instructions: '**Image Analysis Instructions:**
@@ -127,7 +124,7 @@ parameter_estimator:
     * Import any packages you use (use numpy as np).
 
     * Function signature must be `def parameter_estimator(data):`. `data` is ONE
-    cell''s training dict; the two stimulus conditions are stacked along axis 0:
+    mouse''s training dict; the two stimulus conditions are stacked along axis 0:
         - `data["target_y"]`  — observed activity, `(n_stim, T, 2)`; the last axis is
           (E, I), so `E = data["target_y"][..., 0]` and `I = data["target_y"][..., 1]`,
           each `(n_stim, T)`.

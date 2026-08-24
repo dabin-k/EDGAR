@@ -88,7 +88,11 @@ model.DEFAULT_PARAMS = {
 
 
 def model_jax(state_prev, y_prev, params):
-    '''JAX version of the WCS dynamics update (see `model`).'''
+    """JAX mirror, differentiable under jax.grad + lax.scan.
+
+    Identical equations to the numpy `model` above with `jnp.maximum` in place of
+    `np.maximum`, so it drops straight into `apply_model` for gradient-descent fitting.
+    """
     E_max = params['E_max']
     I_max = params['I_max']
     W_EE = params['W_EE']

@@ -57,6 +57,6 @@ project_params:
   # Train/test split within each mouse-sample:
   #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)
   #   exp_cond — fit on train_types conditions, test on held-out test_types conditions
-  cv_type: "k_fold"
+  cv_type: "k_fold" # exp_cond | k_fold
   train_types: ["single_E", "single_I", "paired_EE", "paired_IE"]  # exp_cond only
   test_types: ["paired_II", "paired_EI"]                            # exp_cond only

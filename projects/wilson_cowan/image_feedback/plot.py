@@ -35,6 +35,45 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt   # noqa: E402
 
 
+def _stim_spans(stim_vec):
+    """Contiguous ``(start_bin, end_bin)`` runs where the stimulus is on.
+
+    Returns one interval per pulse, so a grey ``axvspan`` can mark both its timing
+    (run start) and its duration (run length). ``end`` is the last active bin + 1.
+    """
+    on = np.abs(np.asarray(stim_vec)) > 0
+    if not on.any():
+        return []
+    edges = np.diff(on.astype(int))
+    starts = list(np.where(edges == 1)[0] + 1)
+    ends = list(np.where(edges == -1)[0] + 1)
+    if on[0]:
+        starts = [0] + starts
+    if on[-1]:
+        ends = ends + [len(on)]
+    return list(zip(starts, ends))
+
+
+def _stim_label(stim_E, stim_I):
+    """Human-readable pulse description from the (visible) stimulus channels.
+
+    Names the pulses present in the plotted window by population, in onset order —
+    e.g. "Single E pulse", "Paired E then I pulse". A pulse whose onset falls outside
+    the chopped window is not counted (it isn't shown), so a long-interval paired
+    condition may read as a single pulse.
+    """
+    pulses = []  # (onset_bin, channel)
+    for ch, vec in (("E", stim_E), ("I", stim_I)):
+        for s0, _ in _stim_spans(vec):
+            pulses.append((s0, ch))
+    pulses.sort()
+    if not pulses:
+        return "No stimulus"
+    if len(pulses) == 1:
+        return f"Single {pulses[0][1]} pulse"
+    return "Paired " + " then ".join(p[1] for p in pulses) + " pulse"
+
+
 def plot_model_fits(
     data,
     programs,
@@ -134,34 +173,64 @@ def plot_model_fits(
     # residual-diagnostic grid.
     fig = plt.figure(figsize=(12, 12.5))
     gs = fig.add_gridspec(
-        3, 1, height_ratios=[1.0, 2.0, 2.0],
+        3, 1, height_ratios=[1.6, 2.0, 2.0],
         hspace=0.35, top=0.9, bottom=0.06, left=0.08, right=0.97,
     )
 
-    # ── Top strip: two random samples, each as an E (left) and I (right) panel ────
-    n_traj = min(2, n_show)
-    traj_rows = np.sort(np.random.default_rng().choice(n_show, n_traj, replace=False))
+    # ── Top strip: 4 randomly-chosen experiment conditions for one sample ─────────
+    # Each column is one stimulus condition, split into two rows: E on top, I below.
+    # In both, the data is a grey scatter and the model fit a dashed line (red for E,
+    # blue for I). Grey bands mark every laser pulse — position = onset, width =
+    # duration — read straight off the stim channels, so both are visible.
     T_full = true_E.shape[1]
+    rng = np.random.default_rng()
+    n_top = min(4, n_stim)
+    top_conds = np.sort(rng.choice(n_stim, n_top, replace=False))
+    s_top = int(show_idx[rng.integers(n_show)])   # one representative sample
+
+    top_data = {
+        "target_y": jnp.asarray(target_y[s_top:s_top + 1]),
+        "stim_E": jnp.asarray(np.asarray(data["stim_E"])[s_top:s_top + 1]),
+        "stim_I": jnp.asarray(np.asarray(data["stim_I"])[s_top:s_top + 1]),
+    }
+    top_params = {
+        k: jnp.asarray(np.asarray(v)[s_top:s_top + 1]) for k, v in params[best_j].items()
+    }
+    top_pred = np.asarray(
+        apply_model(model_fn, top_data, top_params)["pred_y_1step"]
+    )                                              # (1, n_stim, T-1, 2)
+    stim_E_top = np.asarray(data["stim_E"])[s_top]   # (n_stim, T)
+    stim_I_top = np.asarray(data["stim_I"])[s_top]
+
     T_show = T_full if window <= 0 else int(min(window, T_full))
     t_true = np.arange(T_show)
     t_pred = np.arange(1, T_show)
-    top_gs = gs[0].subgridspec(1, 2 * n_traj, wspace=0.35)
-    for k, r in enumerate(traj_rows):
-        for ci, (chan, obs, pred, mcolor) in enumerate([
-            ("E", true_E, pred_E, "tab:red"),
-            ("I", true_I, pred_I, "tab:blue"),
-        ]):
-            ax = fig.add_subplot(top_gs[0, 2 * k + ci])
-            ax.plot(t_true, obs[r, :T_show], color="0.35", lw=0.8, label="data")
-            ax.plot(t_pred, pred[r, :T_show - 1], color=mcolor, lw=0.8,
-                    alpha=0.9, label="model")
-            ax.set_title(f"{sample_labels[r]} — {chan}", fontsize=9)
-            ax.set_xlabel("time bin", fontsize=8)
+    top_gs = gs[0].subgridspec(2, n_top, wspace=0.28, hspace=0.15)
+    # (data array, model channel index, prediction colour) per row: E on top, I below.
+    row_spec = [(E, 0, "tab:red"), (I, 1, "tab:blue")]
+    for k, c in enumerate(top_conds):
+        for ri, (data_arr, ch, color) in enumerate(row_spec):
+            ax = fig.add_subplot(top_gs[ri, k])
+            for s0, s1 in _stim_spans(np.abs(stim_E_top[c]) + np.abs(stim_I_top[c])):
+                if s0 < T_show:
+                    ax.axvspan(s0, min(s1, T_show - 1), color="0.5", alpha=0.5, lw=0)
+            ax.scatter(t_true, data_arr[s_top, c, :T_show], color="0.35", s=6,
+                       alpha=0.2, edgecolors="none")
+            ax.plot(t_pred, top_pred[0, c, :T_show - 1, ch], color=color, lw=1.0, ls="--")
+            if ri == 0:
+                ax.set_title(_stim_label(stim_E_top[c], stim_I_top[c]), fontsize=9)
+                ax.tick_params(labelbottom=False)
+            else:
+                ax.set_xlabel("time bin", fontsize=8)
             ax.tick_params(labelsize=7)
-            if ci == 0:
-                ax.set_ylabel("activity", fontsize=8)
-            if k == 0 and ci == 0:
-                ax.legend(fontsize=6, loc="upper right")
+            if k == 0:
+                pop = "E" if ri == 0 else "I"
+                ax.set_ylabel(f"{pop} activity (sample {s_top})", fontsize=8)
+                handles = [
+                    plt.Line2D([], [], color="0.35", lw=0, marker="o", ms=3, label="data"),
+                    plt.Line2D([], [], color=color, lw=1.0, ls="--", label="model"),
+                ]
+                ax.legend(handles=handles, fontsize=5.5, loc="upper right")
             ax.set_ylim(-0.1, 3.5)
 
     # Colour the scatter by TIME so the hysteresis loops (rise vs fall of the pulse)
@@ -190,7 +259,7 @@ def plot_model_fits(
             ax = axes[ri, ci]
             ax.axhline(0.0, color="k", lw=0.6, alpha=0.4)
             sc = ax.scatter(X.ravel(), R.ravel(), c=tvec, cmap="turbo", norm=norm,
-                            s=5, alpha=0.35, edgecolors="none", rasterized=True)
+                            s=14, alpha=0.4, edgecolors="none", rasterized=True)
             corr = np.corrcoef(X.ravel(), R.ravel())[0, 1]   # pooled r (summary)
             diag = ri == ci
             ax.set_title(f"{rname} vs {xname}   (r={corr:+.2f})"

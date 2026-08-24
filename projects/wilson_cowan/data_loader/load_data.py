@@ -53,6 +53,7 @@ from projects.wilson_cowan.data_loader.losses import (
     loss_D_dynamics_aware,
 )
 from projects.wilson_cowan.data_loader.neural_data import (
+    DEFAULT_GLOB,
     EXPERIMENT_TYPES,
     _animal_id,
     build_cv_samples,
@@ -294,14 +295,14 @@ def load_data(
 
 
 def _resolve_mouse_paths(data_path: str) -> list[str]:
-    """Resolve ``data_path`` to a sorted list of real ``population_rates_*_s1.npz`` sessions.
+    """Resolve ``data_path`` to a sorted list of real ``population_rates_*_s1_trimmed.npz`` sessions.
 
     ``data_path`` may be a directory (globbed for the default pattern), a glob, or a single file.
     Only files whose basename starts with ``population_rates_`` are treated as real sessions, so a
     synthetic ``wc*_fold*.npz`` path resolves to ``[]`` and falls through to the synthetic loader.
     """
     if os.path.isdir(data_path):
-        matches = _glob.glob(os.path.join(data_path, "population_rates_*_s1.npz"))
+        matches = _glob.glob(os.path.join(data_path, DEFAULT_GLOB))
     else:
         matches = _glob.glob(data_path)
     return sorted(m for m in matches if os.path.basename(m).startswith("population_rates_"))
@@ -474,8 +475,8 @@ def _load_real(
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
         f"K={K}, anchors={A}, warmup_bins={warmup_bins} (first anchor @ {anchor_starts[0]}); "
         f"mouse-level params; "
-        f"discover mice={disc_ids} ({len(disc_units)} samples) / "
-        f"validate mice={val_ids} ({len(val_units)} samples); "
+        f"discover {len(disc_paths)} mice={disc_ids} -> {len(disc_units)} samples (mouse x fold) / "
+        f"validate {len(val_paths)} mice={val_ids} -> {len(val_units)} samples (mouse x fold); "
         f"n_stim train/test={all_units[0].train.n}/{all_units[0].test.n}; "
         f"X_eval n={n_eval_actual}, T={T_eval_actual}"
     )
