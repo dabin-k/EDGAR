@@ -292,18 +292,18 @@ def plot_simulation_results(
     all_I_lin_clean: np.ndarray, 
     all_E_wcs_clean: np.ndarray, 
     all_I_wcs_clean: np.ndarray,
-    all_E_lin_folded: np.ndarray,
-    all_I_lin_folded: np.ndarray,
-    all_E_wcs_folded: np.ndarray,
-    all_I_wcs_folded: np.ndarray,
+    all_E_lin_noisy: np.ndarray,
+    all_I_lin_noisy: np.ndarray,
+    all_E_wcs_noisy: np.ndarray,
+    all_I_wcs_noisy: np.ndarray,
     time: np.ndarray,
 ):
     """
     Generates and saves plots comparing Lin and WCS model simulations.
-    Overlays folded repeats on top of clean Lin and WCS data using faded lines (small alpha).
+    Overlays noisy repeats on top of clean Lin and WCS data using faded lines (small alpha).
     """
     n_interpulse_ts = len(interpulse_ts)
-    n_folds = all_E_lin_folded.shape[2]
+    n_repeats = all_E_lin_noisy.shape[2]
     for sample_idx in range(n_samples):
         for p_idx, p_type in enumerate(pulse_type_labels):
             for ip_idx, ip_t in enumerate(interpulse_ts):
@@ -312,23 +312,23 @@ def plot_simulation_results(
                 fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 5), tight_layout=True)
 
                 # 1. Plot Lin Model
-                # Plot folded noisy repeats first with small alpha so they are faded
-                for f in range(n_folds):
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
                     axes[0].plot(
                         time, 
-                        all_E_lin_folded[sample_idx, stim_condition_idx, f, :], 
+                        all_E_lin_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C0', 
                         alpha=0.3, 
                         linewidth=1.0,
-                        label='E(t) Folded' if f == 0 else ""
+                        label='E(t) Noisy' if r == 0 else ""
                     )
                     axes[0].plot(
                         time, 
-                        all_I_lin_folded[sample_idx, stim_condition_idx, f, :], 
+                        all_I_lin_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C1', 
                         alpha=0.3, 
                         linewidth=1.0,
-                        label='I(t) Folded' if f == 0 else ""
+                        label='I(t) Noisy' if r == 0 else ""
                     )
 
                 # Plot Clean/deterministic trace on top with a solid line
@@ -352,25 +352,25 @@ def plot_simulation_results(
                 axes[0].set_ylabel("Activity")
 
                 # 2. Plot WCS Model
-                # Plot folded noisy repeats first with small alpha so they are faded
-                for f in range(n_folds):
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
                     axes[1].plot(
                         time, 
-                        all_E_wcs_folded[sample_idx, stim_condition_idx, f, :], 
+                        all_E_wcs_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C0', 
                         alpha=0.3, 
                         linewidth=1.0,
                         linestyle='--',
-                        label='E(t) Folded' if f == 0 else ""
+                        label='E(t) Noisy' if r == 0 else ""
                     )
                     axes[1].plot(
                         time, 
-                        all_I_wcs_folded[sample_idx, stim_condition_idx, f, :], 
+                        all_I_wcs_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C1', 
                         alpha=0.3, 
                         linewidth=1.0,
                         linestyle='--',
-                        label='I(t) Folded' if f == 0 else ""
+                        label='I(t) Noisy' if r == 0 else ""
                     )
 
                 # Plot Clean/deterministic trace on top with a solid line
@@ -436,14 +436,13 @@ def generate_synthetic_dataset(
     stim_dur: int = 1, 
     interpulse_ts: tuple[int] = (5, 50, 100, 200), 
     noise_level: float = 0.05, 
-    n_folds: int = 5,
-    repeats_per_fold: int = 10,
+    n_repeats: int = 10,
     delta: float = 0.5, 
     max_retries: int = 10
 ):
     """
-    Generate synthetic datasets for Lins and WCS models, saving clean and folded variants,
-    and plotting comparison results with fold overlays.
+    Generate synthetic datasets for Lins and WCS models, saving clean and noisy (repeated) variants.
+    We generate (n_sample, n_stim_conditions, n_repeats, tmax) data
     """
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -453,25 +452,28 @@ def generate_synthetic_dataset(
     n_interpulse_ts = len(interpulse_ts)
     n_stim_conditions = n_pulse_types * n_interpulse_ts
 
-    # 1. Clean Dataset Arrays (nfolds=1)
+    # 1. Clean Dataset Arrays (nrepeats=1)
     all_E_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     all_I_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     all_E_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     all_I_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
 
-    # 2. Folded Dataset Arrays (nfolds=n_folds)
-    all_E_lin_folded = np.zeros((n_samples, n_stim_conditions, n_folds, tmax))
-    all_I_lin_folded = np.zeros((n_samples, n_stim_conditions, n_folds, tmax))
-    all_E_wcs_folded = np.zeros((n_samples, n_stim_conditions, n_folds, tmax))
-    all_I_wcs_folded = np.zeros((n_samples, n_stim_conditions, n_folds, tmax))
+    # 2. Noisy Dataset Arrays
+    all_E_lin_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
+    all_I_lin_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
+    all_E_wcs_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
+    all_I_wcs_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
     
     # E_design and I_design are now (n_stim_conditions, tmax)
     all_E_design = np.zeros((n_stim_conditions, tmax))
     all_I_design = np.zeros((n_stim_conditions, tmax))
     
-    # pulse_type is a fixed array of strings, independent of samples, repeats or interpulse times
-    formatted_pulse_type_labels = [f"paired_{pt}" for pt in pulse_type_labels]
-    all_pulse_type_array = np.array(formatted_pulse_type_labels)
+    # pulse_type is a fixed array of strings, independent of samples or repeats
+    all_pulse_type_list = []
+    for p_type in pulse_type_labels:
+        for ip_t in interpulse_ts:
+            all_pulse_type_list.append(f"paired_{p_type}")
+    all_pulse_type_array = np.array(all_pulse_type_list)
 
     time_array = np.arange(-stim_t, tmax - stim_t)  # Time values, with 0 corresponding to first stimulus onset
 
@@ -497,7 +499,9 @@ def generate_synthetic_dataset(
             temp_I_lin = np.zeros((n_stim_conditions, tmax))
             temp_E_wcs = np.zeros((n_stim_conditions, tmax))
             temp_I_wcs = np.zeros((n_stim_conditions, tmax))
-            
+
+            #Generate data for all stimulus conditions for this sample, if any of the conditions fail the stability check,
+            #  we retry all with new parameters
             sample_ok = True
             for p_idx, p_type in enumerate(pulse_type_labels):
                 for ip_idx, ip_t in enumerate(interpulse_ts):
@@ -508,7 +512,7 @@ def generate_synthetic_dataset(
                     stimI_design_current = all_I_design[stim_condition_idx, :]
                     stim_designs = (stimE_design_current, stimI_design_current)
                     
-                    Et_lin, It_lin = generate_model_data("lin", params_lin.copy(), tmax, stim_designs)
+                    Et_lin, It_lin = generate_model_data("lin", params_lin.copy(), tmax, stim_designs) #(tmax,) arrays
                     Et_wcs, It_wcs = generate_model_data("wcs", params_wcs.copy(), tmax, stim_designs)
                     
                     # Verification check: check if E and I of the lin data are within delta of 1 at tmax (index -1)
@@ -529,19 +533,6 @@ def generate_synthetic_dataset(
                 all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
                 all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
                 all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
-
-                # 2. Noisy trial-averaged fold values
-                for stim_cond_idx in range(n_stim_conditions):
-                    for f in range(n_folds):
-                        repeats_E_lin = [add_noise(temp_E_lin[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                        repeats_I_lin = [add_noise(temp_I_lin[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                        repeats_E_wcs = [add_noise(temp_E_wcs[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                        repeats_I_wcs = [add_noise(temp_I_wcs[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                        
-                        all_E_lin_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_E_lin, axis=0)
-                        all_I_lin_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_I_lin, axis=0)
-                        all_E_wcs_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_E_wcs, axis=0)
-                        all_I_wcs_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_I_wcs, axis=0)
                         
                 valid_sample = True
                 break
@@ -555,18 +546,12 @@ def generate_synthetic_dataset(
             all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
             all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
             
-            # Store fallback noisy folds
-            for stim_cond_idx in range(n_stim_conditions):
-                for f in range(n_folds):
-                    repeats_E_lin = [add_noise(temp_E_lin[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                    repeats_I_lin = [add_noise(temp_I_lin[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                    repeats_E_wcs = [add_noise(temp_E_wcs[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                    repeats_I_wcs = [add_noise(temp_I_wcs[stim_cond_idx, :], noise_level) for _ in range(repeats_per_fold)]
-                    
-                    all_E_lin_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_E_lin, axis=0)
-                    all_I_lin_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_I_lin, axis=0)
-                    all_E_wcs_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_E_wcs, axis=0)
-                    all_I_wcs_folded[sample_idx, stim_cond_idx, f, :] = np.mean(repeats_I_wcs, axis=0)
+    # Add noise to clean data
+    # Clean data shape (n_samples, n_stim_conditions, 1, tmax) -> Noisy data shape (n_samples, n_stim_conditions, n_repeats, tmax)
+    all_E_lin_noisy = add_noise(np.repeat(all_E_lin_clean, n_repeats, axis=2), noise_level)
+    all_I_lin_noisy = add_noise(np.repeat(all_I_lin_clean, n_repeats, axis=2), noise_level)
+    all_E_wcs_noisy = add_noise(np.repeat(all_E_wcs_clean, n_repeats, axis=2), noise_level)
+    all_I_wcs_noisy = add_noise(np.repeat(all_I_wcs_clean, n_repeats, axis=2), noise_level)
                     
     # Save clean datasets
     np.savez(
@@ -588,27 +573,27 @@ def generate_synthetic_dataset(
         time=time_array
     )
 
-    # Save folded datasets
+    # Save noisy datasets
     np.savez(
-        save_path / "synthetic_data_folded.npz",
-        E=all_E_lin_folded,
-        I=all_I_lin_folded,
+        save_path / "synthetic_data_noisy.npz",
+        E=all_E_lin_noisy,
+        I=all_I_lin_noisy,
         E_design=all_E_design,
         I_design=all_I_design,
         pulse_type=all_pulse_type_array,
         time=time_array
     )
     np.savez(
-        save_path / "synthetic_data_folded_wcs.npz",
-        E=all_E_wcs_folded,
-        I=all_I_wcs_folded,
+        save_path / "synthetic_data_noisy_wcs.npz",
+        E=all_E_wcs_noisy,
+        I=all_I_wcs_noisy,
         E_design=all_E_design,
         I_design=all_I_design,
         pulse_type=all_pulse_type_array,
         time=time_array
     )
 
-    # Call plotting function comparing Lin clean/folded and WCS clean/folded
+    # Call plotting function comparing Lin clean/noisy and WCS clean/noisy
     plot_simulation_results(
         save_path=save_path,
         n_samples=n_samples,
@@ -618,24 +603,24 @@ def generate_synthetic_dataset(
         all_I_lin_clean=all_I_lin_clean,
         all_E_wcs_clean=all_E_wcs_clean,
         all_I_wcs_clean=all_I_wcs_clean,
-        all_E_lin_folded=all_E_lin_folded,
-        all_I_lin_folded=all_I_lin_folded,
-        all_E_wcs_folded=all_E_wcs_folded,
-        all_I_wcs_folded=all_I_wcs_folded,
+        all_E_lin_noisy=all_E_lin_noisy,
+        all_I_lin_noisy=all_I_lin_noisy,
+        all_E_wcs_noisy=all_E_wcs_noisy,
+        all_I_wcs_noisy=all_I_wcs_noisy,
         time=time_array
     )
 
 if __name__ == "__main__":
-    generate_synthetic_dataset(
-        save_path=Path("synthetic"), 
-        n_samples=10, 
-        tmax=1510, 
-        stim_t=10, 
-        stim_dur=1, 
-        interpulse_ts=(5, 50, 100, 200), 
-        noise_level=0.2, 
-        n_folds=5,
-        repeats_per_fold=10,
-        delta=0.5, 
-        max_retries=10
-    )
+    for noise_level in [0.05, 0.1, 0.2, 0.3]:
+        generate_synthetic_dataset(
+            save_path=Path(f"synthetic/noise_{noise_level:.2f}"), #point load_data to relevant .npz file in synthetic folder after running this script
+            n_samples=10, 
+            tmax=1510, 
+            stim_t=10, 
+            stim_dur=1, 
+            interpulse_ts=(5, 50, 100, 200), 
+            noise_level=noise_level, 
+            n_repeats = 20,
+            delta=0.5, 
+            max_retries=10
+        )
