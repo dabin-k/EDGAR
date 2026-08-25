@@ -286,14 +286,13 @@ def generate_model_data(model_name: str, params: dict, tmax: int, stim_designs: 
 def plot_simulation_results(
     save_path: Path, 
     n_samples: int, 
-    tmax: int, 
     interpulse_ts: tuple[int], 
     pulse_type_labels: list[str],
     all_E_lin: np.ndarray, 
     all_I_lin: np.ndarray, 
     all_E_wcs: np.ndarray, 
     all_I_wcs: np.ndarray,
-    n_stim_conditions: int
+    time: np.ndarray,
 ):
     """
     Generates and saves plots comparing Lin and WCS model simulations.
@@ -310,16 +309,16 @@ def plot_simulation_results(
                 fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 5), tight_layout=True)
 
                 # Plot Lin Model
-                axes[0].plot(all_E_lin[sample_idx, stim_condition_idx, repeat_to_plot, :], label='E(t) Lin', color='C0')
-                axes[0].plot(all_I_lin[sample_idx, stim_condition_idx, repeat_to_plot, :], label='I(t) Lin', color='C1')
+                axes[0].plot(time, all_E_lin[sample_idx, stim_condition_idx, repeat_to_plot, :], label='E(t) Lin', color='C0')
+                axes[0].plot(time, all_I_lin[sample_idx, stim_condition_idx, repeat_to_plot, :], label='I(t) Lin', color='C1')
                 axes[0].set_title(f"Lin Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
                 axes[0].legend()
                 axes[0].set_xlabel("Time (ms)")
                 axes[0].set_ylabel("Activity")
 
                 # Plot WCS Model
-                axes[1].plot(all_E_wcs[sample_idx, stim_condition_idx, repeat_to_plot, :], label='E(t) WCS', color='C0', linestyle='--')
-                axes[1].plot(all_I_wcs[sample_idx, stim_condition_idx, repeat_to_plot, :], label='I(t) WCS', color='C1', linestyle='--')
+                axes[1].plot(time, all_E_wcs[sample_idx, stim_condition_idx, repeat_to_plot, :], label='E(t) WCS', color='C0', linestyle='--')
+                axes[1].plot(time, all_I_wcs[sample_idx, stim_condition_idx, repeat_to_plot, :], label='I(t) WCS', color='C1', linestyle='--')
                 axes[1].set_title(f"WCS Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
                 axes[1].legend()
                 axes[1].set_xlabel("Time (ms)")
@@ -372,7 +371,7 @@ def generate_synthetic_dataset(save_path: Path, n_samples: int = 10, tmax: int =
     Returns:
 
     """
-    noise = noise if isinstance(noise, (list, tuple)) else [noise] * n_samples
+    noise = noise if isinstance(noise, (list, tuple)) else [noise]
     n_repeats = len(noise)
     
     # Define stimulus types and total number of stimulus conditions
@@ -393,6 +392,8 @@ def generate_synthetic_dataset(save_path: Path, n_samples: int = 10, tmax: int =
     
     # pulse_type is a fixed array of strings, independent of samples, repeats or interpulse times
     all_pulse_type_array = np.array(pulse_type_labels)
+
+    time_array = np.arange(-stim_t, tmax - stim_t)  # Time values, with 0 corresponding to first stimulus onset
 
     # Generate E_design and I_design once, as they are independent of samples
     for p_idx, p_type in enumerate(pulse_type_labels):
@@ -483,7 +484,8 @@ def generate_synthetic_dataset(save_path: Path, n_samples: int = 10, tmax: int =
         I=all_I_lin,
         E_design=all_E_design,
         I_design=all_I_design,
-        pulse_type=all_pulse_type_array
+        pulse_type=all_pulse_type_array,
+        time=time_array
     )
     np.savez(
         save_path / "synthetic_data_wcs.npz",
@@ -491,22 +493,22 @@ def generate_synthetic_dataset(save_path: Path, n_samples: int = 10, tmax: int =
         I=all_I_wcs,
         E_design=all_E_design,
         I_design=all_I_design,
-        pulse_type=all_pulse_type_array
+        pulse_type=all_pulse_type_array,
+        time=time_array
     )
 
     # Call plotting function
     plot_simulation_results(
         save_path=save_path,
         n_samples=n_samples,
-        tmax=tmax,
         interpulse_ts=interpulse_ts,
         pulse_type_labels=pulse_type_labels,
         all_E_lin=all_E_lin,
         all_I_lin=all_I_lin,
         all_E_wcs=all_E_wcs,
         all_I_wcs=all_I_wcs,
-        n_stim_conditions=n_stim_conditions
+        time= time_array
     )
 
 if __name__ == "__main__":
-    generate_synthetic_dataset(save_path = Path("synthetic"), n_samples=10, tmax=1510, stim_t=10, stim_dur=1, interpulse_ts=(5, 50, 100, 200), noise=0.0, delta=0.1, max_retries=10)
+    generate_synthetic_dataset(save_path = Path("synthetic"), n_samples=10, tmax=1510, stim_t=10, stim_dur=1, interpulse_ts=(5, 50, 100, 200), noise=0.0, delta=0.5, max_retries=10)
