@@ -75,7 +75,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
 
     # tau_S is the slow-inhibition constant: search the slow regime (well above the
     # fast tau_E) up to a couple of trace lengths, log-spaced.
-    tau_S_grid = np.geomspace(5.0 * tau_E, max(20.0 * tau_E, 2.0 * T), 50)
+    tau_S_grid = np.geomspace(5.0 * tau_E, max(20.0 * tau_E, 2.0 * T), 10)
     a = (1.0 - 1.0 / tau_S_grid)[:, None]                       # (G, 1)
     b = (1.0 / tau_S_grid)[:, None]                             # (G, 1)
     S = np.empty((tau_S_grid.size, C, T))
