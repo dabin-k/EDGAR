@@ -1,10 +1,9 @@
-"""Objective D — rollout + perturbation-response signature loss (plan §10-D).
+"""Objective D — rollout + response featureloss (plan §10-D).
 
 Scientific question: does training directly on the macroscopic response features that
 distinguish Wilson-Cowan-like mechanisms improve equation discovery? We keep the autonomous
 rollout MSE (never a signature-only objective) and add a differentiable feature loss over a
-full post-stimulus autonomous rollout: suppression area, rebound amplitude, late baseline
-offset (see ``loss_common.response_features``).
+full post-stimulus autonomous rollout.
 """
 from __future__ import annotations
 

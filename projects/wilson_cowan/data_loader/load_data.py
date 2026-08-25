@@ -82,8 +82,8 @@ except Exception:
 # ── Objective + rollout configuration ──
 # Precedence: explicit config kwarg > env var > built-in default (below).
 DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
-DEFAULT_ROLLOUT_K = 50        # autonomous-rollout horizon (bins)
-DEFAULT_ANCHOR_STRIDE = 200   # bins between rollout anchors
+DEFAULT_ROLLOUT_K = 3        # autonomous-rollout horizon (bins)
+DEFAULT_ANCHOR_STRIDE = 1   # bins between rollout anchors
 DEFAULT_DT_SECONDS = 0.001    # SYNTHETIC-only fallback bin width; real data infers dt from time_axis
 DEFAULT_WARMUP_BINS = 0       # burn-in bins excluded from the loss (plan §6); 0 = no burn-in
 

@@ -44,22 +44,47 @@ def _masked_soft_max(x, mask, temperature=20.0, axis=-1):
     return jnp.sum(w * x, axis=axis)
 
 
+SUPPRESSION_THRESHOLD = 0.2
+
+# "Rebound-ish": amplitude above REBOUND_LOWER, softly gated to exclude pulse-driven peaks above
+# REBOUND_UPPER. The upper gate is a logistic (centred at REBOUND_UPPER, sharpness REBOUND_GATE_SHARPNESS)
+REBOUND_LOWER = 1.2
+REBOUND_UPPER = 2.0
+REBOUND_GATE_SHARPNESS = 10.0
+
+
+def _rebound_ish(x, mask):
+    """Mean over ``mask`` of amplitude-above-``REBOUND_LOWER``, soft-gated below ``REBOUND_UPPER``."""
+    upper_gate = jax.nn.sigmoid(REBOUND_GATE_SHARPNESS * (REBOUND_UPPER - x))
+    return _masked_mean(jax.nn.relu(x - REBOUND_LOWER) * upper_gate, mask, axis=-1)
+
+
 def response_features(y, time_axis):
-    """Macroscopic E-response signatures (plan §10-D), jit-safe.
+    """Macroscopic E/I response signatures (plan §10-D), jit-safe.
 
     ``y`` is ``[..., T, 2]`` (last axis (E, I)); ``time_axis`` is the shared ``[T]`` grid in
-    seconds. Returns ``[..., 3]``: (suppression_area, rebound, late_offset) on the E trace,
-    with baseline ~ 1. The plan's reference uses boolean mask indexing (``e[..., post]``),
-    which is not traceable under ``jit``/``grad`` because the post/late windows have a
-    data-dependent length; we use masked reductions with the same semantics instead.
+    seconds. Returns ``[..., 4]``: (E_suppression, E_rebound, I_suppression, I_rebound), on the
+    post-stimulus window (``t >= 0``), baseline ~ 1.
+
+    Revised 2026-08-25. The original ``late_offset`` was dropped (its ``t >= 0.8 s`` window is never
+    populated by the ``chop``, max ~0.4 s, so it was identically 0). ``rebound`` is no longer a
+    soft-max of the raw trace (which latched onto single-bin noise peaks); instead each channel
+    contributes two features:
+      * ``suppression`` — area driven below ``SUPPRESSION_THRESHOLD`` (deep silencing).
+      * ``rebound``     — amplitude above ``REBOUND_LOWER``, softly gated below ``REBOUND_UPPER``
+        so pulse-driven peaks are excluded (``_rebound_ish``). Amplitude-weighted (a stronger
+        rebound counts more), with a smooth logistic upper cutoff.
+
+    The plan's reference uses boolean mask indexing (``e[..., post]``), not traceable under
+    ``jit``/``grad`` (data-dependent window length); we use masked reductions with the same
+    semantics instead.
     """
     e = y[..., 0]                                    # [..., T]
-
+    i = y[..., 1]                                    # [..., T]
     post = time_axis >= 0.0                          # [T]
-    late = time_axis >= 0.8
 
-    suppression_area = _masked_mean(jax.nn.relu(1.0 - e), post, axis=-1)
-    rebound = _masked_soft_max(e, post, axis=-1)
-    late_offset = _masked_mean(e - 1.0, late, axis=-1)
-
-    return jnp.stack([suppression_area, rebound, late_offset], axis=-1)
+    E_suppression_area = _masked_mean(jax.nn.relu(SUPPRESSION_THRESHOLD - e), post, axis=-1)
+    E_rebound_ish = _rebound_ish(e, post)
+    I_suppression_area = _masked_mean(jax.nn.relu(SUPPRESSION_THRESHOLD - i), post, axis=-1)
+    I_rebound_ish = _rebound_ish(i, post)
+    return jnp.stack([E_suppression_area, E_rebound_ish, I_suppression_area, I_rebound_ish], axis=-1)  # [..., 4]
