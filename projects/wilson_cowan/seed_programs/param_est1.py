@@ -2,6 +2,19 @@ from __future__ import annotations
 from typing import Dict, Any
 import numpy as np
 
+
+def _smooth_hamming(x: np.ndarray, dt_ms: float, bandwidth_ms: float = 40.0) -> np.ndarray:
+    win = int(round(bandwidth_ms / dt_ms))
+    if win < 2:
+        return x
+    if win % 2 == 0:
+        win += 1
+    w = np.hamming(win)
+    w = w / w.sum()
+    norm = np.convolve(np.ones(x.shape[-1]), w, mode="same")
+    return np.apply_along_axis(lambda v: np.convolve(v, w, mode="same") / norm, -1, x)
+
+
 def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     """Estimate parameters of the Wilson-Cowan model from time series data.
 
@@ -23,10 +36,23 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     """
     # Ensure arrays are float64 for least-squares numerical stability
     target_y = np.asarray(data["target_y"], dtype=np.float64)  # (C, T, 2)
-    E = target_y[..., 0]        # (C, T)
-    I = target_y[..., 1]
     stim_E = np.asarray(data["stim_E"], dtype=np.float64)  # (C, T)
     stim_I = np.asarray(data["stim_I"], dtype=np.float64)
+
+    # Smooth the E and I rates first - otherwise we get a lot of noise in the decay rate estimates 
+    def _smooth_hamming(x: np.ndarray, dt_ms: float, bandwidth_ms: float = 40.0):
+        win = int(round(bandwidth_ms / dt_ms))
+        # keep smoothing zero-phase 
+        if win % 2 == 0:
+            win += 1
+        w = np.hamming(win)
+        w = w / w.sum()
+        norm = np.convolve(np.ones(x.shape[-1]), w, mode="same")
+        return np.apply_along_axis(lambda v: np.convolve(v, w, mode="same") / norm, -1, x)
+
+    # dt_ms = 1.0 in data - fine to hardcode 
+    E = _smooth_hamming(target_y[..., 0], dt_ms=1.0, bandwidth_ms=40.0)   # (C, T)
+    I = _smooth_hamming(target_y[..., 1], dt_ms=1.0, bandwidth_ms=40.0)
 
     # 1. Estimate E_max and I_max from observed peaks
     # This gives rather good estimates
