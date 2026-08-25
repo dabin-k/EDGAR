@@ -59,7 +59,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt                  # noqa: E402
 
 from load_data import apply_model, loss_fn, _rollout_anchors   # noqa: E402
-from neural_data import build_cv_samples                       # noqa: E402
+from neural_data import build_cv_samples, DEFAULT_GLOB         # noqa: E402
 import model2                                                  # noqa: E402
 import param_est2                                              # noqa: E402
 from edgar.scoring.scoring import _get_params, _optimize, _eval_loss  # noqa: E402
@@ -72,12 +72,17 @@ _LINKDIR = tempfile.TemporaryDirectory(prefix="wc_smoothing_")
 
 
 def _canonical_path(path: Path, w: int) -> str:
-    """build_cv_samples' `_animal_id` regex needs a `population_rates_<id>_s1_trimmed.npz`
-    basename; our files are `h{w}_population_rates_<id>_s1.npz`. Return a symlink with a
-    canonical name (animal_id carries the width so meta stays distinct)."""
+    """Symlink an ``h{w}_population_rates_<id>_s1.npz`` sweep file to a name that satisfies
+    ``build_cv_samples`` -> ``_animal_id``.
+
+    The sweep always reads the per-width ``h{w}_`` files (the point is to compare smoothing
+    widths); this only bridges the loader's filename check. We derive the required name from
+    ``neural_data.DEFAULT_GLOB`` (replacing its ``*`` with ``<id>w{w}``) so it auto-tracks any
+    change to that convention rather than hardcoding a prefix.
+    """
     m = re.match(r"^h\d+_population_rates_(.+)_s1\.npz$", path.name)
     animal = m.group(1) if m else path.stem
-    link = Path(_LINKDIR.name) / f"population_rates_{animal}w{w}_s1_trimmed.npz"
+    link = Path(_LINKDIR.name) / DEFAULT_GLOB.replace("*", f"{animal}w{w}")
     if not link.exists():
         link.symlink_to(path.resolve())
     return str(link)
@@ -223,12 +228,17 @@ def _plot_fit(fit, p_scalar, cv, time_axis, title, out_png):
             if row == 0 and col == 0:
                 ax.legend(fontsize=7, loc="upper right")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(PARAMS_DIR / f"h{w}_fit.png", dpi=110)
+    fig.savefig(out_png, dpi=110)
     plt.close(fig)
 
 
-def _plot_sweep(widths, fits, train_losses, test_losses):
-    """One panel per parameter: fitted value vs smoothing width; plus a loss panel."""
+def _plot_sweep(widths, fits, train_losses, test_losses, extra=None):
+    """One panel per parameter: fitted value vs smoothing width; plus a loss panel.
+
+    ``extra`` (optional) overlays a single point as a distinct cross across every panel —
+    e.g. a hybrid fit with a different init. Dict with keys ``width`` (x position),
+    ``params`` (name->value), ``train``, ``test``, ``label``.
+    """
     order = np.argsort(widths)
     ws = np.asarray(widths)[order]
     n = len(PARAM_KEYS) + 1
@@ -240,19 +250,30 @@ def _plot_sweep(widths, fits, train_losses, test_losses):
         vals = np.array([fits[w][k] for w in ws])
         ax = axes[i]
         ax.plot(ws, vals, "o-", color="tab:purple")
+        if extra is not None:
+            ax.plot(extra["width"], extra["params"][k], "X", color="tab:red",
+                    ms=11, mec="k", mew=0.6, zorder=5)
         ax.set_title(k, fontsize=9)
         ax.set_xlabel("Hamming width (ms)")
         ax.grid(alpha=0.3)
     ax = axes[len(PARAM_KEYS)]
     ax.plot(ws, [train_losses[w] for w in ws], "o-", label="train", color="tab:blue")
     ax.plot(ws, [test_losses[w] for w in ws], "s-", label="test", color="tab:orange")
+    if extra is not None:
+        ax.plot(extra["width"], extra["train"], "X", color="tab:red", ms=11,
+                mec="k", mew=0.6, zorder=5, label=extra.get("label", "hybrid"))
+        ax.plot(extra["width"], extra["test"], "X", color="tab:red", ms=11,
+                mec="k", mew=0.6, zorder=5)
     ax.set_title("loss", fontsize=9)
     ax.set_xlabel("Hamming width (ms)")
     ax.legend(fontsize=7)
     ax.grid(alpha=0.3)
     for j in range(len(PARAM_KEYS) + 1, len(axes)):
         axes[j].axis("off")
-    fig.suptitle("WCS fitted parameters vs Hamming-smoothing width", fontsize=12)
+    suptitle = "WCS fitted parameters vs Hamming-smoothing width"
+    if extra is not None:
+        suptitle += f"  (red X = {extra.get('label', 'hybrid')})"
+    fig.suptitle(suptitle, fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(PARAMS_DIR / "param_vs_smoothing.png", dpi=110)
     plt.close(fig)

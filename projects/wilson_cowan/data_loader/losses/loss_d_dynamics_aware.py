@@ -7,16 +7,26 @@ full post-stimulus autonomous rollout.
 """
 from __future__ import annotations
 
+import os
+
 from .loss_common import per_sample_mse, response_features
 
 
-def loss_D_dynamics_aware(model_output, data, lambda_dyn=1.0):
+def loss_D_dynamics_aware(model_output, data, lambda_dyn=None):
     """Rollout MSE + ``lambda_dyn`` × response-feature MSE, per sample ``(n,)``.
 
     Features are computed on one full autonomous rollout per sample
     (``pred_y_full_rollout`` ``[n, n_stim, T, 2]``) against the observed ``target_y``, on the
     shared time grid ``data["time"][0]``.
+
+    ``lambda_dyn`` weights the feature term. At its default of 1 the features are ~150x smaller
+    than the rollout MSE, so they barely steer the fit; pass a large value (or set
+    ``EDGAR_WC_LAMBDA_DYN``) to make the signatures actually shape the full rollout. An explicit
+    argument wins; otherwise the env var is read (default 1.0).
     """
+    if lambda_dyn is None:
+        lambda_dyn = float(os.environ.get("EDGAR_WC_LAMBDA_DYN", 1.0))
+
     rollout_loss = per_sample_mse(
         model_output["pred_y_rollout"], data["target_y_future"]
     )

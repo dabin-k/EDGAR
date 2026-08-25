@@ -295,17 +295,17 @@ def load_data(
 
 
 def _resolve_mouse_paths(data_path: str) -> list[str]:
-    """Resolve ``data_path`` to a sorted list of real ``population_rates_*_s1_trimmed.npz`` sessions.
+    """Resolve ``data_path`` to a sorted list of real ``smoothed_population_rates_*_s1_trimmed.npz`` sessions.
 
     ``data_path`` may be a directory (globbed for the default pattern), a glob, or a single file.
-    Only files whose basename starts with ``population_rates_`` are treated as real sessions, so a
+    Only files whose basename starts with ``smoothed_population_rates_`` are treated as real sessions, so a
     synthetic ``wc*_fold*.npz`` path resolves to ``[]`` and falls through to the synthetic loader.
     """
     if os.path.isdir(data_path):
         matches = _glob.glob(os.path.join(data_path, DEFAULT_GLOB))
     else:
         matches = _glob.glob(data_path)
-    return sorted(m for m in matches if os.path.basename(m).startswith("population_rates_"))
+    return sorted(m for m in matches if os.path.basename(m).startswith("smoothed_population_rates_"))
 
 
 def _read_n_folds(path: str) -> int:
