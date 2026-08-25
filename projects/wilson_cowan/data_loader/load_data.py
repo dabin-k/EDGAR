@@ -8,8 +8,8 @@ The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``)
       with a latent ``S`` carries ``{"S": ...}``).
     * ``mean`` is ``(E, I)`` — the predicted next observation.
     * ``params`` is a dict of learnable WC params. Hidden-state initial values are declared with
-      the ``s0_`` prefix; ``_split_params_s0`` strips them
-      into the scan carry and hands the rest to ``model``.
+      the ``s0_`` prefix; the per-objective ``_split_params_non_kalman`` / ``_split_params_kalman``
+      helpers strip them into the scan carry and hand the rest to ``model``.
 
 This module drives that single transition in the modes required by the four training
 objectives — teacher-forced one-step, autonomous rollout from anchors, and a full autonomous rollout — 
@@ -51,6 +51,8 @@ from projects.wilson_cowan.data_loader.losses import (
     loss_B_rollout,
     loss_C_latent_consistency,
     loss_D_dynamics_aware,
+    loss_E_kalman,
+    loss_F_rollout_nll,
 )
 from projects.wilson_cowan.data_loader.neural_data import (
     DEFAULT_GLOB,
@@ -73,6 +75,8 @@ try:
         "projects.wilson_cowan.data_loader.losses.loss_b_rollout",
         "projects.wilson_cowan.data_loader.losses.loss_c_latent_consistency",
         "projects.wilson_cowan.data_loader.losses.loss_d_dynamics_aware",
+        "projects.wilson_cowan.data_loader.losses.loss_e_kalman",
+        "projects.wilson_cowan.data_loader.losses.loss_f_rollout_nll",
     ):
         _cloudpickle.register_pickle_by_value(_importlib.import_module(_modname))
 except Exception:
@@ -81,7 +85,7 @@ except Exception:
 
 # ── Objective + rollout configuration ──
 # Precedence: explicit config kwarg > env var > built-in default (below).
-DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
+DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures | E Kalman NLL | F rollout NLL (deterministic SSM)
 DEFAULT_ROLLOUT_K = 3        # autonomous-rollout horizon (bins)
 DEFAULT_ANCHOR_STRIDE = 1   # bins between rollout anchors
 DEFAULT_DT_SECONDS = 0.001    # SYNTHETIC-only fallback bin width; real data infers dt from time_axis
@@ -92,7 +96,18 @@ _OBJECTIVES = {
     "B": loss_B_rollout,
     "C": loss_C_latent_consistency,
     "D": loss_D_dynamics_aware,
+    "E": loss_E_kalman,
+    "F": loss_F_rollout_nll,
 }
+
+# ── Objective-E (Kalman) noise/init hyperparameters ──
+# The EKF adds noise-model + initial-covariance params (``kf_log_*``, stored as LOG-VARIANCES for
+# positivity) on top of the WCS dynamics params. Their per-sample initial values come from
+# ``param_est`` (data-driven; see param_est2), and their fixed fallback lives WITH THE MODEL as
+# ``model.KF_DEFAULT_PARAMS`` — used when a key is absent from ``params`` (an evolved variant whose
+# param_est omits them, or a fixed-noise run). ``_kf_hyper`` resolves each key params -> model
+# default -> error. The initial E/I latent mean is seeded from the first observation; the initial
+# S mean reuses the existing ``s0_S`` dynamics param.
 
 
 def _rollout_anchors(T: int) -> tuple[np.ndarray, int]:
@@ -295,17 +310,17 @@ def load_data(
 
 
 def _resolve_mouse_paths(data_path: str) -> list[str]:
-    """Resolve ``data_path`` to a sorted list of real ``smoothed_population_rates_*_s1_trimmed.npz`` sessions.
+    """Resolve ``data_path`` to a sorted list of real ``population_rates_*_s1_trimmed.npz`` sessions.
 
     ``data_path`` may be a directory (globbed for the default pattern), a glob, or a single file.
-    Only files whose basename starts with ``smoothed_population_rates_`` are treated as real sessions, so a
+    Only files whose basename starts with ``population_rates_`` are treated as real sessions, so a
     synthetic ``wc*_fold*.npz`` path resolves to ``[]`` and falls through to the synthetic loader.
     """
     if os.path.isdir(data_path):
         matches = _glob.glob(os.path.join(data_path, DEFAULT_GLOB))
     else:
         matches = _glob.glob(data_path)
-    return sorted(m for m in matches if os.path.basename(m).startswith("smoothed_population_rates_"))
+    return sorted(m for m in matches if os.path.basename(m).startswith("population_rates_"))
 
 
 def _read_n_folds(path: str) -> int:
@@ -488,21 +503,43 @@ def _load_real(
     )
 
 
-def _split_params_s0(params: dict) -> tuple[dict, dict]:
-    """Strip ``s0_``-prefixed keys → initial hidden-state dict; rest is dyn params.
+def _split_params_non_kalman(params: dict) -> tuple[dict, dict]:
+    """Split params for objectives A–D → ``(init_state, dyn_params)``.
 
-    Only strips keys of the form ``s0_<name>`` with ``<name>`` non-empty. The initial values are
-    ordinary GD parameters (per sample); stripping them here routes them into the scan carry
-    instead of the model's ``params``.
+    ``s0_<name>`` keys (non-empty ``<name>``) are stripped into the initial hidden-state dict,
+    routing them into the scan carry instead of the model's ``params``. ``kf_*`` keys (objective-E
+    filter noise/init) are inert for A–D and dropped, so ``model_fn`` receives only dynamics params.
     """
     init_state = {}
     dyn_params = {}
     for k, v in params.items():
         if k.startswith("s0_") and len(k) > 3:
             init_state[k.removeprefix("s0_")] = v
+        elif k.startswith("kf_"):
+            continue
         else:
             dyn_params[k] = v
     return init_state, dyn_params
+
+
+def _split_params_kalman(params: dict) -> tuple[dict, dict, dict]:
+    """Split params for objective E → ``(init_state, dyn_params, kf_params)``.
+
+    Same ``s0_``/dynamics split as ``_split_params_non_kalman``, but the ``kf_*`` filter
+    noise/init params are collected into their own dict (consumed by ``_kf_hyper``) rather than
+    dropped — so the EKF gets its hyperparameters while ``model_fn`` still sees only dynamics params.
+    """
+    init_state = {}
+    dyn_params = {}
+    kf_params = {}
+    for k, v in params.items():
+        if k.startswith("s0_") and len(k) > 3:
+            init_state[k.removeprefix("s0_")] = v
+        elif k.startswith("kf_"):
+            kf_params[k] = v
+        else:
+            dyn_params[k] = v
+    return init_state, dyn_params, kf_params
 
 
 def _hidden_vec(state: dict, hkeys: list[str]):
@@ -532,7 +569,16 @@ def apply_model(model_fn, data, params):
     Always returns this dict (including for ``X_eval``); the engine's ``_eval_fingerprint`` reduces
     it to the dedup fingerprint array using the field named by ``X_eval["_eval_fingerprint_key_name"]``
     (``"pred_y_1step"`` here).
+
+    Objective E takes a **separate** state-space path (``_apply_model_kalman``): the transition is
+    driven from the filter's latent estimate rather than the data, and the returned dict carries
+    EKF innovations/covariances instead of the teacher-forced/rollout tensors. Objectives A–D are
+    unchanged.
     """
+    # Objective F uses the same apply_model as others but is not teacher forced - the loss function handles the rollout and nll computation.
+    if os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() == "E":
+        return _apply_model_kalman(model_fn, data, params)
+
     target_y = data["target_y"]   # (n, n_stim, T, 2), last axis = (E, I)
     E = target_y[..., 0]          # (n, n_stim, T)
     I = target_y[..., 1]
@@ -544,7 +590,7 @@ def apply_model(model_fn, data, params):
     want_full = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() == "D"
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
-        init_state, dyn_params = _split_params_s0(p)
+        init_state, dyn_params = _split_params_non_kalman(p)
         hkeys = sorted(init_state.keys())
 
         def per_stim(E_c, I_c, sE_c, sI_c):
@@ -635,13 +681,120 @@ def apply_model(model_fn, data, params):
     return jax.vmap(per_sample, in_axes=(0, 0, 0, 0, 0))(E, I, sE, sI, params)
 
 
+def _kf_hyper(kf_params: dict, kf_defaults: dict):
+    """Build the EKF noise/init matrices from the ``kf_*`` params (log-variances), with a fallback.
+
+    ``kf_params`` is the filter-param dict from ``_split_params_kalman``. Each ``kf_log_*`` value is
+    resolved ``kf_params`` -> ``kf_defaults`` (the model's ``KF_DEFAULT_PARAMS``) -> ``KeyError``.
+    So the noise params are learnable when ``param_est`` supplies them, fall back to the model's
+    fixed defaults otherwise, and fail loudly if neither the estimator nor the model declares them.
+    Returns ``(Q, Sigma, P0_diag)`` — Q is 3x3 (E,I,S process noise), Sigma is 2x2 (E,I observation
+    noise), P0_diag the length-3 initial-state variance vector.
+    """
+    def var(key):
+        if key in kf_params:
+            v = kf_params[key]
+        elif key in kf_defaults:
+            v = kf_defaults[key]
+        else:
+            raise KeyError(
+                f"objective E needs '{key}': supply it from param_est or declare it in the "
+                "model's KF_DEFAULT_PARAMS."
+            )
+        return jnp.exp(v)
+    Q = jnp.diag(jnp.stack([var("kf_log_q_E"), var("kf_log_q_I"), var("kf_log_q_S")]))
+    Sigma = jnp.diag(jnp.stack([var("kf_log_sig_E"), var("kf_log_sig_I")]))
+    P0_diag = jnp.stack([var("kf_log_p0_E"), var("kf_log_p0_I"), var("kf_log_p0_S")])
+    return Q, Sigma, P0_diag
+
+
+def _apply_model_kalman(model_fn, data, params):
+    """Objective-E state-space path: extended Kalman filter over ``z = [E, I, S]``.
+
+    The transition ``F_theta`` is the SAME evolved ``model_fn``, but fed the filter's latent mean
+    (never the observed E/I) — so the data enters only through the innovation, and persistence is
+    not an available solution. vmaps over samples then stim conditions like ``apply_model``.
+
+    Model / observation:
+        z_t   = F_theta(z_{t-1}, stim_{t-1}) + N(0, Q)     z = [E, I, S], S latent
+        y_obs = H z_t + N(0, Sigma)                        H = [[1,0,0],[0,1,0]]
+
+    Per (sample, condition) the EKF runs a predict/update recursion for t = 1..T-1 (matching the
+    ``pred_y_1step`` alignment of the other objectives: prediction of ``y[t]`` from step ``t-1``).
+    Initial mean seeds E/I from ``y_obs[0]`` and S from ``s0_S``; initial covariance is ``P0``.
+
+    Returned dict (shapes ``[n, n_stim, ...]``):
+        * ``innovations``     ``[…, T-1, 2]``     — r_t = y_obs[t] - H m_t^-  (loss reads this).
+        * ``innovation_cov``  ``[…, T-1, 2, 2]``  — S_t = H P_t^- H^T + Sigma (loss reads this).
+        * ``pred_y_1step``    ``[…, T-1, 2]``     — one-step predicted observation H m_t^- (BEFORE
+          seeing y_t): the one-step forecast, used for plotting + the eval fingerprint for now.
+        * ``filtered_z``      ``[…, T, z]``       — posterior latent mean m_t (denoised trajectory).
+    """
+    E = data["target_y"][..., 0]   # (n, n_stim, T)
+    I = data["target_y"][..., 1]
+    sE = data["stim_E"]
+    sI = data["stim_I"]
+
+    H = jnp.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])   # (2, 3) - no obs noise in S because S is not observed
+    I3 = jnp.eye(3)
+    kf_defaults = getattr(model_fn, "KF_DEFAULT_PARAMS", {})   # model-declared fixed-noise fallback
+
+    def per_sample(E_s, I_s, sE_s, sI_s, p):
+        init_state, dyn_params, kf_params = _split_params_kalman(p)   # init_state["S"] = s0_S
+        S0 = init_state["S"]
+        Q, Sigma, P0_diag = _kf_hyper(kf_params, kf_defaults)
+
+        def f_dyn(z, sE_p, sI_p):
+            """Latent transition mean: z=[E,I,S] -> z_next, wrapping the evolved model_fn."""
+            state = {"S": z[2]}
+            y_prev = {"E_prev": z[0], "I_prev": z[1],
+                      "stim_E_prev": sE_p, "stim_I_prev": sI_p}
+            new_state, mean = model_fn(state, y_prev, dyn_params)
+            E_n, I_n = mean
+            return jnp.stack([E_n, I_n, new_state["S"]])
+
+        def per_stim(E_c, I_c, sE_c, sI_c):
+            m0 = jnp.stack([E_c[0], I_c[0], S0])        # seed E/I from first obs, S from s0_S
+            P0 = jnp.diag(P0_diag)
+
+            def ekf_step(carry, inp):
+                m, P = carry
+                E_obs, I_obs, sE_p, sI_p = inp
+                # predict
+                m_pred = f_dyn(m, sE_p, sI_p)
+                A = jax.jacfwd(f_dyn)(m, sE_p, sI_p)    # (3, 3)
+                P_pred = A @ P @ A.T + Q
+                # update
+                y = jnp.stack([E_obs, I_obs])
+                r = y - H @ m_pred                      # innovation (2,)
+                S = H @ P_pred @ H.T + Sigma            # innovation cov (2, 2)
+                K = P_pred @ H.T @ jnp.linalg.inv(S)    # gain (3, 2)
+                m_new = m_pred + K @ r
+                P_new = (I3 - K @ H) @ P_pred
+                return (m_new, P_new), (r, S, H @ m_pred, m_new)
+
+            xs = (E_c[1:], I_c[1:], sE_c[:-1], sI_c[:-1])   # y_obs[t], stim[t-1] for t=1..T-1
+            _, (r_seq, S_seq, pred_seq, m_seq) = jax.lax.scan(ekf_step, (m0, P0), xs)
+            filtered_z = jnp.concatenate([m0[None, :], m_seq], axis=0)   # (T, 3)
+            return {
+                "innovations": r_seq,          # (T-1, 2)
+                "innovation_cov": S_seq,       # (T-1, 2, 2)
+                "pred_y_1step": pred_seq,      # (T-1, 2)
+                "filtered_z": filtered_z,      # (T, 3)
+            }
+
+        return jax.vmap(per_stim)(E_s, I_s, sE_s, sI_s)
+
+    return jax.vmap(per_sample, in_axes=(0, 0, 0, 0, 0))(E, I, sE, sI, params)
+
+
 def loss_fn(model_output, data):
-    """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C/D).
+    """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C/D/E/F).
 
     Returns ``(n,)``. The engine wraps this in ``jnp.mean(loss_fn(...))``; each objective returns
-    per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term. The
-    selection is read from the ``EDGAR_WC_OBJECTIVE`` env var that ``load_data`` republishes from
-    config.
+    per-sample losses (see ``losses/``). A–D are MSE-based; E is the EKF marginal NLL; F is the
+    free-running rollout Gaussian NLL of a deterministic state-space model. The selection is read
+    from the ``EDGAR_WC_OBJECTIVE`` env var that ``load_data`` republishes from config.
     """
     objective = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper()
     return _OBJECTIVES[objective](model_output, data)

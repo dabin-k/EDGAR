@@ -33,6 +33,9 @@ llms:
 scoring:
   timeout_s: 600.0
   param_penalty_weight: 0.01
+  # NOTE (deferred): objective E's model2_kalman folds s0_/kf_ params into DEFAULT_PARAMS,
+  # so its n_params (and this penalty) now include ~9 non-dynamics params. Revisit whether
+  # to exclude s0_/kf_ from the penalty count before comparing E against A–D on parsimony.
   gradient_descent:
     max_iter: 5000          # match the sibling state-space projects (was inheriting 1000)
     learning_rate: 0.001
@@ -44,8 +47,8 @@ project_params:
   n_eval: 4               # number of discover cells used for the fingerprint
   # Training-objective settings. load_data republishes these to env so apply_model / loss_fn
   # Override per run on the CLI, e.g. --project_params.objective=B.
-  objective: "B"          # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
-  rollout_k: 3           # autonomous-rollout horizon, in bins (objectives B/C/D)
+  objective: "B"          # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures | E Kalman state-space NLL | F rollout NLL (deterministic SSM)
+  rollout_k: 20           # autonomous-rollout horizon, in bins (objectives B/C/D,F)
   anchor_stride: 1      # bins between rollout anchors (fewer = faster, coarser coverage)
   dt_seconds: 0.001       # SYNTHETIC-only bin->seconds convention (synthetic npz has no time axis).
   # Real opto data only (ignored for synthetic wc*_fold*.npz).

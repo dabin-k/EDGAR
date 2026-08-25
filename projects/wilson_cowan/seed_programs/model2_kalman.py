@@ -1,23 +1,25 @@
 import numpy as np
 import jax.numpy as jnp
 
-# Wilson-Cowan model WITH slow inhibition (WCS) — OBJECTIVES A–D VARIANT (no Kalman params).
+# Wilson-Cowan model WITH slow inhibition (WCS) — OBJECTIVE-E (Kalman) VARIANT.
 #
-# For objective E (Kalman state-space NLL) use model2_kalman.py instead, which folds the
-# kf_* filter hyperparameters into DEFAULT_PARAMS. This file has no kf_ params, so its
-# n_params (and parsimony penalty) reflect the dynamics only. param_est2 still emits kf_
-# keys, but _split_params_non_kalman drops them before the transition, so A–D are unaffected.
+# Identical dynamics to model2.py, but the EKF noise/init hyperparameters (kf_*) are
+# folded straight into DEFAULT_PARAMS instead of living on a separate
+# `model.KF_DEFAULT_PARAMS` attribute. Reason: an attribute is lost on every LLM
+# offspring (compile_model rebuilds model_fn purely from the translated code string,
+# which never re-declares the attribute), whereas DEFAULT_PARAMS travels through the
+# ModelSchema.default_params field and survives translation. Folding the kf_ keys in
+# makes them exactly as durable as W_EE / s0_S.
 #
-# Adds a hidden slow-inhibition variable S (from TRN activity) that integrates the
-# inhibitory activity and feeds back onto both populations. Under teacher forcing
-# I_prev is the observed I, so S is recovered by carrying it through the scan;
-# apply_model seeds the carry from the learnable `s0_S` param below. E and I use the
-# PREVIOUS S (S_prev), matching the generator in data_loader/simulate_data.py.
+# Swap this file onto `model2.py` when running objective E; use the no-kf model2.py
+# for objectives A–D. load_data._split_params_kalman peels the kf_/s0_ keys back out,
+# and config's param_penalty_exclude_prefixes: ["s0_","kf_"] keeps them out of the
+# parsimony penalty.
 def model(state_prev, y_prev, params):
     """Network with hidden slow-inhibition dynamics update.
 
-    Equation : 
-        
+    Equation :
+
         tau_S * dS/dt = -S + I
 
         tau_E * dE/dt = -E_prev + (E_max - E_prev) * max(W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev, 0)
@@ -89,6 +91,19 @@ model.DEFAULT_PARAMS = {
     'XE': 1.0,
     'XI': 1.0,
     's0_S': 1.0,  # learnable initial value of the latent S (GD-fit; seeds the scan carry)
+    # Objective-E (EKF) noise/init hyperparameters, LOG-VARIANCES for positivity. Folded in here
+    # (not a separate attribute) so they survive LLM translation. param_est2 overwrites these with
+    # data-driven inits (obs noise from the smoothing residual, etc.); these are the durable
+    # fallback. Consumed by load_data._split_params_kalman -> _kf_hyper. Excluded from the
+    # parsimony penalty via config's param_penalty_exclude_prefixes.
+    'kf_log_q_E': float(np.log(1e-3)),    # process-noise variance on E
+    'kf_log_q_I': float(np.log(1e-3)),    # process-noise variance on I
+    'kf_log_q_S': float(np.log(1e-4)),    # process-noise variance on latent S
+    'kf_log_sig_E': float(np.log(1e-1)),  # observation-noise variance on E
+    'kf_log_sig_I': float(np.log(1e-1)),  # observation-noise variance on I
+    'kf_log_p0_E': float(np.log(1e-1)),   # initial-state variance on E
+    'kf_log_p0_I': float(np.log(1e-1)),   # initial-state variance on I
+    'kf_log_p0_S': float(np.log(1e-1)),   # initial-state variance on S
 }
 
 

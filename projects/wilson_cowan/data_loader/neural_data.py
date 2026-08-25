@@ -27,7 +27,7 @@ import jax.numpy as jnp
 
 
 DEFAULT_RESULTS_DIR = "/home/dabin/code/ichun_opto/results"
-DEFAULT_GLOB = "smoothed_population_rates_*_s1_trimmed.npz"
+DEFAULT_GLOB = "population_rates_*_s1_trimmed.npz"
 
 # All experiment types that may be present; a type is present iff its keys exist (§17.2).
 EXPERIMENT_TYPES = (
@@ -42,7 +42,7 @@ BASELINE_WINDOW = (-0.5, -0.1)
 CHOP_PRE_S = -0.05
 CHOP_POST_S = 0.40
 
-_ANIMAL_RE = re.compile(r"smoothed_population_rates_(.+)_s1_trimmed\.npz$")
+_ANIMAL_RE = re.compile(r"population_rates_(.+)_s1_trimmed\.npz$")
 
 
 @dataclass
@@ -303,7 +303,7 @@ def build_cv_samples(
     max_conditions: int | None = None,
     subsample_seed: int = 0,
 ) -> CVSamples:
-    """Build one ``(train, test)`` CV split from a ``smoothed_population_rates_*_s1_trimmed.npz`` session.
+    """Build one ``(train, test)`` CV split from a ``population_rates_*_s1_trimmed.npz`` session.
 
     Dispatches on ``cv_type`` to one of two train/test conventions (see ``CVSamples``):
 

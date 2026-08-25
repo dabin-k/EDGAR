@@ -34,6 +34,9 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         Estimated model parameters dictionary containing keys:
             'tau_E', 'tau_I', 'W_EE', 'W_EI', 'W_IE', 'W_II', 'E_max', 'I_max',
             'C_E', 'C_I', 'tau_S', 'W_ES', 'W_IS', 'XE', 'XI', 's0_S'
+        plus the objective-E EKF noise/init log-variances (inert for A-D; see load_data._kf_hyper):
+            'kf_log_q_E', 'kf_log_q_I', 'kf_log_q_S', 'kf_log_sig_E', 'kf_log_sig_I',
+            'kf_log_p0_E', 'kf_log_p0_I', 'kf_log_p0_S'
     """
     # Ensure arrays are float64 for least-squares numerical stability
     target_y = np.asarray(data["target_y"], dtype=np.float64)  # (C, T, 2)
@@ -51,11 +54,24 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         norm = np.convolve(np.ones(x.shape[-1]), w, mode="same")
         return np.apply_along_axis(lambda v: np.convolve(v, w, mode="same") / norm, -1, x)
 
-    # dt_ms = 1.0 in data - fine to hardcode 
-    E = _smooth_hamming(target_y[..., 0], dt_ms=1.0, bandwidth_ms=40.0)   # (C, T)
-    I = _smooth_hamming(target_y[..., 1], dt_ms=1.0, bandwidth_ms=40.0)
+    # dt_ms = 1.0 in data - fine to hardcode
+    E_raw = target_y[..., 0]   # (C, T)
+    I_raw = target_y[..., 1]
+    E = _smooth_hamming(E_raw, dt_ms=1.0, bandwidth_ms=40.0)   # (C, T)
+    I = _smooth_hamming(I_raw, dt_ms=1.0, bandwidth_ms=40.0)
 
     C, T = E.shape
+
+    # Objective-E (EKF) noise/init inits, as log-variances (consumed by load_data._kf_hyper).
+    # Observation noise = variance of the high-frequency residual the smoother removes: exactly the
+    # trial-to-trial wriggle the state-space model attributes to measurement noise. E/I initial
+    # covariance equals it (the filter seeds m0's E/I straight from y[0], so we know them to ~one
+    # observation). Process noise starts an order below obs noise (a "trust the dynamics" prior; the
+    # NLL logdet term + GD refine it), and latent S — the smoothest variable — gets 0.1x that again.
+    # p0_S (S seed uncertainty) is set below from the pre-stim I baseline spread.
+    _floor = 1e-8
+    sig_E = max(float(np.var(E_raw - E)), _floor)
+    sig_I = max(float(np.var(I_raw - I)), _floor)
 
     # 1. Estimate E_max and I_max from observed peaks
     max_obs_E = np.max(E)
@@ -86,6 +102,9 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     base_len = max(1, min(min(onsets), T))
     s0_per_cond = I[:, :base_len].mean(axis=1)                  # (C,)
     s0_S = float(s0_per_cond.mean())
+    # S is seeded from the pre-stim I baseline (a softer estimate than the direct y[0] seed of
+    # E/I), so its initial covariance is the spread of that baseline across conditions/time.
+    p0_S = max(float(np.var(I_raw[:, :base_len])), _floor)
 
     # tau_S is the slow-inhibition constant: search the slow regime (well above the
     # fast tau_E) up to a couple of trace lengths, log-spaced.
@@ -160,4 +179,13 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         'XE': float(XE),
         'XI': float(XI),
         's0_S': float(s0_S),
+        # Objective-E EKF noise/init (log-variances); inert for objectives A-D.
+        'kf_log_q_E': float(np.log(0.1 * sig_E)),
+        'kf_log_q_I': float(np.log(0.1 * sig_I)),
+        'kf_log_q_S': float(np.log(0.01 * sig_I)),
+        'kf_log_sig_E': float(np.log(sig_E)),
+        'kf_log_sig_I': float(np.log(sig_I)),
+        'kf_log_p0_E': float(np.log(sig_E)),
+        'kf_log_p0_I': float(np.log(sig_I)),
+        'kf_log_p0_S': float(np.log(p0_S)),
     }

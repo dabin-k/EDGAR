@@ -8,10 +8,14 @@ from .loss_a_one_step import loss_A_one_step_tf
 from .loss_b_rollout import loss_B_rollout
 from .loss_c_latent_consistency import loss_C_latent_consistency
 from .loss_d_dynamics_aware import loss_D_dynamics_aware
+from .loss_e_kalman import loss_E_kalman
+from .loss_f_rollout_nll import loss_F_rollout_nll
 
 __all__ = [
     "loss_A_one_step_tf",
     "loss_B_rollout",
     "loss_C_latent_consistency",
     "loss_D_dynamics_aware",
+    "loss_E_kalman",
+    "loss_F_rollout_nll",
 ]
