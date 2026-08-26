@@ -2,25 +2,29 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
+import json
 
 def get_params(random_seed: int = 42):
     rng = np.random.default_rng(random_seed)
     #Model parameters
-    params_wcs = {
-    'tau_E' : rng.normal(6.0, 0.1), # time constant for excitatory population
-    'tau_I' : rng.normal(5.0, 0.1), # time constant for inhibitory population
+    params_wc = {
+        'tau_E' : rng.normal(6.0, 0.1), # time constant for excitatory population
+        'tau_I' : rng.normal(5.0, 0.1), # time constant for inhibitory population
+        'W_EE' : rng.normal(0.2, 0.01),  # weight of excitatory to excitatory connections
+        'W_IE' : rng.normal(0.2, 0.01),  # weight of inhibitory to excitatory connections
+        'W_EI' : rng.normal(0.1, 0.005),  # weight of excitatory to inhibitory connections
+        'W_II' : rng.normal(0.15, 0.005),  # weight of inhibitory to inhibitory connections
+        'E_max' : 10.0,
+        'I_max' : 10.0,
+        'XE' : rng.normal(5, 0.1),
+        'XI' : rng.normal(1, 0.1)
+        }
+    params_wcs = params_wc.copy()
+    params_wcs.update({
     'tau_S' : rng.normal(100, 2), # time constant for slow inhibition
-    'W_EE' : rng.normal(0.2, 0.01),  # weight of excitatory to excitatory connections
-    'W_IE' : rng.normal(0.2, 0.01),  # weight of inhibitory to excitatory connections
-    'W_EI' : rng.normal(0.1, 0.005),  # weight of excitatory to inhibitory connections
-    'W_II' : rng.normal(0.15, 0.005),  # weight of inhibitory to inhibitory connections
     'W_ES' : rng.normal(0.05, 0.005),  # weight of slow inhibition to excitatory connections
     'W_IS' : rng.normal(0.05, 0.005),  # weight of slow inhibition to inhibitory connections
-    'E_max' : 10.0,
-    'I_max' : 10.0,
-    'XE' : rng.normal(5, 0.1),
-    'XI' : rng.normal(1, 0.1)
-    }
+    })
     params_lin = params_wcs.copy()
     params_lin.update({
     'tau_R' : rng.normal(50, 5.0), # time constant for R population
@@ -34,7 +38,43 @@ def get_params(random_seed: int = 42):
     'W_RL' : rng.normal(0.08, 0.01),  # weight of L to R connections
     'L_max' : 2.0,
     })
-    return params_wcs, params_lin
+    return params_wc, params_wcs, params_lin
+
+def WC_model(state_prev, y_prev, params):
+    """
+        Wilson-Cowan model t -> t+1 update function.
+        Returns new state and new output (E, I) at time t+1, given state, previous y at time t and params.
+    """
+    #Parameters
+    E_max = params['E_max']
+    I_max = params['I_max']
+
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+
+    C_E = params['C_E'] # constant input to the excitatory population
+    C_I = params['C_I'] # constant input to the inhibitory population    
+
+    XE = params['XE'] # transient input to the excitatory population 
+    XI = params['XI'] # transient input to the inhibitory population
+
+    #E, I and stims
+    E = y_prev['E']
+    I = y_prev['I']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
+
+    #Update equations
+    E_upd = E + 1/tau_E *(-E + (E_max-E)*np.maximum((W_EE*E - W_EI*I + C_E + XE*stim_E), 0))
+    I_upd = I + 1/tau_I *(-I + (I_max-I)*np.maximum((W_IE*E - W_II*I + C_I + XI*stim_I), 0))
+
+    return {}, (E_upd, I_upd)
+
 
 def WCS_model(state_prev, y_prev, params):
     """
@@ -144,6 +184,27 @@ def lin_model(state_prev, y_prev, params):
 
     return new_state, (E_upd, I_upd)
 
+def init_WC_steadystate(params: dict, E_0: float = 1.0, I_0: float = 1.0) -> tuple[dict, tuple[float, float], dict]:
+    """Initialize the WC model for E, I steady-state values.
+
+    Args:
+        params: Dictionary of model parameters.
+        E_0: Target steady-state value for the excitatory population.
+        I_0: Target steady-state value for the inhibitory population.
+
+    Returns:
+        tuple: (initial_state, initial_y, updated_params)
+            - initial_state (dict): Initial state (empty for WC).
+            - initial_y (tuple): Target steady state values (E_0, I_0).
+            - updated_params (dict): Parameters with C_E, C_I set.
+    """
+    E_max, I_max, W_EE, W_EI, W_IE, W_II = params['E_max'], params['I_max'], params['W_EE'], params['W_EI'], params['W_IE'], params['W_II']
+    # Choose C_E, C_I to satisfy steady-state equations
+    params['C_E'] = E_0 / (E_max - E_0) - W_EE * E_0 + W_EI * I_0
+    params['C_I'] = I_0 / (I_max - I_0) - W_IE * E_0 + W_II * I_0
+
+    return {}, (E_0, I_0), params
+
 def init_WCS_steadystate(params: dict, E_0: float = 1.0, I_0: float = 1.0) -> tuple[dict, tuple[float, float], dict]:
     """Initialize the WCS model for E, I, S steady-state values.
 
@@ -247,7 +308,7 @@ def generate_model_data(model_name: str, params: dict, tmax: int, stim_designs: 
     Generate synthetic data for the specified model.
 
     Args:
-        model_name (str): Name of the model ('wcs' or 'lin').
+        model_name (str): Name of the model ('wc', 'wcs', or 'lin').
         params (dict): Dictionary of model parameters.
         tmax (int): Total number of time steps.
         stim_designs (tuple[np.ndarray, np.ndarray]): Tuple containing stimulus arrays for excitatory and inhibitory populations.
@@ -255,14 +316,17 @@ def generate_model_data(model_name: str, params: dict, tmax: int, stim_designs: 
     Returns:
         tuple: (Et, It) - time series for excitatory and inhibitory populations.
     """
-    if model_name == "wcs":
+    if model_name == "wc":
+        model = WC_model
+        init_steadystate = init_WC_steadystate
+    elif model_name == "wcs":
         model = WCS_model
         init_steadystate = init_WCS_steadystate
     elif model_name == "lin":
         model = lin_model
         init_steadystate = init_lin_steadystate
     else:
-        raise ValueError(f"Unknown model name: {model_name}. Choose 'wcs' or 'lin'.")
+        raise ValueError(f"Unknown model name: {model_name}. Choose 'wc', 'wcs', or 'lin'.")
 
     state, (E0, I0), params = init_steadystate(params)
     stim_E_design, stim_I_design = stim_designs
@@ -288,19 +352,23 @@ def plot_simulation_results(
     n_samples: int, 
     interpulse_ts: tuple[int], 
     pulse_type_labels: list[str],
-    all_E_lin_clean: np.ndarray, 
-    all_I_lin_clean: np.ndarray, 
+    all_E_wc_clean: np.ndarray,
+    all_I_wc_clean: np.ndarray,
     all_E_wcs_clean: np.ndarray, 
     all_I_wcs_clean: np.ndarray,
-    all_E_lin_noisy: np.ndarray,
-    all_I_lin_noisy: np.ndarray,
+    all_E_lin_clean: np.ndarray, 
+    all_I_lin_clean: np.ndarray, 
+    all_E_wc_noisy: np.ndarray,
+    all_I_wc_noisy: np.ndarray,
     all_E_wcs_noisy: np.ndarray,
     all_I_wcs_noisy: np.ndarray,
+    all_E_lin_noisy: np.ndarray,
+    all_I_lin_noisy: np.ndarray,
     time: np.ndarray,
 ):
     """
-    Generates and saves plots comparing Lin and WCS model simulations.
-    Overlays noisy repeats on top of clean Lin and WCS data using faded lines (small alpha).
+    Generates and saves plots comparing WC, WCS, and Lin model simulations.
+    Overlays noisy repeats on top of clean WC, WCS, and Lin data using faded lines (small alpha).
     """
     n_interpulse_ts = len(interpulse_ts)
     n_repeats = all_E_lin_noisy.shape[2]
@@ -309,44 +377,48 @@ def plot_simulation_results(
             for ip_idx, ip_t in enumerate(interpulse_ts):
                 stim_condition_idx = p_idx * n_interpulse_ts + ip_idx
 
-                fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 5), tight_layout=True)
+                fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(18, 5), tight_layout=True)
 
-                # 1. Plot Lin Model
+                # 1. Plot WC Model
                 # Plot noisy repeats first with small alpha so they are faded
                 for r in range(n_repeats):
                     axes[0].plot(
                         time, 
-                        all_E_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        all_E_wc_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C0', 
                         alpha=0.3, 
                         linewidth=1.0,
+                        linestyle=':',
                         label='E(t) Noisy' if r == 0 else ""
                     )
                     axes[0].plot(
                         time, 
-                        all_I_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        all_I_wc_noisy[sample_idx, stim_condition_idx, r, :], 
                         color='C1', 
                         alpha=0.3, 
                         linewidth=1.0,
+                        linestyle=':',
                         label='I(t) Noisy' if r == 0 else ""
                     )
 
                 # Plot Clean/deterministic trace on top with a solid line
                 axes[0].plot(
                     time, 
-                    all_E_lin_clean[sample_idx, stim_condition_idx, 0, :], 
-                    label='E(t) Lin Clean', 
+                    all_E_wc_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='E(t) WC Clean', 
                     color='C0', 
+                    linestyle=':',
                     linewidth=2.0
                 )
                 axes[0].plot(
                     time, 
-                    all_I_lin_clean[sample_idx, stim_condition_idx, 0, :], 
-                    label='I(t) Lin Clean', 
+                    all_I_wc_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='I(t) WC Clean', 
                     color='C1', 
+                    linestyle=':',
                     linewidth=2.0
                 )
-                axes[0].set_title(f"Lin Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
+                axes[0].set_title(f"WC Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
                 axes[0].legend()
                 axes[0].set_xlabel("Time (ms)")
                 axes[0].set_ylabel("Activity")
@@ -395,6 +467,46 @@ def plot_simulation_results(
                 axes[1].set_xlabel("Time (ms)")
                 axes[1].set_ylabel("Activity")
 
+                # 3. Plot Lin Model
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
+                    axes[2].plot(
+                        time, 
+                        all_E_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C0', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        label='E(t) Noisy' if r == 0 else ""
+                    )
+                    axes[2].plot(
+                        time, 
+                        all_I_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C1', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        label='I(t) Noisy' if r == 0 else ""
+                    )
+
+                # Plot Clean/deterministic trace on top with a solid line
+                axes[2].plot(
+                    time, 
+                    all_E_lin_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='E(t) Lin Clean', 
+                    color='C0', 
+                    linewidth=2.0
+                )
+                axes[2].plot(
+                    time, 
+                    all_I_lin_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='I(t) Lin Clean', 
+                    color='C1', 
+                    linewidth=2.0
+                )
+                axes[2].set_title(f"Lin Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
+                axes[2].legend()
+                axes[2].set_xlabel("Time (ms)")
+                axes[2].set_ylabel("Activity")
+
                 plt.savefig(save_path / f"sample_{sample_idx}_pulse_{p_type}_interpulse_{ip_t}.png", dpi=150)
                 plt.close(fig) # Close the figure to free memory
 
@@ -435,13 +547,13 @@ def generate_synthetic_dataset(
     stim_t: int = 10, 
     stim_dur: int = 1, 
     interpulse_ts: tuple[int] = (5, 50, 100, 200), 
-    noise_level: float = 0.05, 
+    noise_levels: list[float] = [0.05, 0.1, 0.2, 0.3], 
     n_repeats: int = 10,
     delta: float = 0.5, 
     max_retries: int = 10
 ):
     """
-    Generate synthetic datasets for Lins and WCS models, saving clean and noisy (repeated) variants.
+    Generate synthetic datasets for WC, WCS, and Lin models, saving clean and noisy (repeated) variants.
     We generate (n_sample, n_stim_conditions, n_repeats, tmax) data
     """
     save_path = Path(save_path)
@@ -453,16 +565,12 @@ def generate_synthetic_dataset(
     n_stim_conditions = n_pulse_types * n_interpulse_ts
 
     # 1. Clean Dataset Arrays (nrepeats=1)
-    all_E_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
-    all_I_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_E_wc_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_I_wc_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     all_E_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     all_I_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
-
-    # 2. Noisy Dataset Arrays
-    all_E_lin_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
-    all_I_lin_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
-    all_E_wcs_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
-    all_I_wcs_noisy = np.zeros((n_samples, n_stim_conditions, n_repeats, tmax))
+    all_E_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_I_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
     
     # E_design and I_design are now (n_stim_conditions, tmax)
     all_E_design = np.zeros((n_stim_conditions, tmax))
@@ -489,16 +597,21 @@ def generate_synthetic_dataset(
             all_E_design[stim_condition_idx, :] = stimE_design_current
             all_I_design[stim_condition_idx, :] = stimI_design_current
 
+    # Structure to keep track of the final parameters used for the valid samples
+    parameters_json = {}
+
     for sample_idx in range(n_samples):
         valid_sample = False
         for retry_count in range(max_retries):
-            params_wcs, params_lin = get_params(random_seed=sample_idx + retry_count * 1000) # Vary seed for retries
+            params_wc, params_wcs, params_lin = get_params(random_seed=sample_idx + retry_count * 1000) # Vary seed for retries
             
             # Temporary storage to hold simulated data before we confirm the sample is valid
-            temp_E_lin = np.zeros((n_stim_conditions, tmax))
-            temp_I_lin = np.zeros((n_stim_conditions, tmax))
+            temp_E_wc = np.zeros((n_stim_conditions, tmax))
+            temp_I_wc = np.zeros((n_stim_conditions, tmax))
             temp_E_wcs = np.zeros((n_stim_conditions, tmax))
             temp_I_wcs = np.zeros((n_stim_conditions, tmax))
+            temp_E_lin = np.zeros((n_stim_conditions, tmax))
+            temp_I_lin = np.zeros((n_stim_conditions, tmax))
 
             #Generate data for all stimulus conditions for this sample, if any of the conditions fail the stability check,
             #  we retry all with new parameters
@@ -512,27 +625,43 @@ def generate_synthetic_dataset(
                     stimI_design_current = all_I_design[stim_condition_idx, :]
                     stim_designs = (stimE_design_current, stimI_design_current)
                     
-                    Et_lin, It_lin = generate_model_data("lin", params_lin.copy(), tmax, stim_designs) #(tmax,) arrays
+                    Et_wc, It_wc = generate_model_data("wc", params_wc.copy(), tmax, stim_designs)
                     Et_wcs, It_wcs = generate_model_data("wcs", params_wcs.copy(), tmax, stim_designs)
+                    Et_lin, It_lin = generate_model_data("lin", params_lin.copy(), tmax, stim_designs) #(tmax,) arrays
                     
                     # Verification check: check if E and I of the lin data are within delta of 1 at tmax (index -1)
                     if abs(Et_lin[-1] - 1.0) > delta or abs(It_lin[-1] - 1.0) > delta:
                         sample_ok = False
                         break
                     
-                    temp_E_lin[stim_condition_idx, :] = Et_lin
-                    temp_I_lin[stim_condition_idx, :] = It_lin
+                    temp_E_wc[stim_condition_idx, :] = Et_wc
+                    temp_I_wc[stim_condition_idx, :] = It_wc
                     temp_E_wcs[stim_condition_idx, :] = Et_wcs
                     temp_I_wcs[stim_condition_idx, :] = It_wcs
+                    temp_E_lin[stim_condition_idx, :] = Et_lin
+                    temp_I_lin[stim_condition_idx, :] = It_lin
                 if not sample_ok:
                     break
             
             if sample_ok:
                 # 1. Clean deterministic values
-                all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
-                all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+                all_E_wc_clean[sample_idx, :, 0, :] = temp_E_wc
+                all_I_wc_clean[sample_idx, :, 0, :] = temp_I_wc
                 all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
                 all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
+                all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
+                all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+                
+                # Derive final steady-state parameters
+                _, _, final_wc_params = init_WC_steadystate(params_wc.copy())
+                _, _, final_wcs_params = init_WCS_steadystate(params_wcs.copy())
+                _, _, final_lin_params = init_lin_steadystate(params_lin.copy())
+
+                parameters_json[f"sample_{sample_idx}"] = {
+                    "wc": final_wc_params,
+                    "wcs": final_wcs_params,
+                    "lin": final_lin_params,
+                }
                         
                 valid_sample = True
                 break
@@ -541,23 +670,34 @@ def generate_synthetic_dataset(
             # Fallback in case no valid sample is generated after max_retries
             print(f"Warning: Could not find parameters satisfying the stability condition within {max_retries} retries for sample {sample_idx}.")
             # Store fallback deterministic
-            all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
-            all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+            all_E_wc_clean[sample_idx, :, 0, :] = temp_E_wc
+            all_I_wc_clean[sample_idx, :, 0, :] = temp_I_wc
             all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
             all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
+            all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
+            all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+
+            # Derive and store fallback steady-state parameters
+            _, _, final_wc_params = init_WC_steadystate(params_wc.copy())
+            _, _, final_wcs_params = init_WCS_steadystate(params_wcs.copy())
+            _, _, final_lin_params = init_lin_steadystate(params_lin.copy())
+
+            parameters_json[f"sample_{sample_idx}"] = {
+                "wc": final_wc_params,
+                "wcs": final_wcs_params,
+                "lin": final_lin_params,
+                "warning": "Did not meet stability criteria"
+            }
             
-    # Add noise to clean data
-    # Clean data shape (n_samples, n_stim_conditions, 1, tmax) -> Noisy data shape (n_samples, n_stim_conditions, n_repeats, tmax)
-    all_E_lin_noisy = add_noise(np.repeat(all_E_lin_clean, n_repeats, axis=2), noise_level)
-    all_I_lin_noisy = add_noise(np.repeat(all_I_lin_clean, n_repeats, axis=2), noise_level)
-    all_E_wcs_noisy = add_noise(np.repeat(all_E_wcs_clean, n_repeats, axis=2), noise_level)
-    all_I_wcs_noisy = add_noise(np.repeat(all_I_wcs_clean, n_repeats, axis=2), noise_level)
-                    
-    # Save clean datasets
+    # Save parameters JSON file in root directory
+    with open(save_path / "parameters.json", "w") as f:
+        json.dump(parameters_json, f, indent=4)
+
+    # Save clean datasets in root directory
     np.savez(
-        save_path / "synthetic_data_clean.npz",
-        E=all_E_lin_clean,
-        I=all_I_lin_clean,
+        save_path / "synthetic_data_clean_wc.npz",
+        E=all_E_wc_clean,
+        I=all_I_wc_clean,
         E_design=all_E_design,
         I_design=all_I_design,
         pulse_type=all_pulse_type_array,
@@ -572,55 +712,86 @@ def generate_synthetic_dataset(
         pulse_type=all_pulse_type_array,
         time=time_array
     )
-
-    # Save noisy datasets
     np.savez(
-        save_path / "synthetic_data_noisy.npz",
-        E=all_E_lin_noisy,
-        I=all_I_lin_noisy,
-        E_design=all_E_design,
-        I_design=all_I_design,
-        pulse_type=all_pulse_type_array,
-        time=time_array
-    )
-    np.savez(
-        save_path / "synthetic_data_noisy_wcs.npz",
-        E=all_E_wcs_noisy,
-        I=all_I_wcs_noisy,
+        save_path / "synthetic_data_clean.npz",
+        E=all_E_lin_clean,
+        I=all_I_lin_clean,
         E_design=all_E_design,
         I_design=all_I_design,
         pulse_type=all_pulse_type_array,
         time=time_array
     )
 
-    # Call plotting function comparing Lin clean/noisy and WCS clean/noisy
-    plot_simulation_results(
-        save_path=save_path,
-        n_samples=n_samples,
-        interpulse_ts=interpulse_ts,
-        pulse_type_labels=pulse_type_labels,
-        all_E_lin_clean=all_E_lin_clean,
-        all_I_lin_clean=all_I_lin_clean,
-        all_E_wcs_clean=all_E_wcs_clean,
-        all_I_wcs_clean=all_I_wcs_clean,
-        all_E_lin_noisy=all_E_lin_noisy,
-        all_I_lin_noisy=all_I_lin_noisy,
-        all_E_wcs_noisy=all_E_wcs_noisy,
-        all_I_wcs_noisy=all_I_wcs_noisy,
-        time=time_array
-    )
+    # Loop over each noise level to generate and save noisy data and plots in subdirectories
+    for noise_level in noise_levels:
+        noise_path = save_path / f"noise_{noise_level:.2f}"
+        noise_path.mkdir(parents=True, exist_ok=True)
+
+        all_E_wc_noisy = add_noise(np.repeat(all_E_wc_clean, n_repeats, axis=2), noise_level)
+        all_I_wc_noisy = add_noise(np.repeat(all_I_wc_clean, n_repeats, axis=2), noise_level)
+        all_E_wcs_noisy = add_noise(np.repeat(all_E_wcs_clean, n_repeats, axis=2), noise_level)
+        all_I_wcs_noisy = add_noise(np.repeat(all_I_wcs_clean, n_repeats, axis=2), noise_level)
+        all_E_lin_noisy = add_noise(np.repeat(all_E_lin_clean, n_repeats, axis=2), noise_level)
+        all_I_lin_noisy = add_noise(np.repeat(all_I_lin_clean, n_repeats, axis=2), noise_level)
+
+        np.savez(
+            noise_path / "synthetic_data_noisy_wc.npz",
+            E=all_E_wc_noisy,
+            I=all_I_wc_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
+        )
+        np.savez(
+            noise_path / "synthetic_data_noisy_wcs.npz",
+            E=all_E_wcs_noisy,
+            I=all_I_wcs_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
+        )
+        np.savez(
+            noise_path / "synthetic_data_noisy.npz",
+            E=all_E_lin_noisy,
+            I=all_I_lin_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
+        )
+
+        plot_simulation_results(
+            save_path=noise_path,
+            n_samples=n_samples,
+            interpulse_ts=interpulse_ts,
+            pulse_type_labels=pulse_type_labels,
+            all_E_wc_clean=all_E_wc_clean,
+            all_I_wc_clean=all_I_wc_clean,
+            all_E_wcs_clean=all_E_wcs_clean,
+            all_I_wcs_clean=all_I_wcs_clean,
+            all_E_lin_clean=all_E_lin_clean,
+            all_I_lin_clean=all_I_lin_clean,
+            all_E_wc_noisy=all_E_wc_noisy,
+            all_I_wc_noisy=all_I_wc_noisy,
+            all_E_wcs_noisy=all_E_wcs_noisy,
+            all_I_wcs_noisy=all_I_wcs_noisy,
+            all_E_lin_noisy=all_E_lin_noisy,
+            all_I_lin_noisy=all_I_lin_noisy,
+            time=time_array
+        )
 
 if __name__ == "__main__":
-    for noise_level in [0.05, 0.1, 0.2, 0.3]:
-        generate_synthetic_dataset(
-            save_path=Path(f"synthetic/noise_{noise_level:.2f}"), #point load_data to relevant .npz file in synthetic folder after running this script
-            n_samples=10, 
-            tmax=1510, 
-            stim_t=10, 
-            stim_dur=1, 
-            interpulse_ts=(5, 50, 100, 200), 
-            noise_level=noise_level, 
-            n_repeats = 20,
-            delta=0.5, 
-            max_retries=10
-        )
+    generate_synthetic_dataset(
+        save_path=Path("synthetic"), #point load_data to relevant .npz file in synthetic folder after running this script
+        n_samples=2, 
+        tmax=1510, 
+        stim_t=10, 
+        stim_dur=1, 
+        interpulse_ts=(5, 50, 100, 200), 
+        noise_levels=[0.05, 0.1, 0.2, 0.3], 
+        n_repeats=20,
+        delta=0.5, 
+        max_retries=10
+    )
