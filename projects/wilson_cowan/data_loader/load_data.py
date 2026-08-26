@@ -51,6 +51,7 @@ from projects.wilson_cowan.data_loader.losses import (
     loss_B_rollout,
     loss_C_latent_consistency,
     loss_D_dynamics_aware,
+    loss_full_rollout,
 )
 from projects.wilson_cowan.data_loader.neural_data import (
     DEFAULT_GLOB,
@@ -73,6 +74,7 @@ try:
         "projects.wilson_cowan.data_loader.losses.loss_b_rollout",
         "projects.wilson_cowan.data_loader.losses.loss_c_latent_consistency",
         "projects.wilson_cowan.data_loader.losses.loss_d_dynamics_aware",
+        "projects.wilson_cowan.data_loader.losses.loss_full",
     ):
         _cloudpickle.register_pickle_by_value(_importlib.import_module(_modname))
 except Exception:
@@ -92,6 +94,7 @@ _OBJECTIVES = {
     "B": loss_B_rollout,
     "C": loss_C_latent_consistency,
     "D": loss_D_dynamics_aware,
+    "FULL": loss_full_rollout,
 }
 
 
@@ -587,7 +590,7 @@ def apply_model(model_fn, data, params):
 
     T = E.shape[-1]
     anchor_starts, K = _rollout_anchors(T)
-    want_full = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() == "D"
+    want_full = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() in ("D", "FULL")
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
         init_state, dyn_params = _split_params_s0(p)
@@ -647,7 +650,7 @@ def apply_model(model_fn, data, params):
 
             z_target_future = jax.vmap(gather_future)(anchor_starts)   # (A,K,z)
 
-            # ── Full-length autonomous rollout (Objective D only) ──
+            # ── Full-length autonomous rollout (Objective D and FULL only) ──
             if want_full:
                 def f_step(carry, inp):
                     state, E_p, I_p = carry

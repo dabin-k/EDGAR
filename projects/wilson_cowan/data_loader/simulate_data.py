@@ -786,7 +786,7 @@ if __name__ == "__main__":
     generate_synthetic_dataset(
         save_path=Path("synthetic"), #point load_data to relevant .npz file in synthetic folder after running this script
         n_samples=2, 
-        tmax=1510, 
+        tmax=510, 
         stim_t=10, 
         stim_dur=1, 
         interpulse_ts=(5, 50, 100, 200), 

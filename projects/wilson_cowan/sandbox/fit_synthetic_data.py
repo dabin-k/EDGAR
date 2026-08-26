@@ -1,5 +1,4 @@
 # Use the EDGAR scoring logic to fit WC/WCS model to synthetic data
-# Investigate different ways of normalizing the BZ015 data.
 import argparse
 import json
 import os
@@ -41,6 +40,23 @@ def parse_configs_arg(arg_str: str) -> list[tuple[int, int]]:
             k_str, stride_str = pair.split(":")
             configs.append((int(k_str), int(stride_str)))
     return configs
+
+
+def get_data_filename(noise_level: float, dataset_type: str) -> str:
+    """Get the filename of the synthetic dataset.
+
+    Args:
+        noise_level: The noise level, e.g., 0.0, 0.05.
+        dataset_type: The dataset type: "wc", "wcs", or "lin".
+
+    Returns:
+        The relative path of the npz file within synthetic/ directory.
+    """
+    suffix = f"_{dataset_type}" if dataset_type in ("wc", "wcs") else ""
+    if noise_level == 0.0:
+        return f"synthetic_data_clean{suffix}.npz"
+    else:
+        return f"noise_{noise_level:.2f}/synthetic_data_noisy{suffix}.npz"
 
 
 def generate_full_rollout(program, sample_idx: int, stim_E_design: np.ndarray, stim_I_design: np.ndarray, tmax: int) -> tuple[np.ndarray, np.ndarray]:
@@ -96,7 +112,13 @@ def generate_full_rollout(program, sample_idx: int, stim_E_design: np.ndarray, s
     return Et, It
 
 
-def fit_population(configs_str: str, folder_name: str) -> None:
+def fit_population(
+    configs_str: str,
+    folder_name: str,
+    objectives: list[str] = ["A", "B"],
+    noise_levels: list[float] = [0.0, 0.05],
+    dataset_type: str = "lin"
+) -> None:
     """Run the parameter fitting loop for a list of rollout configurations.
 
     Saves the population and mapping config to:
@@ -115,7 +137,6 @@ def fit_population(configs_str: str, folder_name: str) -> None:
     # Set repeat cross-validation
     config.project_params["cv_type"] = "repeats"
 
-    noise_levels = [0.05]
     data_base_path = str(repo_root / "projects" / "wilson_cowan" / "data_loader" / "synthetic")
 
     def load_datasets_for_config(noise_level: float, r_k: int, a_stride: int, objective: str):
@@ -127,19 +148,18 @@ def fit_population(configs_str: str, folder_name: str) -> None:
         os.environ["EDGAR_WC_ROLLOUT_K"] = str(r_k)
         os.environ["EDGAR_WC_ANCHOR_STRIDE"] = str(a_stride)
 
-        # Load train (noisy or clean depending on noise_level)
-        if noise_level == 0.0:
-            config.io.data_path = f"{data_base_path}/noise_0.30/synthetic_data_clean.npz"
-        else:
-            config.io.data_path = f"{data_base_path}/noise_{noise_level:.2f}/synthetic_data_noisy.npz"
+        # Load train dataset path
+        train_filename = get_data_filename(noise_level, dataset_type)
+        config.io.data_path = f"{data_base_path}/{train_filename}"
         
         spec = TaskSpec.from_config(config)
         X_discover, _ , _ = spec.load_data_fn(
             data_path=spec.io["data_path"], **spec.project_params
         )
 
-        # Load eval (always clean)
-        config.io.data_path = f"{data_base_path}/noise_0.30/synthetic_data_clean.npz"
+        # Load eval dataset path (always clean)
+        eval_filename = get_data_filename(0.0, dataset_type)
+        config.io.data_path = f"{data_base_path}/{eval_filename}"
         spec_eval = TaskSpec.from_config(config)
         _ , _ , X_eval = spec_eval.load_data_fn(
             data_path=spec_eval.io["data_path"], **spec_eval.project_params
@@ -157,66 +177,66 @@ def fit_population(configs_str: str, folder_name: str) -> None:
     program_mapping = []
     program_idx = 0
 
-    noise_levels.insert(0, 0.0) 
-
     # Sequential scoring of models
-    for i, noise_level in enumerate(noise_levels):
-        # 1. Fit Objective A (one-step)
-        print(f"\n--- Fitting Objective A for noise level {noise_level:.2f} ---")
-        X_discover, X_eval, spec = load_datasets_for_config(noise_level, 50, 50, "A")
+    for noise_level in noise_levels:
+        for obj in objectives:
+            obj = obj.upper()
+            if obj in ("A", "FULL", "C", "D"):
+                print(f"\n--- Fitting Objective {obj} for noise level {noise_level:.2f} ---")
+                X_discover, X_eval, spec = load_datasets_for_config(noise_level, 50, 50, obj)
 
-        program = spec.seed_programs[0]
-        program.code.model_jax = translate_to_jax(program.code.model)
+                program = spec.seed_programs[0]
+                program.code.model_jax = translate_to_jax(program.code.model)
 
-        temp_pop = Population()
-        temp_pop.add(program)
-        score(
-            temp_pop,
-            X_discover,
-            X_eval,
-            spec.scoring,
-            spec.loss_fn,
-            split="discover",
-            apply_model_fn=spec.apply_model_fn,
-            rollout_fn=spec.rollout_fn,
-        )
-        population.add(program)
-        program_mapping.append({
-            "program_idx": program_idx,
-            "noise_level": noise_level,
-            "objective": "A"
-        })
-        program_idx += 1
+                temp_pop = Population()
+                temp_pop.add(program)
+                score(
+                    temp_pop,
+                    X_discover,
+                    X_eval,
+                    spec.scoring,
+                    spec.loss_fn,
+                    split="discover",
+                    apply_model_fn=spec.apply_model_fn,
+                    rollout_fn=spec.rollout_fn,
+                )
+                population.add(program)
+                program_mapping.append({
+                    "program_idx": program_idx,
+                    "noise_level": noise_level,
+                    "objective": obj
+                })
+                program_idx += 1
 
-        # 2. Fit Objective B for each rollout configuration
-        for (k, stride) in rollout_configs:
-            print(f"\n--- Fitting Objective B for noise level {noise_level:.2f} with K={k}, Stride={stride} ---")
-            X_discover, X_eval, spec = load_datasets_for_config(noise_level, k, stride, "B")
+            elif obj == "B":
+                for (k, stride) in rollout_configs:
+                    print(f"\n--- Fitting Objective B for noise level {noise_level:.2f} with K={k}, Stride={stride} ---")
+                    X_discover, X_eval, spec = load_datasets_for_config(noise_level, k, stride, "B")
 
-            program = spec.seed_programs[0]
-            program.code.model_jax = translate_to_jax(program.code.model)
+                    program = spec.seed_programs[0]
+                    program.code.model_jax = translate_to_jax(program.code.model)
 
-            temp_pop = Population()
-            temp_pop.add(program)
-            score(
-                temp_pop,
-                X_discover,
-                X_eval,
-                spec.scoring,
-                spec.loss_fn,
-                split="discover",
-                apply_model_fn=spec.apply_model_fn,
-                rollout_fn=spec.rollout_fn,
-            )
-            population.add(program)
-            program_mapping.append({
-                "program_idx": program_idx,
-                "noise_level": noise_level,
-                "objective": "B",
-                "k": k,
-                "stride": stride
-            })
-            program_idx += 1
+                    temp_pop = Population()
+                    temp_pop.add(program)
+                    score(
+                        temp_pop,
+                        X_discover,
+                        X_eval,
+                        spec.scoring,
+                        spec.loss_fn,
+                        split="discover",
+                        apply_model_fn=spec.apply_model_fn,
+                        rollout_fn=spec.rollout_fn,
+                    )
+                    population.add(program)
+                    program_mapping.append({
+                        "program_idx": program_idx,
+                        "noise_level": noise_level,
+                        "objective": "B",
+                        "k": k,
+                        "stride": stride
+                    })
+                    program_idx += 1
 
     print("\nScoring complete\n --------- \n ")
 
@@ -226,6 +246,9 @@ def fit_population(configs_str: str, folder_name: str) -> None:
     # Save mapping metadata
     metadata = {
         "rollout_configs": rollout_configs,
+        "noise_levels": noise_levels,
+        "objectives": objectives,
+        "dataset_type": dataset_type,
         "program_mapping": program_mapping
     }
     with open(config_save_path, "w") as f:
@@ -259,221 +282,59 @@ def plot_population(folder_path_str: str) -> None:
         metadata = json.load(f)
         rollout_configs = [tuple(cfg) for cfg in metadata.get("rollout_configs", [])]
         program_mapping = metadata.get("program_mapping", [])
+        noise_levels = metadata.get("noise_levels", [0.0, 0.05])
+        dataset_type = metadata.get("dataset_type", "lin")
 
     print(f"Loaded config metadata with rollout configurations: {rollout_configs}")
+    print(f"Loaded noise levels: {noise_levels}")
+    print(f"Loaded dataset type: {dataset_type}")
 
     # Set repeat cross-validation
     config_path = repo_root / "projects" / "wilson_cowan" / "config.yaml"
     config = Config.from_yaml(config_path)
     config.project_params["cv_type"] = "repeats"
 
-    noise_levels = [0.05]
     data_base_path = str(repo_root / "projects" / "wilson_cowan" / "data_loader" / "synthetic")
-    X_discovers = []
 
-    # Load in data
-    # Noisy data 
-    for noise_level in noise_levels:
-        config.io.data_path = f"{data_base_path}/noise_{noise_level:.2f}/synthetic_data_noisy.npz"
-        spec = TaskSpec.from_config(config)
-        X_discover, _ , _ = spec.load_data_fn(
-            data_path=spec.io["data_path"], **spec.project_params
-        )
-        X_discovers.append(X_discover)
-    
-    # Clean data
-    config.io.data_path = f"{data_base_path}/noise_0.30/synthetic_data_clean.npz"
+    # Load ground-truth clean data
+    clean_filename = get_data_filename(0.0, dataset_type)
+    config.io.data_path = f"{data_base_path}/{clean_filename}"
     spec = TaskSpec.from_config(config)
-    X_discover, _ , X_eval = spec.load_data_fn(
+    X_discover_clean, _ , _ = spec.load_data_fn(
         data_path=spec.io["data_path"], **spec.project_params
     )
-    X_discovers.insert(0, X_discover)
-    noise_levels.insert(0, 0.0)
+
+    sample_idx, stim_idx = 0, 0
+    E_clean = X_discover_clean[0]['target_y'][sample_idx, stim_idx, :, 0]
+    I_clean = X_discover_clean[0]['target_y'][sample_idx, stim_idx, :, 1]
+    time_axis = np.asarray(X_discover_clean[0]["time"][sample_idx])
+
+    # Load in datasets for noise levels
+    X_discovers = []
+    for noise_level in noise_levels:
+        train_filename = get_data_filename(noise_level, dataset_type)
+        config.io.data_path = f"{data_base_path}/{train_filename}"
+        spec_noise = TaskSpec.from_config(config)
+        X_discover, _ , _ = spec_noise.load_data_fn(
+            data_path=spec_noise.io["data_path"], **spec_noise.project_params
+        )
+        X_discovers.append(X_discover)
 
     # Load the population
     population = Population.load(str(pop_file))
     print(f"Loaded fitted population with {len(population)} programs from disk")
 
-    sample_idx, stim_idx = 0, 0
-    E_clean = X_discovers[0][0]['target_y'][sample_idx, stim_idx, :, 0]
-    I_clean = X_discovers[0][0]['target_y'][sample_idx, stim_idx, :, 1]
-    time_axis = np.asarray(X_discovers[0][0]["time"][sample_idx])
-
     colors = ["blue", "purple", "cyan", "magenta", "teal", "orange", "darkgreen"]
 
-    # ─── Figure 1: Segment rollout plot (joined curves) ───
-    fig, axes = plt.subplots(len(noise_levels), 2, figsize=(14, 18), sharex=True)
-    fig.suptitle(f"Wilson-Cowan Fitting vs Noise Level & Objectives (Sample {sample_idx}, Stim {stim_idx})", fontsize=16, y=0.98)
-
-    for i, noise_level in enumerate(noise_levels):
-        # Find Objective A program for this noise level
-        mapping_a = next(m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "A")
-        program_a = population[mapping_a["program_idx"]]
-        E_train = X_discovers[i][0]['target_y'][sample_idx, stim_idx, :, 0]
-        I_train = X_discovers[i][0]['target_y'][sample_idx, stim_idx, :, 1]
-
-        # Build sample evaluation data
-        sample_data = {
-            "target_y": jnp.asarray(X_discovers[i][0]['target_y'][sample_idx:sample_idx+1]),
-            "stim_E": jnp.asarray(X_discovers[i][0]['stim_E'][sample_idx:sample_idx+1]),
-            "stim_I": jnp.asarray(X_discovers[i][0]['stim_I'][sample_idx:sample_idx+1]),
-        }
-
-        # Predict Objective A (one-step)
-        params_a = {k: jnp.asarray(np.asarray(v)[sample_idx:sample_idx+1]) for k, v in program_a.params.items()}
-        model_fn_a = program_a.compile_model()
-        os.environ["EDGAR_WC_OBJECTIVE"] = "A"
-        out_a = spec.apply_model_fn(model_fn_a, sample_data, params_a)
-        pred_a = np.asarray(out_a["pred_y_1step"])[0, stim_idx]  # (T-1, 2)
-
-        # Plot Excitatory Population (E)
-        ax_E = axes[i, 0]
-        ax_E.plot(time_axis, E_clean, color="black", linestyle="-", linewidth=1.5, label="Clean Data" if i == 0 else "")
-        ax_E.scatter(time_axis, E_train, color="grey", alpha=0.5, s=6, label="Noisy Train Data" if i == 0 else "")
-        ax_E.plot(time_axis[1:], pred_a[:, 0], color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
-
-        # Create E inset
-        ax_E_inset = ax_E.inset_axes([0.5, 0.5, 0.4, 0.4])
-        ax_E_inset.plot(time_axis, E_clean, color="black", linestyle="-", linewidth=1.5)
-        ax_E_inset.scatter(time_axis, E_train, color="grey", alpha=0.5, s=6)
-        ax_E_inset.plot(time_axis[1:], pred_a[:, 0], color="red", linestyle="-", linewidth=1.5)
-
-        # Plot Inhibitory Population (I)
-        ax_I = axes[i, 1]
-        ax_I.plot(time_axis, I_clean, color="black", linestyle="-", linewidth=1.5, label="Clean Data" if i == 0 else "")
-        ax_I.scatter(time_axis, I_train, color="grey", alpha=0.5, s=6, label="Noisy Train Data" if i == 0 else "")
-        ax_I.plot(time_axis[1:], pred_a[:, 1], color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
-
-        # Create I inset
-        ax_I_inset = ax_I.inset_axes([0.5, 0.5, 0.4, 0.4])
-        ax_I_inset.plot(time_axis, I_clean, color="black", linestyle="-", linewidth=1.5)
-        ax_I_inset.scatter(time_axis, I_train, color="grey", alpha=0.5, s=6)
-        ax_I_inset.plot(time_axis[1:], pred_a[:, 1], color="red", linestyle="-", linewidth=1.5)
-
-        mses_b_E = []
-        mses_b_I = []
-
-        # Predict and plot each rollout configuration
-        for c_idx, (k, stride) in enumerate(rollout_configs):
-            mapping_b = next(m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "B" and m["k"] == k and m["stride"] == stride)
-            program_b = population[mapping_b["program_idx"]]
-
-            # Configure env variables for this evaluation
-            os.environ["EDGAR_WC_ROLLOUT_K"] = str(k)
-            os.environ["EDGAR_WC_ANCHOR_STRIDE"] = str(stride)
-
-            params_b = {k: jnp.asarray(np.asarray(v)[sample_idx:sample_idx+1]) for k, v in program_b.params.items()}
-            model_fn_b = program_b.compile_model()
-            os.environ["EDGAR_WC_OBJECTIVE"] = "B"
-            out_b = spec.apply_model_fn(model_fn_b, sample_data, params_b)
-            pred_b_rollout = np.asarray(out_b["pred_y_rollout"])[0, stim_idx]  # (A, K, 2)
-
-            from projects.wilson_cowan.data_loader.load_data import _rollout_anchors
-            anchor_starts, K = _rollout_anchors(len(time_axis))
-
-            all_times_E = []
-            all_vals_E = []
-            all_times_I = []
-            all_vals_I = []
-
-            # Calculate robust index stride for non-overlapping rollouts
-            idx_stride = int(np.ceil(K / stride))
-            for idx in range(0, len(anchor_starts), idx_stride):
-                a = anchor_starts[idx]
-                seg_time = time_axis[a + 1 : a + K + 1]
-
-                # Excitatory
-                all_times_E.append(seg_time)
-                all_vals_E.append(pred_b_rollout[idx, :, 0])
-
-                # Inhibitory
-                all_times_I.append(seg_time)
-                all_vals_I.append(pred_b_rollout[idx, :, 1])
-
-            color = colors[c_idx % len(colors)]
-            label_b = f"Obj B (K={k}, S={stride})" if i == 0 else ""
-
-            # E Channel segments
-            mse_b_E = 0.0
-            if all_times_E:
-                flat_times_E = np.concatenate(all_times_E)
-                flat_vals_E = np.concatenate(all_vals_E)
-                mse_b_E = np.mean((flat_vals_E - E_clean[1 : len(flat_vals_E) + 1]) ** 2)
-                ax_E.plot(flat_times_E, flat_vals_E, color=color, alpha=0.4, linewidth=1.0, label=label_b)
-                ax_E_inset.plot(flat_times_E, flat_vals_E, color=color, alpha=0.4, linewidth=1.0)
-            mses_b_E.append(mse_b_E)
-
-            # I Channel segments
-            mse_b_I = 0.0
-            if all_times_I:
-                flat_times_I = np.concatenate(all_times_I)
-                flat_vals_I = np.concatenate(all_vals_I)
-                mse_b_I = np.mean((flat_vals_I - I_clean[1 : len(flat_vals_I) + 1]) ** 2)
-                ax_I.plot(flat_times_I, flat_vals_I, color=color, alpha=0.4, linewidth=1.0, label=label_b)
-                ax_I_inset.plot(flat_times_I, flat_vals_I, color=color, alpha=0.4, linewidth=1.0)
-            mses_b_I.append(mse_b_I)
-
-        # Set limits and parameters for E inset
-        ax_E_inset.set_xlim(400, 450)
-        zoom_mask = (time_axis >= 400) & (time_axis <= 450)
-        E_zoom_noisy = E_train[zoom_mask]
-        if len(E_zoom_noisy) > 0:
-            E_ymin, E_ymax = np.min(E_zoom_noisy), np.max(E_zoom_noisy)
-            E_margin = (E_ymax - E_ymin) * 0.1 if E_ymax > E_ymin else 0.1
-            ax_E_inset.set_ylim(E_ymin - E_margin, E_ymax + E_margin)
-        ax_E_inset.tick_params(axis='both', which='major', labelsize=8)
-
-        # Set limits and parameters for I inset
-        ax_I_inset.set_xlim(400, 450)
-        I_zoom_noisy = I_train[zoom_mask]
-        if len(I_zoom_noisy) > 0:
-            I_ymin, I_ymax = np.min(I_zoom_noisy), np.max(I_zoom_noisy)
-            I_margin = (I_ymax - I_ymin) * 0.1 if I_ymax > I_ymin else 0.1
-            ax_I_inset.set_ylim(I_ymin - I_margin, I_ymax + I_margin)
-        ax_I_inset.tick_params(axis='both', which='major', labelsize=8)
-
-        # Compute Objective A MSE
-        mse_a_E = np.mean((pred_a[:, 0] - E_clean[1:]) ** 2)
-        mse_a_I = np.mean((pred_a[:, 1] - I_clean[1:]) ** 2)
-
-        # Annotate MSE values
-        text_str_E = f"MSE A: {mse_a_E:.5f}\n"
-        for (k, stride), mse in zip(rollout_configs, mses_b_E):
-            text_str_E += f"MSE B (K={k}, S={stride}): {mse:.5f}\n"
-        ax_E.text(0.05, 0.95, text_str_E.strip(), transform=ax_E.transAxes, fontsize=8,
-                  verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
-
-        text_str_I = f"MSE A: {mse_a_I:.5f}\n"
-        for (k, stride), mse in zip(rollout_configs, mses_b_I):
-            text_str_I += f"MSE B (K={k}, S={stride}): {mse:.5f}\n"
-        ax_I.text(0.05, 0.95, text_str_I.strip(), transform=ax_I.transAxes, fontsize=8,
-                  verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
-
-        ax_E.set_ylabel(f"E Rate (Noise {noise_level:.2f})")
-        ax_I.set_ylabel(f"I Rate (Noise {noise_level:.2f})")
-        if i == 0:
-            ax_E.legend(loc="upper right")
-            ax_E.set_title("Excitatory (E) Channel")
-            ax_I.legend(loc="upper right")
-            ax_I.set_title("Inhibitory (I) Channel")
-
-    axes[-1, 0].set_xlabel("Time")
-    axes[-1, 1].set_xlabel("Time")
-    plt.tight_layout()
-
-    plot_save_path = folder_path / "WC_fit_forced_comparison.png"
-    plt.savefig(plot_save_path, dpi=150)
-    print(f"Segment rollout plot successfully saved to {plot_save_path}")
-
-
     # ─── Figure 2: Full rollout plot (from steady state) ───
-    fig2, axes2 = plt.subplots(len(noise_levels), 2, figsize=(14, 18), sharex=True)
+    fig2, axes2 = plt.subplots(len(noise_levels), 2, figsize=(14, 4 * len(noise_levels) + 2), sharex=True)
+    if len(noise_levels) == 1:
+        axes2 = np.expand_dims(axes2, axis=0)
+        
     fig2.suptitle(f"Wilson-Cowan Full Rollout vs Noise Level & Objectives (Sample {sample_idx}, Stim {stim_idx})", fontsize=16, y=0.98)
 
     for i, noise_level in enumerate(noise_levels):
-        # Find Objective A program
-        mapping_a = next(m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "A")
-        program_a = population[mapping_a["program_idx"]]
+        # Load training (possibly noisy) data for plotting reference points
         E_train = X_discovers[i][0]['target_y'][sample_idx, stim_idx, :, 0]
         I_train = X_discovers[i][0]['target_y'][sample_idx, stim_idx, :, 1]
 
@@ -481,39 +342,67 @@ def plot_population(folder_path_str: str) -> None:
         stim_I_design = np.asarray(X_discovers[i][0]['stim_I'][sample_idx, stim_idx])
         tmax = len(time_axis)
 
-        # Generate full rollout for Objective A
-        Et_full_a, It_full_a = generate_full_rollout(program_a, sample_idx, stim_E_design, stim_I_design, tmax)
-
         # Plot Excitatory (E) Channel
         ax_E = axes2[i, 0]
         ax_E.plot(time_axis, E_clean, color="black", linestyle="-", linewidth=1.5, label="Clean Data" if i == 0 else "")
-        ax_E.scatter(time_axis, E_train, color="grey", alpha=0.5, s=6, label="Noisy Train Data" if i == 0 else "")
-        ax_E.plot(time_axis, Et_full_a, color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
+        ax_E.scatter(time_axis, E_train, color="grey", alpha=0.5, s=6, label="Train Data" if i == 0 else "")
 
         # Create E Inset for Figure 2
         ax_E_inset = ax_E.inset_axes([0.5, 0.5, 0.4, 0.4])
         ax_E_inset.plot(time_axis, E_clean, color="black", linestyle="-", linewidth=1.5)
         ax_E_inset.scatter(time_axis, E_train, color="grey", alpha=0.5, s=6)
-        ax_E_inset.plot(time_axis, Et_full_a, color="red", linestyle="-", linewidth=1.5)
 
         # Plot Inhibitory (I) Channel
         ax_I = axes2[i, 1]
         ax_I.plot(time_axis, I_clean, color="black", linestyle="-", linewidth=1.5, label="Clean Data" if i == 0 else "")
-        ax_I.scatter(time_axis, I_train, color="grey", alpha=0.5, s=6, label="Noisy Train Data" if i == 0 else "")
-        ax_I.plot(time_axis, It_full_a, color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
+        ax_I.scatter(time_axis, I_train, color="grey", alpha=0.5, s=6, label="Train Data" if i == 0 else "")
 
         # Create I Inset for Figure 2
         ax_I_inset = ax_I.inset_axes([0.5, 0.5, 0.4, 0.4])
         ax_I_inset.plot(time_axis, I_clean, color="black", linestyle="-", linewidth=1.5)
         ax_I_inset.scatter(time_axis, I_train, color="grey", alpha=0.5, s=6)
-        ax_I_inset.plot(time_axis, It_full_a, color="red", linestyle="-", linewidth=1.5)
 
+        # 1. Plot Objective A if present
+        mapping_a = next((m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "A"), None)
+        mse_a_E = None
+        mse_a_I = None
+        if mapping_a is not None:
+            program_a = population[mapping_a["program_idx"]]
+            Et_full_a, It_full_a = generate_full_rollout(program_a, sample_idx, stim_E_design, stim_I_design, tmax)
+            
+            ax_E.plot(time_axis, Et_full_a, color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
+            ax_E_inset.plot(time_axis, Et_full_a, color="red", linestyle="-", linewidth=1.5)
+            
+            ax_I.plot(time_axis, It_full_a, color="red", linestyle="-", linewidth=1.5, label="Objective A (One-step)" if i == 0 else "")
+            ax_I_inset.plot(time_axis, It_full_a, color="red", linestyle="-", linewidth=1.5)
+            
+            mse_a_E = np.mean((Et_full_a - E_clean) ** 2)
+            mse_a_I = np.mean((It_full_a - I_clean) ** 2)
+
+        # 2. Plot Objective FULL if present
+        mapping_full = next((m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "FULL"), None)
+        mse_full_E = None
+        mse_full_I = None
+        if mapping_full is not None:
+            program_full = population[mapping_full["program_idx"]]
+            Et_full_full, It_full_full = generate_full_rollout(program_full, sample_idx, stim_E_design, stim_I_design, tmax)
+            
+            ax_E.plot(time_axis, Et_full_full, color="green", linestyle="-", linewidth=1.5, label="Objective FULL (Full rollout)" if i == 0 else "")
+            ax_E_inset.plot(time_axis, Et_full_full, color="green", linestyle="-", linewidth=1.5)
+            
+            ax_I.plot(time_axis, It_full_full, color="green", linestyle="-", linewidth=1.5, label="Objective FULL (Full rollout)" if i == 0 else "")
+            ax_I_inset.plot(time_axis, It_full_full, color="green", linestyle="-", linewidth=1.5)
+            
+            mse_full_E = np.mean((Et_full_full - E_clean) ** 2)
+            mse_full_I = np.mean((It_full_full - I_clean) ** 2)
+
+        # 3. Plot Objective B configurations if present
         mses_b_E = []
         mses_b_I = []
-
-        # Generate and plot full rollout for each Objective B configuration
         for c_idx, (k, stride) in enumerate(rollout_configs):
-            mapping_b = next(m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "B" and m["k"] == k and m["stride"] == stride)
+            mapping_b = next((m for m in program_mapping if m["noise_level"] == noise_level and m["objective"] == "B" and m.get("k") == k and m.get("stride") == stride), None)
+            if mapping_b is None:
+                continue
             program_b = population[mapping_b["program_idx"]]
 
             # Generate full rollout
@@ -526,13 +415,13 @@ def plot_population(folder_path_str: str) -> None:
             ax_E.plot(time_axis, Et_full_b, color=color, alpha=0.6, linewidth=1.0, label=label_b)
             ax_E_inset.plot(time_axis, Et_full_b, color=color, alpha=0.6, linewidth=1.0)
             mse_b_E = np.mean((Et_full_b - E_clean) ** 2)
-            mses_b_E.append(mse_b_E)
+            mses_b_E.append((k, stride, mse_b_E))
 
             # I Channel
             ax_I.plot(time_axis, It_full_b, color=color, alpha=0.6, linewidth=1.0, label=label_b)
             ax_I_inset.plot(time_axis, It_full_b, color=color, alpha=0.6, linewidth=1.0)
             mse_b_I = np.mean((It_full_b - I_clean) ** 2)
-            mses_b_I.append(mse_b_I)
+            mses_b_I.append((k, stride, mse_b_I))
 
         # Set limits and parameters for Figure 2 insets
         ax_E_inset.set_xlim(400, 450)
@@ -552,22 +441,28 @@ def plot_population(folder_path_str: str) -> None:
             ax_I_inset.set_ylim(I_ymin - I_margin, I_ymax + I_margin)
         ax_I_inset.tick_params(axis='both', which='major', labelsize=8)
 
-        # Compute full rollout Objective A MSE
-        mse_a_E = np.mean((Et_full_a - E_clean) ** 2)
-        mse_a_I = np.mean((It_full_a - I_clean) ** 2)
-
         # Annotate MSE values
-        text_str_E = f"MSE A: {mse_a_E:.5f}\n"
-        for (k, stride), mse in zip(rollout_configs, mses_b_E):
+        text_str_E = ""
+        if mse_a_E is not None:
+            text_str_E += f"MSE A: {mse_a_E:.5f}\n"
+        if mse_full_E is not None:
+            text_str_E += f"MSE FULL: {mse_full_E:.5f}\n"
+        for k, stride, mse in mses_b_E:
             text_str_E += f"MSE B (K={k}, S={stride}): {mse:.5f}\n"
-        ax_E.text(0.05, 0.95, text_str_E.strip(), transform=ax_E.transAxes, fontsize=8,
-                  verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        if text_str_E:
+            ax_E.text(0.05, 0.95, text_str_E.strip(), transform=ax_E.transAxes, fontsize=8,
+                      verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
-        text_str_I = f"MSE A: {mse_a_I:.5f}\n"
-        for (k, stride), mse in zip(rollout_configs, mses_b_I):
+        text_str_I = ""
+        if mse_a_I is not None:
+            text_str_I += f"MSE A: {mse_a_I:.5f}\n"
+        if mse_full_I is not None:
+            text_str_I += f"MSE FULL: {mse_full_I:.5f}\n"
+        for k, stride, mse in mses_b_I:
             text_str_I += f"MSE B (K={k}, S={stride}): {mse:.5f}\n"
-        ax_I.text(0.05, 0.95, text_str_I.strip(), transform=ax_I.transAxes, fontsize=8,
-                  verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+        if text_str_I:
+            ax_I.text(0.05, 0.95, text_str_I.strip(), transform=ax_I.transAxes, fontsize=8,
+                      verticalalignment='top', bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
         ax_E.set_ylabel(f"E Rate (Noise {noise_level:.2f})")
         ax_I.set_ylabel(f"I Rate (Noise {noise_level:.2f})")
@@ -596,6 +491,12 @@ if __name__ == "__main__":
                             help="Comma-separated K:stride rollout configurations, e.g., 50:1,50:50")
     fit_parser.add_argument("--folder", type=str, default="fitted_population_multi",
                             help="Output folder name in sandbox")
+    fit_parser.add_argument("--objectives", type=str, default="A,B",
+                            help="Comma-separated list of objectives, e.g., A,B,FULL")
+    fit_parser.add_argument("--noise-levels", type=str, default="0.0,0.05",
+                            help="Comma-separated list of noise levels, e.g., 0.0,0.05")
+    fit_parser.add_argument("--dataset-type", type=str, default="lin", choices=["lin", "wc", "wcs"],
+                            help="Dataset type to fit: lin, wc, or wcs")
 
     # Plot subcommand
     plot_parser = subparsers.add_parser("plot", help="Plot fitted rollouts and compare results")
@@ -604,7 +505,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "fit":
-        fit_population(configs_str=args.configs, folder_name=args.folder)
+        # Parse objectives
+        objectives_list = [obj.strip().upper() for obj in args.objectives.split(",") if obj.strip()]
+        # Parse noise levels as list of floats
+        noise_levels_list = [float(nl.strip()) for nl in args.noise_levels.split(",") if nl.strip()]
+        
+        fit_population(
+            configs_str=args.configs,
+            folder_name=args.folder,
+            objectives=objectives_list,
+            noise_levels=noise_levels_list,
+            dataset_type=args.dataset_type
+        )
     elif args.command == "plot":
         plot_population(folder_path_str=args.folder)
     else:
