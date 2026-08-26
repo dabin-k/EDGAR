@@ -426,7 +426,9 @@ def _load_synthetic(
     anchor_starts, K = _rollout_anchors(T)
     A = len(anchor_starts)
 
-    rng = np.random.default_rng(random_seed)
+    repeat_rng = np.random.default_rng(random_seed)
+    sample_rng = np.random.default_rng(random_seed)
+    eval_rng = np.random.default_rng(random_seed)
 
     # Cross-validation splitting
     # Split over repeats, averaging over half for train and half for test
@@ -436,7 +438,7 @@ def _load_synthetic(
             train_data_split = response[:, :, 0, :, :]  # (n_samples, n_stim, T, 2)
             test_data_split = train_data_split
         else:
-            perm= rng.permutation(n_repeats)
+            perm = repeat_rng.permutation(n_repeats)
             # Randomly select repeats
             train_idx = perm[: n_repeats // 2]
             test_idx = perm[n_repeats // 2:]
@@ -464,7 +466,7 @@ def _load_synthetic(
 
     # 2. Discover / Validate Splits (50/50 Split on Resulting Sample Axis)
     n_total_samples = train_data_split.shape[0]
-    perm = rng.permutation(n_total_samples)
+    perm = sample_rng.permutation(n_total_samples)
     disc_idx = np.sort(perm[: n_total_samples // 2])
     val_idx = np.sort(perm[n_total_samples // 2:])
 
@@ -501,7 +503,7 @@ def _load_synthetic(
     n_eval_actual = int(min(max(1, n_eval), len(disc_idx)))
     T_eval_actual = int(min(T_eval, T))
     eval_pos = np.sort(
-        rng.choice(
+        eval_rng.choice(
             len(disc_idx), n_eval_actual, replace=False
         )
     )
