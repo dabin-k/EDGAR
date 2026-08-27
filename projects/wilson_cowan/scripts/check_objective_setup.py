@@ -52,7 +52,7 @@ OBJECTIVES = ["A", "B", "E", "F"]
 
 # Fitted params land here (kept next to this script so downstream free-run / analysis scripts can
 # load them). One npz per objective + a combined summary; see _save_params for the schema.
-PARAMS_DIR = WC / "scripts" / "fitted_params"
+PARAMS_DIR = "/home/dabin/data/wc_simulations"
 
 import jax  # noqa: E402  (import after sys.path is set up)
 import jax.numpy as jnp  # noqa: E402
@@ -83,6 +83,48 @@ def _build_data(split, time_axis: np.ndarray) -> dict:
     time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (1, T))
     return {"target_y": target_y, "stim_E": sE, "stim_I": sI,
             "target_y_future": target_y_future, "time": time}
+
+
+def _build_synthetic_cv(path: str, sample_idx: int, chop: tuple[float, float]):
+    """Build a ``CVSamples`` straight from a clean synthetic ``synthetic_data_clean_*.npz``.
+
+    Bypasses ``neural_data.build_cv_samples`` (and its ``make_stimulus``, which cannot represent
+    the generator's pre-onset / simultaneous pulses). The stimulus is taken VERBATIM from the
+    stored ``E_design`` / ``I_design`` arrays, so every condition is faithful. File layout:
+      E, I           (n_samples, C, 1, T)   noise-free E/I traces (1 repeat)
+      E_design, I_design (C, T)             0/1 impulse trains that drove the sim
+      pulse_type     (C,)  str              condition label (paired_EE/EI/IE/II)
+      time           (T,)  int64 ms         0 = first-pulse onset
+    Data is noise-free (1 repeat) so there is no trial-fold CV: ``train`` and ``test`` are the
+    SAME C conditions of ``sample_idx`` (test loss therefore equals train loss).
+    """
+    from neural_data import CVSplit, CVSamples
+
+    d = np.load(path, allow_pickle=True)
+    E = np.asarray(d["E"]); I = np.asarray(d["I"])                 # (S, C, 1, T)
+    Ed = np.asarray(d["E_design"]); Id = np.asarray(d["I_design"])  # (C, T)
+    pulse_type = [str(p) for p in np.asarray(d["pulse_type"])]
+    n_samples = E.shape[0]
+    if not 0 <= sample_idx < n_samples:
+        raise SystemExit(f"--sample {sample_idx} out of range (file has {n_samples} samples)")
+
+    time_s = np.asarray(d["time"], dtype=np.float64) / 1000.0      # ms -> s
+    lo, hi = chop
+    mask = (time_s >= lo) & (time_s < hi)
+    if not mask.any():
+        raise SystemExit(f"chop window {chop} keeps no bins of the synthetic time axis")
+    time_s = time_s[mask]
+
+    Es = E[sample_idx, :, 0, :][:, mask]                           # (C, T)
+    Is = I[sample_idx, :, 0, :][:, mask]
+    target_y = np.stack([Es, Is], axis=-1).astype(np.float32)      # (C, T, 2) = (E, I)
+    stim = np.stack([Ed[:, mask], Id[:, mask]], axis=-1).astype(np.float32)  # (C, T, 2) = (u_E, u_I)
+    meta = [{"experiment_type": pulse_type[c], "condition_index": c, "sample_idx": sample_idx}
+            for c in range(target_y.shape[0])]
+
+    split = CVSplit(target_y, stim, meta)
+    return CVSamples(train=split, test=split, time=time_s.astype(np.float32),
+                     cv_type="synthetic_clean")
 
 
 def _scalar_params(params: dict, keys: list[str]) -> dict:
@@ -121,6 +163,7 @@ def _save_params(result: dict, meta: dict, suffix: str = "") -> Path:
         data_file=np.str_(meta["data_file"]),
         cv_type=np.str_(meta["cv_type"]),
         held_out_fold=np.int64(meta["held_out_fold"]),
+        sample_idx=np.int64(meta.get("sample_idx", -1)),
         warmup_bins=np.int64(meta["warmup_bins"]),
         rollout_k=np.int64(meta["rollout_k"]),
         anchor_stride=np.int64(meta["anchor_stride"]),
@@ -161,6 +204,7 @@ def _save_init(cv, time_axis: np.ndarray, meta: dict, suffix: str = "") -> Path:
         data_file=np.str_(meta["data_file"]),
         cv_type=np.str_(meta["cv_type"]),
         held_out_fold=np.int64(meta["held_out_fold"]),
+        sample_idx=np.int64(meta.get("sample_idx", -1)),
         chop=np.array(meta["chop"], dtype=np.float64),
         dt_s=np.float64(meta["dt_s"]),
     )
@@ -209,18 +253,25 @@ def main() -> None:
     ap.add_argument("--max-iter", type=int, default=None,
                     help="override config's scoring.gradient_descent.max_iter (for a fast smoke run)")
     ap.add_argument("--data-file", default=str(DATA_FILE), help="the one-sample session npz")
+    ap.add_argument("--synthetic", default=None,
+                    help="path to a clean synthetic_data_clean_*.npz; bypasses build_cv_samples "
+                         "and fits ONE synthetic sample directly (stim from the design arrays)")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="which synthetic sample (E/I axis 0) to fit; only used with --synthetic")
     ap.add_argument("--tag", default="",
                     help="suffix for the saved npz filenames (e.g. --tag rollout40_stride1 writes "
                          "check_fit_{obj}_rollout40_stride1.npz), so a re-fit under different config "
                          "does not overwrite the existing check_fit_{obj}.npz copies.")
     args = ap.parse_args()
-    suffix = f"_{args.tag}" if args.tag else ""
+    synthetic = args.synthetic is not None
+    tag = args.tag or (f"syn_s{args.sample}" if synthetic else "")
+    suffix = f"_{tag}" if tag else ""
 
     run_objs = [o.strip().upper() for o in args.objectives.split(",") if o.strip()]
     bad = [o for o in run_objs if o not in OBJECTIVES]
     if bad:
         raise SystemExit(f"unknown objective(s) {bad}; valid: {OBJECTIVES}")
-    data_file = Path(args.data_file)
+    data_file = Path(args.synthetic if synthetic else args.data_file)
     if not data_file.exists():
         raise SystemExit(f"data file not found: {data_file}")
 
@@ -234,9 +285,16 @@ def main() -> None:
     }
     chop = (float(pp["chop_pre_ms"]) / 1000.0, float(pp["chop_post_ms"]) / 1000.0)
 
-    # Build the one sample (M150605), config's k_fold / chop.
-    from neural_data import build_cv_samples
-    cv = build_cv_samples(str(data_file), cv_type="k_fold", held_out_fold=0, chop=chop)
+    # Build the one sample. Synthetic: CVSplits straight from E/I + design arrays (stim verbatim;
+    # make_stimulus can't reproduce the generator's pre-onset/simultaneous pulses). Real: config's
+    # k_fold / chop via build_cv_samples.
+    if synthetic:
+        cv = _build_synthetic_cv(str(data_file), args.sample, chop)
+        cv_type = "synthetic_clean"
+    else:
+        from neural_data import build_cv_samples
+        cv = build_cv_samples(str(data_file), cv_type="k_fold", held_out_fold=0, chop=chop)
+        cv_type = "k_fold"
     time_axis = np.asarray(cv.time)
     T = time_axis.shape[0]
     dt_s = float(time_axis[1] - time_axis[0]) if T > 1 else float(pp["dt_seconds"])
@@ -249,7 +307,10 @@ def main() -> None:
     os.environ["EDGAR_WC_WARMUP_BINS"] = str(warmup_bins)
     os.environ["EDGAR_WC_DT"] = str(dt_s)
 
-    print(f"data:  {data_file.name}  (1 sample: C={cv.train.n} conditions, T={T}, dt={dt_s*1000:.2f} ms)")
+    src_desc = f"{cv_type}, sample={args.sample}" if synthetic else cv_type
+    print(f"data:  {data_file.name}  ({src_desc}: C={cv.train.n} conditions, T={T}, dt={dt_s*1000:.2f} ms)")
+    if synthetic:
+        print("       (noise-free clean data: test == train, so test loss equals train loss)")
     print(f"chop:  {chop} s   warmup_bins={warmup_bins}   rollout_k={pp['rollout_k']}  "
           f"anchor_stride={pp['anchor_stride']}")
     print(f"gd:    lr={gd['learning_rate']}  max_iter={gd['max_iter']}  "
@@ -257,7 +318,9 @@ def main() -> None:
     print(f"fitting objectives {run_objs} (init = param_est2)\n")
 
     save_meta = {
-        "data_file": str(data_file), "cv_type": "k_fold", "held_out_fold": 0,
+        "data_file": str(data_file), "cv_type": cv_type,
+        "held_out_fold": (-1 if synthetic else 0),
+        "sample_idx": (args.sample if synthetic else -1),
         "warmup_bins": warmup_bins, "rollout_k": int(pp["rollout_k"]),
         "anchor_stride": int(pp["anchor_stride"]), "dt_s": dt_s, "chop": chop, "gd": gd,
     }

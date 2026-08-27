@@ -48,14 +48,14 @@ project_params:
   # Training-objective settings. load_data republishes these to env so apply_model / loss_fn
   # Override per run on the CLI, e.g. --project_params.objective=B.
   objective: "B"          # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures | E Kalman state-space NLL | F rollout NLL (deterministic SSM)
-  rollout_k: 20           # autonomous-rollout horizon, in bins (objectives B/C/D,F)
-  anchor_stride: 1      # bins between rollout anchors (fewer = faster, coarser coverage)
+  rollout_k: 450           # autonomous-rollout horizon, in bins (objectives B/C/D,F)
+  anchor_stride: 450      # bins between rollout anchors (fewer = faster, coarser coverage)
   dt_seconds: 0.001       # SYNTHETIC-only bin->seconds convention (synthetic npz has no time axis).
   # Real opto data only (ignored for synthetic wc*_fold*.npz).
   chop_pre_ms: -150.0     # Phase 4 §0: keep bins with chop_pre_ms <= t*1000 < chop_post_ms
   chop_post_ms: 400.0
   # Loss not computed during warmup steps
-  warmup_steps_ms: 100.0
+  warmup_steps_ms: 0.0
   # max_conditions: 8     # cap #conditions (n_stim) per split for fast smoke runs; unset = all
   # Train/test split within each mouse-sample:
   #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)

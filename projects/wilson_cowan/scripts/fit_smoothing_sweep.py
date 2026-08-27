@@ -58,13 +58,17 @@ import matplotlib                                # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                  # noqa: E402
 
-from load_data import apply_model, loss_fn, _rollout_anchors   # noqa: E402
+from load_data import apply_model, loss_fn, _rollout_anchors  # noqa: E402
 from neural_data import build_cv_samples, DEFAULT_GLOB         # noqa: E402
 import model2                                                  # noqa: E402
+import model2_kalman                                           # noqa: E402 (kf_* live here now)
 import param_est2                                              # noqa: E402
 from edgar.scoring.scoring import _get_params, _optimize, _eval_loss  # noqa: E402
 
 PARAM_KEYS = list(model2.model.DEFAULT_PARAMS.keys())          # 16 incl. s0_S
+# EKF noise/init fallbacks, sourced from the objective-E model variant (folded into its
+# DEFAULT_PARAMS). Used by _obs_std when a fit carries no learnable kf_log_sig_*.
+KF_DEFAULTS = {k: v for k, v in model2_kalman.model.DEFAULT_PARAMS.items() if k.startswith("kf_")}
 GD = {"learning_rate": 0.001, "max_iter": 200, "gradient_clip_norm": 5.0}
 
 
@@ -220,6 +224,85 @@ def _plot_fit(fit, p_scalar, cv, time_axis, title, out_png):
             ax.plot(t_ms[1:], one_step, color="tab:red", lw=0.8, alpha=0.8,
                     label="one-step (TF)")
             ax.plot(t_ms, free, color="tab:blue", lw=1.1, ls="--", label="free-run")
+            if row == 0:
+                ax.set_title(f"cond {c}", fontsize=9)
+            ax.set_ylabel(f"{chan} rate")
+            if row == 1:
+                ax.set_xlabel("time (ms)")
+            if row == 0 and col == 0:
+                ax.legend(fontsize=7, loc="upper right")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_png, dpi=110)
+    plt.close(fig)
+
+
+def _obs_std(params: dict) -> tuple[float, float]:
+    """Fitted observation-noise std (sqrt of exp(kf_log_sig_*)), with model KF-default fallback."""
+    def std(key):
+        v = params[key] if key in params else KF_DEFAULTS[key]
+        return float(np.exp(0.5 * np.asarray(v).reshape(-1)[0]))
+    return std("kf_log_sig_E"), std("kf_log_sig_I")
+
+
+def _plot_fit_statespace(fit, p_scalar, cv, time_axis, title, out_png):
+    """State-space (objective E) view: the EKF denoised estimate, not the one-step fit.
+
+    Overlays on the real E/I two distinct uncertainties:
+      * ``filtered`` (orange) — the EKF posterior mean m_t (the DENOISED latent estimate), shaded
+        with the fitted, CONSTANT +-2*sigma_obs OBSERVATION-noise band (the scatter attributable to
+        measurement noise alone; data is expected to fall within it if the wriggle is obs noise).
+      * ``+-2*sqrt(diag(S_t))`` (blue dashed) — the TIME-VARYING one-step PREDICTIVE interval, where
+        S_t = H P_t^- H^T + Sigma is the innovation covariance (state uncertainty P_t^- mapped to the
+        observation, PLUS obs noise). Drawn around the one-step prediction ``pred_y_1step`` (= H m_t^-),
+        its correct center. It is always >= the obs-noise band; the gap is the state uncertainty.
+      * real data (black dots).
+
+    Requires ``fit`` fitted / run under objective E (the EKF path in ``apply_model``). ``sigma_obs``
+    falls back to the model's ``KF_DEFAULT_PARAMS`` if ``fit`` carries no learnable ``kf_log_sig_*``.
+    """
+    prev_obj = os.environ.get("EDGAR_WC_OBJECTIVE")
+    os.environ["EDGAR_WC_OBJECTIVE"] = "E"                     # route apply_model through the EKF
+    try:
+        X_train = _build_data(cv.train, time_axis)
+        out = apply_model(model2.model_jax, X_train, fit)
+        filtered = np.asarray(out["filtered_z"])[0]           # (C, T, 3) = [E, I, S]
+        pred_1step = np.asarray(out["pred_y_1step"])[0]       # (C, T-1, 2) = H m_t^-
+        S_t = np.asarray(out["innovation_cov"])[0]            # (C, T-1, 2, 2)
+    finally:
+        if prev_obj is None:
+            os.environ.pop("EDGAR_WC_OBJECTIVE", None)
+        else:
+            os.environ["EDGAR_WC_OBJECTIVE"] = prev_obj
+
+    target = np.asarray(cv.train.target_y)                    # (C, T, 2)
+    stim = np.asarray(cv.train.stim)                          # (C, T, 2)
+    C = target.shape[0]
+    t_ms = time_axis * 1000.0
+    t_pred = t_ms[1:]                                          # pred_y_1step / S_t align to t = 1..T-1
+    n_show = min(C, 4)
+    idx = np.linspace(0, C - 1, n_show).round().astype(int)
+    sig_E, sig_I = _obs_std(fit)
+
+    fig, axes = plt.subplots(2, n_show, figsize=(4.2 * n_show, 6.4), sharex=True)
+    axes = np.atleast_2d(axes)
+    fig.suptitle(title, fontsize=11)
+    for col, c in enumerate(idx):
+        E_real, I_real = target[c, :, 0], target[c, :, 1]
+        sE, sI = stim[c, :, 0], stim[c, :, 1]
+        for row, (real, filt, pred, st, sig, chan, s) in enumerate([
+            (E_real, filtered[c, :, 0], pred_1step[c, :, 0], np.sqrt(S_t[c, :, 0, 0]), sig_E, "E", sE),
+            (I_real, filtered[c, :, 1], pred_1step[c, :, 1], np.sqrt(S_t[c, :, 1, 1]), sig_I, "I", sI),
+        ]):
+            ax = axes[row, col]
+            for a, b in _stim_spans(s):
+                ax.axvspan(t_ms[a], t_ms[min(b, len(t_ms) - 1)], color="0.85", zorder=0)
+            ax.fill_between(t_ms, filt - 2 * sig, filt + 2 * sig, color="tab:orange",
+                            alpha=0.15, lw=0, zorder=1, label="+-2sigma_obs (obs noise)")
+            ax.plot(t_pred, pred - 2 * st, color="tab:blue", lw=0.8, ls="--", zorder=2,
+                    label="+-2*sqrt(diag(S_t)) (predictive)")
+            ax.plot(t_pred, pred + 2 * st, color="tab:blue", lw=0.8, ls="--", zorder=2)
+            ax.scatter(t_ms, real, color="k", s=3, alpha=0.25, label="real", zorder=3)
+            ax.plot(t_ms, filt, color="tab:orange", lw=1.1, label="filtered (denoised)", zorder=4)
             if row == 0:
                 ax.set_title(f"cond {c}", fontsize=9)
             ax.set_ylabel(f"{chan} rate")

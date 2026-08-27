@@ -44,7 +44,8 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     stim_I = np.asarray(data["stim_I"], dtype=np.float64)
 
     # Smooth the E and I rates first - otherwise we get a lot of noise in the decay rate estimates 
-    def _smooth_hamming(x: np.ndarray, dt_ms: float, bandwidth_ms: float = 40.0):
+    # 2026-08-27 update : actually, smoothing seems harmful on synthetic data at least. Let default be no smoothing.
+    def _smooth_hamming(x: np.ndarray, dt_ms: float, bandwidth_ms: float = 0.0):
         win = int(round(bandwidth_ms / dt_ms))
         # keep smoothing zero-phase 
         if win % 2 == 0:
@@ -57,8 +58,8 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     # dt_ms = 1.0 in data - fine to hardcode
     E_raw = target_y[..., 0]   # (C, T)
     I_raw = target_y[..., 1]
-    E = _smooth_hamming(E_raw, dt_ms=1.0, bandwidth_ms=40.0)   # (C, T)
-    I = _smooth_hamming(I_raw, dt_ms=1.0, bandwidth_ms=40.0)
+    E = _smooth_hamming(E_raw, dt_ms=1.0)   # (C, T)
+    I = _smooth_hamming(I_raw, dt_ms=1.0)
 
     C, T = E.shape
 
