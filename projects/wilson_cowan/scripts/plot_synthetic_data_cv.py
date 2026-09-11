@@ -1,26 +1,27 @@
 #!/usr/bin/env python
-"""Plot one-step + free-run predictions for the check_objective_setup fits (objectives A, B, E, F).
+""" 
+Currently just an exact copy of plot_objective_fits.py.
+Aim of this script : evaluate the trained parameters on the held out experiment condition dataset (i.e. the test data)
 
-For each objective this loads the fitted params saved by ``check_objective_setup.py``
-(``/home/dabin/data/wc_simulations/check_fit_{obj}.npz``), rebuilds the SAME M150605 CV sample the fit used
-(``data_file`` / ``chop`` / ``held_out_fold`` / rollout config are all read back from the npz),
-picks a few random conditions, and overlays on the real E/I traces:
+General guideline 
+- Always use sample 0 for now.
+- Always use noise_level =0.3 for now. 
 
-  * one-step  — the next-step forecast. For A/B/F this is the teacher-forced one-step
-    (``pred_y_1step``, real E/I fed in each step); for E it is the EKF one-step ``H·m_t^-``,
-    which honestly uses only PAST data through the filter (matching how objective E scores it).
-  * free-run  — the autonomous rollout: the model's own predicted (E, I, S) fed back in each step
-    (deterministic WCS via ``fit_smoothing_sweep._simulate_free``). Identical machinery for all
-    four objectives — the objective-E ``kf_*`` noise params do NOT enter a free run (process noise
-    sits at its mean 0; obs noise never touches the latent), so E's free run is the same
-    deterministic WCS rollout as A/B/F.
+Some things to note 
+- Ground truth params files are found in : /home/dabin/code/EDGAR-gamma/projects/wilson_cowan/data_loader/synthetic/parameters.json.
+    This file is identical to /home/dabin/code/EDGAR-gamma/projects/wilson_cowan/data_loader/synthetic/test_parameters.json 
+- Noiseless data and stim conditiosn are found in /home/dabin/code/EDGAR-gamma/projects/wilson_cowan/data_loader/synthetic/ 
+- Noisy data simulations are found in /home/dabin/code/EDGAR-gamma/projects/wilson_cowan/data_loader/synthetic/noise_0.30/. This data is used for training the model parameters
+- Parameters are optimised using 4 different objectives, labelled A, B, E, F. Each optimised set of parameters is found in /home/dabin/data/wc_simulations/check_fit_{obj}_syn_noise_0.3.npz where obj is one of A, B, E, or F.
+- Held out test data is found in /home/dabin/code/EDGAR-gamma/projects/wilson_cowan/data_loader/synthetic/noise_0.30/synthetic_test_data_noisy_wcs.npz
 
-Reuses ``fit_smoothing_sweep.py`` (``_simulate_free`` / ``_stim_spans`` / ``_build_data``).
 
-Usage:
-    python plot_objective_fits.py                    # A,B,E,F, 4 random conditions, seed 0
-    python plot_objective_fits.py --objectives A,E    # subset
-    python plot_objective_fits.py --n-show 6 --seed 3 # more conditions / different draw
+Things for this script to do 
+1. Sanity check that the train parameters.json file is identical to the test_parameters.json
+2. Simulate the test stimulus conditions using the params trained on the noisy data. 
+3. Simulate the test stimulus condition using the ground truth parameters 
+4. Calculate the squared error between the simulated and groutnd truth test data
+5. Visualise the two fits
 """
 from __future__ import annotations
 
