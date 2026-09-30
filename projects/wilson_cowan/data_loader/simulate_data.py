@@ -1,549 +1,800 @@
-''' Aim of this file is to simulate population activity data according  to dynamical system model.
-
-Model 1: Wilson-Cowan model (WC)
-Model 2 : Lin model (see PDF paper)
-
-Each model specifies the dynamics of the excitatory and inhibitory populations.
-
-Signature of each model should be : initial_state, parameters -> time_series of population activity
-Both initial state and parameters are dictionaries of float values.
-'''
-import os
-from typing import Optional
-
+import sys
+import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
+import json
 
-def _alpha_drive(boxcar, tau_alpha, dt):
-    """Convert a 0/1 light-on boxcar into an alpha-function drive time course.
-
-    Paper S1.9: because C1V1_T/T has slower kinetics than ChR2, the inhibitory
-    external input X_I is modeled as an alpha function t*exp(-t/tau_alpha) rather
-    than a boxcar. The alpha kernel is triggered at each rising edge of the
-    boxcar (so paired pulses sum), and peak-normalized to 1 at t=tau_alpha so the
-    XI amplitude parameter cleanly means "peak inhibitory drive".
-
-    Parameters
-    ----------
-    boxcar : (n_times,) array of 0/1 marking when the inhibitory light is on.
-    tau_alpha : float, alpha-function time constant (same units as dt*index).
-    dt : float, timestep.
-    """
-    boxcar = np.asarray(boxcar)
-    onsets = np.flatnonzero((boxcar > 0) & (np.r_[0, boxcar[:-1]] == 0))
-    idx = np.arange(len(boxcar))
-    drive = np.zeros(len(boxcar))
-    for o in onsets:
-        s = (idx - o) * dt
-        on = s >= 0
-        drive[on] += (s[on] / tau_alpha) * np.exp(1.0 - s[on] / tau_alpha)
-    return drive
-
-def wilson_cowan_model(initial_state, parameters, stimuli, time_steps, h=0.01):
-    """
-    Simulate the Wilson-Cowan model of excitatory and inhibitory populations.
-
-    Parameters
-    ----------
-    initial_state : dict
-        Initial state of the populations, e.g., {'E': 0.1, 'I': 0.1}
-    parameters : dict
-        Model parameters, e.g., {'E_max': 1.0, 'I_max': 1.0, 'W_EE': 1.0, 'W_EI': 1.0, 'W_IE': 1.0, 'W_II': 1.0, 'C_E': 0.1, 'C_I': 0.1}
-    stimuli : (n_time_steps, 2) np.ndarray 
-        [:, 0] is the transient input to the excitatory population and [:, 1] is the transient input to the inhibitory population. 
-        Each value is either 0 or 1, indicating whether the stimulus is off or on at that time step.
-    time_steps : int
-        Number of time steps to simulate.
-
-    Returns
-    -------
-    np.ndarray
-        Time series of population activity with shape (time_steps, 2) for E and I.
-    """
-    E = np.zeros(time_steps)
-    I = np.zeros(time_steps)
-    
-    E[0] = initial_state['E']
-    I[0] = initial_state['I']
-
-    E_max = parameters['E_max']
-    I_max = parameters['I_max']
-    W_EE = parameters['W_EE']
-    W_EI = parameters['W_EI']
-    W_IE = parameters['W_IE']
-    W_II = parameters['W_II']
-    tau_E = parameters['tau_E']
-    tau_I = parameters['tau_I']
-
-    C_E = parameters['C_E'] # constant input to the excitatory population
-    C_I = parameters['C_I'] # constant input to the inhibitory population    
-
-    XE = parameters['XE'] # transient input to the excitatary population 
-    XI = parameters['XI'] # transient input to the inhibitory population
-    
-    ## p27 : inhibitory pulse is considered slower and is applied with an alpha function in the paper. For now use a boxcar function for both
-    # tau_alpha = parameters['tau_alpha'] # time constant for alpha function for inhibitory input
-    # XI_drive = XI * _alpha_drive(stimuli[:, 1], tau_alpha, h)
-
-    for t in range(1, time_steps):
-        stim_E_on = stimuli[t][0]
-        stim_I_on = stimuli[t][1]
-        E_dot = -E[t-1] + (E_max - E[t-1])* np.maximum((W_EE * E[t-1] - W_EI * I[t-1] + C_E + XE * stim_E_on), 0)
-        E_dot /= tau_E
-        I_dot = -I[t-1] + (I_max - I[t-1])* np.maximum((W_IE * E[t-1] - W_II * I[t-1] + C_I + XI * stim_I_on), 0)
-        I_dot /= tau_I
-        E[t] = E[t-1] + h * E_dot
-        I[t] = I[t-1] + h * I_dot
-            
-    return np.column_stack((E, I))
-
-def wilson_cowan_slow_inhibition_model(initial_state, parameters, stimuli, time_steps, h=0.01):
-    """
-    Simulate the Wilson-Cowan model with slow inhibition - as proposed in Lin's paper
-
-    Parameters
-    ----------
-    initial_state : dict
-        Initial state of the populations, e.g., {'E': 0.1, 'I': 0.1}
-    parameters : dict
-        Model parameters, e.g., {'E_max': 1.0, 'I_max': 1.0, 'W_EE': 1.0, 'W_EI': 1.0, 'W_IE': 1.0, 'W_II': 1.0, 'C_E': 0.1, 'C_I': 0.1}
-    stimuli : (n_time_steps, 2) np.ndarray 
-        [:, 0] is the transient input to the excitatory population and [:, 1] is the transient input to the inhibitory population. 
-        Each value is either 0 or 1, indicating whether the stimulus is off or on at that time step.
-    time_steps : int
-        Number of time steps to simulate.
-
-    Returns
-    -------
-    np.ndarray
-        Time series of population activity with shape (time_steps, 2) for E and I.
-    """
-    E = np.zeros(time_steps)
-    I = np.zeros(time_steps)
-    S = np.zeros(time_steps) # slow inhibition from TRN activity
-    
-    E[0] = initial_state['E']
-    I[0] = initial_state['I']
-    S[0] = initial_state['S']
-
-    E_max = parameters['E_max']
-    I_max = parameters['I_max']
-    W_EE = parameters['W_EE']
-    W_EI = parameters['W_EI']
-    W_IE = parameters['W_IE']
-    W_II = parameters['W_II']
-    W_ES = parameters['W_ES'] # slow inhibition from TRN activity
-    W_IS = parameters['W_IS'] # slow inhibition from TRN activity
-
-    tau_E = parameters['tau_E']
-    tau_I = parameters['tau_I']
-    tau_S = parameters['tau_S']
-
-    C_E = parameters['C_E'] # constant input to the excitatory population
-    C_I = parameters['C_I'] # constant input to the inhibitory population    
-
-    XE = parameters['XE'] # transient input to the excitatary population 
-    XI = parameters['XI'] # transient input to the inhibitory population
-
-    for t in range(1, time_steps):
-        stim_E_on = stimuli[t][0]
-        stim_I_on = stimuli[t][1]
-
-        S_dot = -S[t-1] + I[t-1]
-        S_dot /= tau_S
-        S[t] = S[t-1] + h * S_dot
-        
-        E_dot = -E[t-1] + (E_max - E[t-1])* np.maximum((W_EE * E[t-1] - W_EI * I[t-1] - W_ES * S[t-1] + C_E + XE * stim_E_on), 0)
-        E_dot /= tau_E
-        I_dot = -I[t-1] + (I_max - I[t-1])* np.maximum((W_IE * E[t-1] - W_II * I[t-1] - W_IS * S[t-1] + C_I + XI * stim_I_on), 0)
-        I_dot /= tau_I
-        E[t] = E[t-1] + h * E_dot
-        I[t] = I[t-1] + h * I_dot
-            
-    return np.column_stack((E, I, S))
-
-def lin_model(initial_state, parameters, stimuli, time_steps, h=0.01):
-    """
-    Simulate Lin's model of excitatory and inhibitory populations as described in paper.
-
-    Parameters
-    ----------
-    initial_state : dict
-        Initial state of the populations + latent variables e.g., {'E': 0.1, 'I': 0.1, 'S': 0.1, 'L': 0.1, 'B': 0.1, 'T': 0.1}
-    parameters : dict
-        Model parameters, e.g., {'W_EE': 1.0, 'W_EI': 1.0, 'W_IE': 1.0, 'I_EE': 1.0, 'C_E': 0.1, 'C_I': 0.1}
-    stimuli : (n_time_steps, 2) np.ndarray 
-        [:, 0] is the transient input to the excitatory population and [:, 1] is the transient input to the inhibitory population. 
-        Each value is either 0 or 1, indicating whether the stimulus is off or on at that time step.
-    time_steps : int
-        Number of time steps to simulate.
-
-    Returns
-    -------
-    np.ndarray
-        Time series of population activity with shape (time_steps, 2) for E and I.
-    """
-    E = np.zeros(time_steps)
-    I = np.zeros(time_steps)
-    # These 5 values are the latent variables in the model, which will form the "state"
-    S = np.zeros(time_steps)
-    L = np.zeros(time_steps)
-    R = np.zeros(time_steps)
-    B = np.zeros(time_steps)
-    T = np.zeros(time_steps)
-    
-    E[0] = initial_state['E']
-    I[0] = initial_state['I']
-    S[0] = initial_state['S']
-    L[0] = initial_state['L'] # LGN neurons
-    R[0] = initial_state['R'] # TRN neurons
-    B[0] = initial_state['B']
-    T[0] = initial_state['T'] # slow inhibition from TRN activity 
-
-    E_max = parameters['E_max']
-    I_max = parameters['I_max']
-    L_max = parameters['L_max']
-
-    W_EE = parameters['W_EE']
-    W_EI = parameters['W_EI']
-    W_IE = parameters['W_IE']
-    W_II = parameters['W_II']
-    W_ES = parameters['W_ES']
-    W_IS = parameters['W_IS']
-    W_EL = parameters['W_EL']
-    W_IL = parameters['W_IL']
-    W_LB = parameters['W_LB']
-    W_LT = parameters['W_LT']
-    W_LE = parameters['W_LE']
-    W_RE = parameters['W_RE']
-    W_RL = parameters['W_RL']
-    
-    tau_E = parameters['tau_E']
-    tau_I = parameters['tau_I']
-    tau_S = parameters['tau_S']
-    tau_R = parameters['tau_R']
-    tau_B = parameters['tau_B']
-
-    C_E = parameters['C_E'] # constant input to the excitatory population
-    C_I = parameters['C_I'] # constant input to the inhibitory population    
-    C_L = parameters['C_L']
-    C_R = parameters['C_R']
-
-    XE = parameters['XE'] # transient input to the excitatory population 
-    XI = parameters['XI'] # transient input to the inhibitory population
-
-    for t in range(1, time_steps):
-        stim_E_on = stimuli[t][0]
-        stim_I_on = stimuli[t][1]
-
-        S_dot = -S[t-1] + I[t-1]
-        S_dot /= tau_S
-        S[t] = S[t-1] + h * S_dot
-
-        L_dot = -L[t-1] + (L_max - L[t-1])* np.maximum((W_LE * E[t-1] + C_L + W_LB * L[t-1] * B[t-1] - W_LT * T[t-1]), 0)
-        L_dot /= tau_E # use tau_E - same time constant 
-        L[t] = L[t-1] + h * L_dot
-
-        T_dot = -T[t-1] + R[t-1]
-        T_dot = T_dot / tau_S
-        T[t] = T[t-1] + h * T_dot
-
-        B_dot = -B[t-1] + (1 - B[t-1]) * np.maximum(1 - L[t-1], 0)
-        B_dot /= tau_B
-        B[t] = B[t-1] + h * B_dot
-
-        R_dot = -R[t-1] + (1 - R[t-1]) * np.maximum(W_RE * E[t-1] + W_RL*L[t-1] - C_R, 0)
-        R_dot /= tau_R
-        R[t] = R[t-1] + h * R_dot        
-
-        E_dot = -E[t-1] + (E_max - E[t-1])* np.maximum(W_EE * E[t-1] - W_EI * I[t-1] + C_E + XE * stim_E_on - W_ES * S[t-1] + W_EL * L[t-1], 0)
-        E_dot /= tau_E
-        I_dot = -I[t-1] + (I_max - I[t-1])* np.maximum(W_IE * E[t-1] - W_II * I[t-1] + C_I + XI * stim_I_on - W_IS * S[t-1] + W_IL * L[t-1], 0)
-        I_dot /= tau_I
-
-        E[t] = E[t-1] + h * E_dot
-        I[t] = I[t-1] + h * I_dot
-
-        # state = {
-        #     'S' : S[t],
-        #     'L' : L[t],
-        #     'B' : B[t],
-        #     'R' : R[t],
-        #     'T' : T[t]
-        # }
-
-    return np.column_stack((E, I, S, L, B, R, T))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Data synthesis + k-fold split generation
-#
-# A single model registry (MODELS) lets us synthesise data from either the base
-# Wilson-Cowan model or the slow-inhibition variant. Each entry pairs a model
-# function with a defaults module that supplies the simulation grid, per-sample
-# parameter medians/MADs, and the initial state. Only the observed E, I channels
-# are saved (any hidden state, e.g. the WCS slow variable S, is dropped), so the
-# data contract stays (n_samples, 2, n_repeats, n_times, 2) for every model.
-# ────────────────────────────────────────────────────────────────────────────
-from . import wilson_cowan_defaults as wc_defaults
-from . import wilson_cowan_slow_defaults as wcs_defaults
-
-MODELS = {
-    "wilson_cowan": {
-        "model_fn": wilson_cowan_model,
-        "defaults": wc_defaults,
-        "fold_prefix": "wc",
-    },
-    "wilson_cowan_slow": {
-        "model_fn": wilson_cowan_slow_inhibition_model,
-        "defaults": wcs_defaults,
-        "fold_prefix": "wcs",
-    },
-}
-
-DATA_ROOT = "/home/dabin/data/wc_simulations"
-
-
-def _raw_path(model: str, noiseless: bool = False) -> str:
-    """Default output path for a model's raw dataset (noiseless twin in a subdir)."""
-    sub = "noiseless" if noiseless else ""
-    return os.path.join(DATA_ROOT, sub, f"{model}.npz")
-
-
-def _generate_parameters(param_medians, param_mad, n_samples, random_seed=0):
-    """(n_samples, n_params) array; each param ~ Normal(median, 0.2*MAD), clipped >=0."""
+def get_params(random_seed: int = 42):
     rng = np.random.default_rng(random_seed)
-    parameters = np.zeros((n_samples, len(param_medians)))
+    #Model parameters
+    params_wc = {
+        'tau_E' : rng.normal(6.0, 0.1), # time constant for excitatory population
+        'tau_I' : rng.normal(5.0, 0.1), # time constant for inhibitory population
+        'W_EE' : rng.normal(0.2, 0.01),  # weight of excitatory to excitatory connections
+        'W_IE' : rng.normal(0.2, 0.01),  # weight of inhibitory to excitatory connections
+        'W_EI' : rng.normal(0.1, 0.005),  # weight of excitatory to inhibitory connections
+        'W_II' : rng.normal(0.15, 0.005),  # weight of inhibitory to inhibitory connections
+        'E_max' : 10.0,
+        'I_max' : 10.0,
+        'XE' : rng.normal(5, 0.1),
+        'XI' : rng.normal(1, 0.1)
+        }
+    params_wcs = params_wc.copy()
+    params_wcs.update({
+    'tau_S' : rng.normal(100, 2), # time constant for slow inhibition
+    'W_ES' : rng.normal(0.05, 0.005),  # weight of slow inhibition to excitatory connections
+    'W_IS' : rng.normal(0.05, 0.005),  # weight of slow inhibition to inhibitory connections
+    })
+    params_lin = params_wcs.copy()
+    params_lin.update({
+    'tau_R' : rng.normal(50, 5.0), # time constant for R population
+    'tau_B' : rng.normal(150, 5.0), # time constant for B population
+    'W_EL' : rng.normal(0.08, 0.01),  # Further adjusted weight for L to excitatory connections
+    'W_IL' : rng.normal(0.08, 0.01),  # Further adjusted weight for L to inhibitory connections
+    'W_LB' : rng.normal(0.08, 0.01),  # weight of B to L connections
+    'W_LT' : rng.normal(0.5, 0.02),  # Kept weight of T to L connections
+    'W_LE' : rng.normal(0.08, 0.01),  # Further adjusted weight for E to L connections
+    'W_RE' : rng.normal(0.08, 0.01),  # weight of E to R connections
+    'W_RL' : rng.normal(0.08, 0.01),  # weight of L to R connections
+    'L_max' : 2.0,
+    })
+    return params_wc, params_wcs, params_lin
+
+def WC_model(state_prev, y_prev, params):
+    """
+        Wilson-Cowan model t -> t+1 update function.
+        Returns new state and new output (E, I) at time t+1, given state, previous y at time t and params.
+    """
+    #Parameters
+    E_max = params['E_max']
+    I_max = params['I_max']
+
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+
+    C_E = params['C_E'] # constant input to the excitatory population
+    C_I = params['C_I'] # constant input to the inhibitory population    
+
+    XE = params['XE'] # transient input to the excitatory population 
+    XI = params['XI'] # transient input to the inhibitory population
+
+    #E, I and stims
+    E = y_prev['E']
+    I = y_prev['I']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
+
+    #Update equations
+    E_upd = E + 1/tau_E *(-E + (E_max-E)*np.maximum((W_EE*E - W_EI*I + C_E + XE*stim_E), 0))
+    I_upd = I + 1/tau_I *(-I + (I_max-I)*np.maximum((W_IE*E - W_II*I + C_I + XI*stim_I), 0))
+
+    return {}, (E_upd, I_upd)
+
+
+def WCS_model(state_prev, y_prev, params):
+    """
+        Wilson-Cowan model + slow inhibitiom t -> t+1 update function.
+        Returns new state and new output (E, I) at time t+1, given state, previous y at time t and params.
+    """
+    #State variables
+    S = state_prev['S']
+
+    #Parameters
+    E_max = params['E_max']
+    I_max = params['I_max']
+
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    W_ES = params['W_ES']
+    W_IS = params['W_IS']
+    
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+    tau_S = params['tau_S']
+
+    C_E = params['C_E'] # constant input to the excitatory population
+    C_I = params['C_I'] # constant input to the inhibitory population    
+
+    XE = params['XE'] # transient input to the excitatory population 
+    XI = params['XI'] # transient input to the inhibitory population
+
+    #E, I and stims
+    E = y_prev['E']
+    I = y_prev['I']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
+
+    #Update equations
+    E_upd = E + 1/tau_E *(-E + (E_max-E)*np.maximum((W_EE*E - W_EI*I + C_E + XE*stim_E - W_ES*S), 0))
+    I_upd = I + 1/tau_I *(-I + (I_max-I)*np.maximum((W_IE*E - W_II*I + C_I + XI*stim_I - W_IS*S), 0))
+    S_upd = S + 1/tau_S * (-S + I)
+
+    new_state = {'S': S_upd}
+
+    return new_state, (E_upd, I_upd)
+
+def lin_model(state_prev, y_prev, params):
+    """
+        Lin's model t -> t+1 update function. 
+        Returns new state and new output (E, I) at time t+1, given state, previous y at time t and params.
+    """
+    #State variables
+    S = state_prev['S']
+    L = state_prev['L']
+    R = state_prev['R']
+    B = state_prev['B']
+    T = state_prev['T']
+
+    #Parameters
+    E_max = params['E_max']
+    I_max = params['I_max']
+    L_max = params['L_max']
+
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    W_ES = params['W_ES']
+    W_IS = params['W_IS']
+    W_EL = params['W_EL']
+    W_IL = params['W_IL']
+    W_LB = params['W_LB']
+    W_LT = params['W_LT']
+    W_LE = params['W_LE']
+    W_RE = params['W_RE']
+    W_RL = params['W_RL']
+    
+    tau_E = params['tau_E']
+    tau_I = params['tau_I']
+    tau_S = params['tau_S']
+    tau_R = params['tau_R']
+    tau_B = params['tau_B']
+
+    C_E = params['C_E'] # constant input to the excitatory population
+    C_I = params['C_I'] # constant input to the inhibitory population    
+    C_L = params['C_L']
+    C_R = params['C_R']
+
+    XE = params['XE'] # transient input to the excitatory population 
+    XI = params['XI'] # transient input to the inhibitory population
+
+    #E, I and stims
+    E = y_prev['E']
+    I = y_prev['I']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
+
+    #Update equations
+    E_upd = E + 1/tau_E *(-E + (E_max-E)*np.maximum((W_EE*E - W_EI*I + C_E + XE*stim_E - W_ES*S + W_EL*L), 0))
+    I_upd = I + 1/tau_I *(-I + (I_max-I)*np.maximum((W_IE*E - W_II*I + C_I + XI*stim_I - W_IS*S + W_IL*L), 0))
+    S_upd = S + 1/tau_S * (-S + I)
+    L_upd = L + 1/tau_E * (-L + (L_max-L)*np.maximum((W_LE*E + C_L + W_LB*L*B - W_LT*T), 0))
+    B_upd = B + 1/tau_B * (-B + (1-B)*np.maximum((1 - L), 0))
+    R_upd = R + 1/tau_R * (-R + (1-R)*np.maximum((W_RE*E + W_RL*L - C_R), 0))
+    T_upd = T + 1/tau_S * (-T + R)
+
+    new_state = {'S': S_upd, 'L': L_upd, 'R': R_upd, 'B': B_upd, 'T': T_upd}
+
+    return new_state, (E_upd, I_upd)
+
+def init_WC_steadystate(params: dict, E_0: float = 1.0, I_0: float = 1.0) -> tuple[dict, tuple[float, float], dict]:
+    """Initialize the WC model for E, I steady-state values.
+
+    Args:
+        params: Dictionary of model parameters.
+        E_0: Target steady-state value for the excitatory population.
+        I_0: Target steady-state value for the inhibitory population.
+
+    Returns:
+        tuple: (initial_state, initial_y, updated_params)
+            - initial_state (dict): Initial state (empty for WC).
+            - initial_y (tuple): Target steady state values (E_0, I_0).
+            - updated_params (dict): Parameters with C_E, C_I set.
+    """
+    E_max, I_max, W_EE, W_EI, W_IE, W_II = params['E_max'], params['I_max'], params['W_EE'], params['W_EI'], params['W_IE'], params['W_II']
+    # Choose C_E, C_I to satisfy steady-state equations
+    params['C_E'] = E_0 / (E_max - E_0) - W_EE * E_0 + W_EI * I_0
+    params['C_I'] = I_0 / (I_max - I_0) - W_IE * E_0 + W_II * I_0
+
+    return {}, (E_0, I_0), params
+
+def init_WCS_steadystate(params: dict, E_0: float = 1.0, I_0: float = 1.0) -> tuple[dict, tuple[float, float], dict]:
+    """Initialize the WCS model for E, I, S steady-state values.
+
+    Args:
+        params: Dictionary of model parameters.
+        E_0: Target steady-state value for the excitatory population.
+        I_0: Target steady-state value for the inhibitory population.
+
+    Returns:
+        tuple: (initial_state, initial_y, updated_params)
+            - initial_state (dict): Initial values of S.
+            - initial_y (tuple): Target steady state values (E_0, I_0).
+            - updated_params (dict): Parameters with C_E, C_I set.
+    """
+    S_0 = I_0 #S0 steady-state value
+
+    E_max, I_max, W_EE, W_EI, W_IE, W_II, W_ES, W_IS = params['E_max'], params['I_max'], params['W_EE'], params['W_EI'], params['W_IE'], params['W_II'], params['W_ES'], params['W_IS']
+    # Choose C_E, C_I to satisfy steady-state equations
+    params['C_E'] = E_0 / (E_max - E_0) - W_EE * E_0 + (W_EI + W_ES) * I_0
+    params['C_I'] = I_0 / (I_max - I_0) - W_IE * E_0 + (W_II + W_IS) * I_0
+
+
+    return {'S': S_0}, (E_0, I_0), params
+
+
+def init_lin_steadystate(params: dict, E_0: float = 1.0, I_0: float = 1.0, L_0: float = 0.5, R_0: float = 0.5) -> tuple[dict, tuple[float, float], dict]:
+    """Initialize the Lin's model for E, I, S, L, B, R, T steady-state values.
+
+    Args:
+        params: Dictionary of model parameters.
+        E_0: Target steady-state value for the excitatory population.
+        I_0: Target steady-state value for the inhibitory population.
+        L_0: Target steady-state value for the L population.
+        R_0: Target steady-state value for the R population.
+
+    Returns:
+        tuple: (initial_state, initial_y, updated_params)
+            - initial_state (dict): Initial values of S, L, R, B, T.
+            - initial_y (tuple): Target steady state values (E_0, I_0).
+            - updated_params (dict): Parameters with C_E, C_I, C_L, C_R set.
+    """
+    if L_0 >= 1.0:
+        raise ValueError("L_0 must be less than 1.0 to ensure non-zero B_0.")
+    # Derive dependent steady-state variables
+    S_0 = I_0
+    T_0 = R_0
+    
+    # B_0 is uniquely determined by L_0
+    B_0 = (1.0 - L_0) / (2.0 - L_0)
+
+    # Extract model parameters
+    E_max = params['E_max']
+    I_max = params['I_max']
+    L_max = params['L_max']
+
+    W_EE = params['W_EE']
+    W_EI = params['W_EI']
+    W_IE = params['W_IE']
+    W_II = params['W_II']
+    W_ES = params['W_ES']
+    W_IS = params['W_IS']
+    W_EL = params['W_EL']
+    W_IL = params['W_IL']
+    W_LB = params['W_LB']
+    W_LT = params['W_LT']
+    W_LE = params['W_LE']
+    W_RE = params['W_RE']
+    W_RL = params['W_RL']
+
+    # Choose constant inputs to satisfy steady-state equations
+    params['C_E'] = E_0 / (E_max - E_0) - W_EE * E_0 + (W_EI + W_ES) * I_0 - W_EL * L_0
+    params['C_I'] = I_0 / (I_max - I_0) - W_IE * E_0 + (W_II + W_IS) * I_0 - W_IL * L_0
+    params['C_L'] = L_0 / (L_max - L_0) - W_LE * E_0 - W_LB * L_0 * B_0 + W_LT * R_0
+    params['C_R'] = W_RE * E_0 + W_RL * L_0 - R_0 / (1.0 - R_0)
+
+    initial_state = {
+        'S': S_0,
+        'L': L_0,
+        'R': R_0,
+        'B': B_0,
+        'T': T_0
+    }
+    return initial_state, (E_0, I_0), params
+
+def add_noise(data: np.ndarray, noise_level: float) -> np.ndarray:
+    """
+    Add Gaussian noise to the data.
+
+    Args:
+        data (np.ndarray): Input data array.
+        noise_level (float): Standard deviation of the Gaussian noise.
+
+    Returns:
+        np.ndarray: Noisy data.
+    """
+    noise = np.random.normal(0, noise_level, size=data.shape)
+    return data + noise
+
+def generate_model_data(model_name: str, params: dict, tmax: int, stim_designs: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Generate synthetic data for the specified model.
+
+    Args:
+        model_name (str): Name of the model ('wc', 'wcs', or 'lin').
+        params (dict): Dictionary of model parameters.
+        tmax (int): Total number of time steps.
+        stim_designs (tuple[np.ndarray, np.ndarray]): Tuple containing stimulus arrays for excitatory and inhibitory populations.
+
+    Returns:
+        tuple: (Et, It) - time series for excitatory and inhibitory populations.
+    """
+    if model_name == "wc":
+        model = WC_model
+        init_steadystate = init_WC_steadystate
+    elif model_name == "wcs":
+        model = WCS_model
+        init_steadystate = init_WCS_steadystate
+    elif model_name == "lin":
+        model = lin_model
+        init_steadystate = init_lin_steadystate
+    else:
+        raise ValueError(f"Unknown model name: {model_name}. Choose 'wc', 'wcs', or 'lin'.")
+
+    state, (E0, I0), params = init_steadystate(params)
+    stim_E_design, stim_I_design = stim_designs
+    ts = np.arange(tmax)
+    Et = np.zeros(tmax)
+    It = np.zeros(tmax)
+    Et[0], It[0] = E0, I0
+    for t in range(1, tmax):
+        y_prev = {
+            'E': Et[t-1],
+            'I': It[t-1],
+            'stim_E': stim_E_design[t-1],
+            'stim_I': stim_I_design[t-1]
+        }
+        state, (E, I) = model(state, y_prev, params)
+        Et[t] = E
+        It[t] = I
+
+    return Et, It
+
+def plot_simulation_results(
+    save_path: Path, 
+    n_samples: int, 
+    interpulse_ts: tuple[int], 
+    pulse_type_labels: list[str],
+    all_E_wc_clean: np.ndarray,
+    all_I_wc_clean: np.ndarray,
+    all_E_wcs_clean: np.ndarray, 
+    all_I_wcs_clean: np.ndarray,
+    all_E_lin_clean: np.ndarray, 
+    all_I_lin_clean: np.ndarray, 
+    all_E_wc_noisy: np.ndarray,
+    all_I_wc_noisy: np.ndarray,
+    all_E_wcs_noisy: np.ndarray,
+    all_I_wcs_noisy: np.ndarray,
+    all_E_lin_noisy: np.ndarray,
+    all_I_lin_noisy: np.ndarray,
+    time: np.ndarray,
+):
+    """
+    Generates and saves plots comparing WC, WCS, and Lin model simulations.
+    Overlays noisy repeats on top of clean WC, WCS, and Lin data using faded lines (small alpha).
+    """
+    n_interpulse_ts = len(interpulse_ts)
+    n_repeats = all_E_lin_noisy.shape[2]
     for sample_idx in range(n_samples):
-        for param_idx, (param_name, median) in enumerate(param_medians.items()):
-            mad = param_mad[param_name]
-            parameters[sample_idx, param_idx] = rng.normal(median, 0.2 * mad)
-    # ensure that no parameter is negative
-    parameters = np.maximum(parameters, 0)
-    return parameters
+        for p_idx, p_type in enumerate(pulse_type_labels):
+            for ip_idx, ip_t in enumerate(interpulse_ts):
+                stim_condition_idx = p_idx * n_interpulse_ts + ip_idx
+
+                fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(18, 5), tight_layout=True)
+
+                # 1. Plot WC Model
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
+                    axes[0].plot(
+                        time, 
+                        all_E_wc_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C0', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        linestyle=':',
+                        label='E(t) Noisy' if r == 0 else ""
+                    )
+                    axes[0].plot(
+                        time, 
+                        all_I_wc_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C1', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        linestyle=':',
+                        label='I(t) Noisy' if r == 0 else ""
+                    )
+
+                # Plot Clean/deterministic trace on top with a solid line
+                axes[0].plot(
+                    time, 
+                    all_E_wc_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='E(t) WC Clean', 
+                    color='C0', 
+                    linestyle=':',
+                    linewidth=2.0
+                )
+                axes[0].plot(
+                    time, 
+                    all_I_wc_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='I(t) WC Clean', 
+                    color='C1', 
+                    linestyle=':',
+                    linewidth=2.0
+                )
+                axes[0].set_title(f"WC Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
+                axes[0].legend()
+                axes[0].set_xlabel("Time (ms)")
+                axes[0].set_ylabel("Activity")
+
+                # 2. Plot WCS Model
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
+                    axes[1].plot(
+                        time, 
+                        all_E_wcs_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C0', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        linestyle='--',
+                        label='E(t) Noisy' if r == 0 else ""
+                    )
+                    axes[1].plot(
+                        time, 
+                        all_I_wcs_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C1', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        linestyle='--',
+                        label='I(t) Noisy' if r == 0 else ""
+                    )
+
+                # Plot Clean/deterministic trace on top with a solid line
+                axes[1].plot(
+                    time, 
+                    all_E_wcs_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='E(t) WCS Clean', 
+                    color='C0', 
+                    linestyle='--', 
+                    linewidth=2.0
+                )
+                axes[1].plot(
+                    time, 
+                    all_I_wcs_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='I(t) WCS Clean', 
+                    color='C1', 
+                    linestyle='--', 
+                    linewidth=2.0
+                )
+                axes[1].set_title(f"WCS Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
+                axes[1].legend()
+                axes[1].set_xlabel("Time (ms)")
+                axes[1].set_ylabel("Activity")
+
+                # 3. Plot Lin Model
+                # Plot noisy repeats first with small alpha so they are faded
+                for r in range(n_repeats):
+                    axes[2].plot(
+                        time, 
+                        all_E_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C0', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        label='E(t) Noisy' if r == 0 else ""
+                    )
+                    axes[2].plot(
+                        time, 
+                        all_I_lin_noisy[sample_idx, stim_condition_idx, r, :], 
+                        color='C1', 
+                        alpha=0.3, 
+                        linewidth=1.0,
+                        label='I(t) Noisy' if r == 0 else ""
+                    )
+
+                # Plot Clean/deterministic trace on top with a solid line
+                axes[2].plot(
+                    time, 
+                    all_E_lin_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='E(t) Lin Clean', 
+                    color='C0', 
+                    linewidth=2.0
+                )
+                axes[2].plot(
+                    time, 
+                    all_I_lin_clean[sample_idx, stim_condition_idx, 0, :], 
+                    label='I(t) Lin Clean', 
+                    color='C1', 
+                    linewidth=2.0
+                )
+                axes[2].set_title(f"Lin Model - Pulse Type: {p_type}, Interpulse: {ip_t}ms")
+                axes[2].legend()
+                axes[2].set_xlabel("Time (ms)")
+                axes[2].set_ylabel("Activity")
+
+                plt.savefig(save_path / f"sample_{sample_idx}_pulse_{p_type}_interpulse_{ip_t}.png", dpi=150)
+                plt.close(fig) # Close the figure to free memory
 
 
-def _add_noise(mean, random_seed=0):
-    """Add signal-dependent observation noise: std = 0.1 * sqrt(mean), per time bin.
-
-    Parameters
-    ----------
-    mean : (n_times, 2) clean E/I response.
-
-    Returns
-    -------
-    (n_times, 2) noisy signal.
+def _generate_stimulus_designs(p_type: str, stim_t: int, stim_dur: int, ip_t: int, tmax: int) -> tuple[np.ndarray, np.ndarray]:
     """
-    rng = np.random.default_rng(random_seed)
-    noise_std = 0.1 * np.sqrt(mean)
-    return mean + rng.normal(0, noise_std, size=mean.shape)
+    Generates stimulus design arrays for excitatory and inhibitory populations.
 
-def _cv_gaussian_smooth(repeats):
-    """Smooth the repeats with a Gaussian kernel.
-    Choose the smoothing bandwidth dynamically by performing a grid search. 
+    Args:
+        p_type (str): Pulse type string (e.g., "EE", "EI", "IE", "II").
+        stim_t (int): Time step at which the first stimulus is applied.
+        stim_dur (int): Duration of each stimulus pulse.
+        ip_t (int): Interpulse time for the second stimulus.
+        tmax (int): Total number of time steps.
 
-    The input repeats will contain m number of repeats. 
-    Iterate through the repeats, and for each repeat smooth the repeat with bandwidth b and compute the MSE between the smoothed repeat and the mean of the remaining repeats. 
-    Perform this for a range of bandwidths and choose the bandwidth that minimizes the MSE.
-
-    Parameters
-    ----------
-    repeats : (n_repeats, n_times, 2) array of noisy repeats.
-
-    Returns
-    -------
-    repeats : (n_repeats, n_times, 2) array of smoothed repeats.
-    bandwidth : float, the optimal bandwidth used for smoothing.
+    Returns:
+        tuple[np.ndarray, np.ndarray]: (stimE_design_current, stimI_design_current)
     """
-    from scipy.ndimage import gaussian_filter1d
+    stimE_design_current = np.zeros(tmax)
+    stimI_design_current = np.zeros(tmax)
 
-    bandwidth_range = np.geomspace(1, 15, 8) # range of bandwidths to search over
-    mse_list = []
-    for b in bandwidth_range:
-        errs = []
-        for i in range(repeats.shape[0]):
-            # smoothen the current repeat
-            smoothed_repeat = gaussian_filter1d(repeats[i], sigma=b, axis=0)
-            # compute the mean of the remaining repeats
-            remaining_mean = np.mean(np.delete(repeats, i, axis=0), axis=0)
-            # compute the MSE between the smoothed repeat and the mean of the remaining repeats
-            mse = np.mean((smoothed_repeat - remaining_mean) ** 2)
-            errs.append(mse)
-        mse_list.append(np.mean(errs))
-    optimal_bandwidth = bandwidth_range[np.argmin(mse_list)]
-    smoothed_repeats = np.zeros_like(repeats)
-    for i in range(repeats.shape[0]):
-        smoothed_repeats[i] = gaussian_filter1d(repeats[i], sigma=optimal_bandwidth, axis=0)
-    return smoothed_repeats, optimal_bandwidth
+    if p_type.startswith("E"):
+        stimE_design_current[stim_t:stim_t+stim_dur] = 1
+    elif p_type.startswith("I"):
+        stimI_design_current[stim_t:stim_t+stim_dur] = 1
 
-def generate_data(
-    model: str = "wilson_cowan",
-    noiseless: bool = False,
-    warmup_period: int = 0,
-    params: Optional[np.ndarray] = None,
-    stimuli : Optional[np.ndarray] = None,
-    random_seed: int = 0,    
-):
-    """Simulate a raw dataset for the chosen model.
-
-    Returns ``data`` (n_samples, 2, n_repeats, n_times, 2), ``stimuli``
-    (2, n_times, 2) and ``params`` (n_samples, n_params). The two stim conditions
-    are an excitatory pulse (drive to E) and an inhibitory pulse (drive to I). Only
-    the observed E, I channels are kept; any hidden state (e.g. the WCS slow
-    variable S) is dropped so the last axis is always 2.
-
-    ``model`` selects an entry in ``MODELS``; the simulation grid, per-sample
-    parameter medians/MADs and initial state all come from that model's defaults
-    module. Pass ``params`` (n_samples, n_params) to override sampling.
-
-    If ``noiseless`` is True the observation noise is skipped, so every repeat is
-    the identical clean response. Averaging the repeats into k-fold train/test
-    then yields train == test — the setup for the GD parameter-recovery sanity
-    check (no cross-validation, just "can GD hit the true params on clean data").
-
-    If there is a warmup period, prepend ``warmup_period`` time steps of zeros to the stimuli and 
-    the same number of time bins to n_times. And then discard the warmup period from the output data. 
-    """
-    cfg = MODELS[model]
-    defaults = cfg["defaults"]
-    model_fn = cfg["model_fn"]
-
-    n_repeats = defaults.N_REPEATS
-    n_times = defaults.N_TIMES
-
-    if params is None:
-        params = _generate_parameters(
-            defaults.PARAM_MEDIAN, defaults.PARAM_MAD, defaults.N_SAMPLES,
-            random_seed=random_seed,
-        )
-
-    if stimuli is None:
-        exc_stimuli = np.zeros((n_times, 2))
-        exc_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 0] = 1  # pulse to E
-        inh_stimuli = np.zeros((n_times, 2))
-        inh_stimuli[defaults.STIM_ONSET:defaults.STIM_ONSET + defaults.STIM_DUR, 1] = 1  # pulse to I
-        stimuli = np.stack([exc_stimuli, inh_stimuli], axis=0)
-
-    if warmup_period > 0:
-        n_times += warmup_period
-        stimuli = np.pad(stimuli, ((0, 0), (warmup_period, 0), (0, 0)), mode='constant', constant_values=0)
-
-    initial_state = defaults.INITIAL_STATE  # hard-coded, shared across samples
-    param_names = list(defaults.PARAM_MEDIAN.keys())
-
-    n_samples = len(params)
-    data = np.zeros((n_samples, 2, n_repeats, n_times, 2))
-    for i, p in enumerate(params):
-        p = dict(zip(param_names, p))
-        for j, stim in enumerate(stimuli):
-            activity = model_fn(initial_state, p, stim, n_times, h=defaults.H)
-            activity = activity[:, :2]  # keep observed E, I; drop any hidden state
-            for k in range(n_repeats):
-                if noiseless:
-                    data[i, j, k] = activity
-                else:
-                    data[i, j, k] = _add_noise(activity, random_seed=i * n_repeats + k)
-
-    if warmup_period > 0:
-        data = data[:, :, :, warmup_period:, :]  # discard warmup period
-        stimuli = stimuli[:, warmup_period:, :]
+    if p_type.endswith("E"):
+        stimE_design_current[ip_t:ip_t+stim_dur] = 1
+    elif p_type.endswith("I"):
+        stimI_design_current[ip_t:ip_t+stim_dur] = 1
         
-    return data, stimuli, params
+    return stimE_design_current, stimI_design_current
 
-def save_data(
-    model: str = "wilson_cowan",
-    output_path: Optional[str] = None,
-    noiseless: bool = False,
-    params: Optional[np.ndarray] = None,
+def generate_synthetic_dataset(
+    save_path: Path, 
+    n_samples: int = 10, 
+    tmax: int = 1510, 
+    stim_t: int = 10, 
+    stim_dur: int = 1, 
+    interpulse_ts: tuple[int] = (5, 50, 100, 200), 
+    noise_levels: list[float] = [0.05, 0.1, 0.2, 0.3], 
+    n_repeats: int = 10,
+    delta: float = 0.5, 
+    max_retries: int = 10
 ):
-    """Simulate the raw dataset for ``model`` and save it as an npz.
-
-    ``output_path`` defaults to ``DATA_ROOT/{model}.npz`` (noiseless twin under a
-    ``noiseless/`` subdir).
     """
-    output_path = output_path or _raw_path(model, noiseless=noiseless)
-    data, stimuli, params = generate_data(model=model, noiseless=noiseless, params=params)
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    np.savez(output_path, data=data, params=params, stimuli=stimuli)
-    return output_path
-
-def save_kfold_splits(
-    raw_path: str,
-    out_dir: str | None = None,
-    fold_prefix: str = "wc",
-    n_folds: int = 3,
-    seed: int = 0,
-):
-    """Derive ``n_folds`` repeat-averaged train/test files from the raw dataset.
-
-    The ``n_repeats`` noisy repeats are randomly partitioned into ``n_folds``
-    equal, disjoint folds. For each fold ``f``: the held-out fold is averaged into
-    ``test_data`` and the remaining repeats are averaged into ``train_data`` — both
-    of shape (n_samples, 2, n_times, 2). Parameters are cross-validated by fitting
-    on ``train_data`` and evaluating on the held-out ``test_data``.
-
-    Writes ``{fold_prefix}_fold{f}.npz`` (train_data, test_data, stimuli, params,
-    fold, test_repeats, train_repeats) and returns the list of paths.
+    Generate synthetic datasets for WC, WCS, and Lin models, saving clean and noisy (repeated) variants.
+    We generate (n_sample, n_stim_conditions, n_repeats, tmax) data
     """
-    raw = np.load(raw_path)
-    data = raw["data"]        # (n_samples, 2, n_repeats, n_times, 2)
-    stimuli = raw["stimuli"]  # (2, n_times, 2)
-    params = raw["params"]    # (n_samples, n_params)
+    save_path = Path(save_path)
+    save_path.mkdir(parents=True, exist_ok=True)
+    
+    pulse_type_labels = ["EE", "EI", "IE", "II"]
+    n_pulse_types = len(pulse_type_labels)
+    n_interpulse_ts = len(interpulse_ts)
+    n_stim_conditions = n_pulse_types * n_interpulse_ts
 
-    n_repeats = data.shape[2]
-    if n_repeats % n_folds != 0:
-        raise ValueError(
-            f"n_repeats ({n_repeats}) is not divisible by n_folds ({n_folds}); "
-            "folds would be unequal."
-        )
+    # 1. Clean Dataset Arrays (nrepeats=1)
+    all_E_wc_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_I_wc_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_E_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_I_wcs_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_E_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    all_I_lin_clean = np.zeros((n_samples, n_stim_conditions, 1, tmax))
+    
+    # E_design and I_design are now (n_stim_conditions, tmax)
+    all_E_design = np.zeros((n_stim_conditions, tmax))
+    all_I_design = np.zeros((n_stim_conditions, tmax))
+    
+    # pulse_type is a fixed array of strings, independent of samples or repeats
+    all_pulse_type_list = []
+    for p_type in pulse_type_labels:
+        for ip_t in interpulse_ts:
+            all_pulse_type_list.append(f"paired_{p_type}")
+    all_pulse_type_array = np.array(all_pulse_type_list)
 
-    rng = np.random.default_rng(seed)
-    folds = np.array_split(rng.permutation(n_repeats), n_folds)  # disjoint, equal
+    time_array = np.arange(-stim_t, tmax - stim_t)  # Time values, with 0 corresponding to first stimulus onset
 
-    out_dir = out_dir or os.path.dirname(raw_path)
-    os.makedirs(out_dir, exist_ok=True)
-    paths = []
-    for f, test_idx in enumerate(folds):
-        test_idx = np.sort(test_idx)
-        train_idx = np.sort(np.setdiff1d(np.arange(n_repeats), test_idx))
-        test_data = data[:, :, test_idx].mean(axis=2)    # (n_samples, 2, n_times, 2)
-        train_data = data[:, :, train_idx].mean(axis=2)
-        out_path = os.path.join(out_dir, f"{fold_prefix}_fold{f}.npz")
+    # Generate E_design and I_design once, as they are independent of samples
+    for p_idx, p_type in enumerate(pulse_type_labels):
+        for ip_idx, ip_t in enumerate(interpulse_ts):
+            stim_condition_idx = p_idx * n_interpulse_ts + ip_idx
+
+            stimE_design_current, stimI_design_current = _generate_stimulus_designs(
+                p_type, stim_t, stim_dur, ip_t, tmax
+            )
+            
+            all_E_design[stim_condition_idx, :] = stimE_design_current
+            all_I_design[stim_condition_idx, :] = stimI_design_current
+
+    # Structure to keep track of the final parameters used for the valid samples
+    parameters_json = {}
+
+    for sample_idx in range(n_samples):
+        valid_sample = False
+        for retry_count in range(max_retries):
+            params_wc, params_wcs, params_lin = get_params(random_seed=sample_idx + retry_count * 1000) # Vary seed for retries
+            
+            # Temporary storage to hold simulated data before we confirm the sample is valid
+            temp_E_wc = np.zeros((n_stim_conditions, tmax))
+            temp_I_wc = np.zeros((n_stim_conditions, tmax))
+            temp_E_wcs = np.zeros((n_stim_conditions, tmax))
+            temp_I_wcs = np.zeros((n_stim_conditions, tmax))
+            temp_E_lin = np.zeros((n_stim_conditions, tmax))
+            temp_I_lin = np.zeros((n_stim_conditions, tmax))
+
+            #Generate data for all stimulus conditions for this sample, if any of the conditions fail the stability check,
+            #  we retry all with new parameters
+            sample_ok = True
+            for p_idx, p_type in enumerate(pulse_type_labels):
+                for ip_idx, ip_t in enumerate(interpulse_ts):
+                    stim_condition_idx = p_idx * n_interpulse_ts + ip_idx
+
+                    # Retrieve the pre-generated stimulus design
+                    stimE_design_current = all_E_design[stim_condition_idx, :]
+                    stimI_design_current = all_I_design[stim_condition_idx, :]
+                    stim_designs = (stimE_design_current, stimI_design_current)
+                    
+                    Et_wc, It_wc = generate_model_data("wc", params_wc.copy(), tmax, stim_designs)
+                    Et_wcs, It_wcs = generate_model_data("wcs", params_wcs.copy(), tmax, stim_designs)
+                    Et_lin, It_lin = generate_model_data("lin", params_lin.copy(), tmax, stim_designs) #(tmax,) arrays
+                    
+                    # Verification check: check if E and I of the lin data are within delta of 1 at tmax (index -1)
+                    if abs(Et_lin[-1] - 1.0) > delta or abs(It_lin[-1] - 1.0) > delta:
+                        sample_ok = False
+                        break
+                    
+                    temp_E_wc[stim_condition_idx, :] = Et_wc
+                    temp_I_wc[stim_condition_idx, :] = It_wc
+                    temp_E_wcs[stim_condition_idx, :] = Et_wcs
+                    temp_I_wcs[stim_condition_idx, :] = It_wcs
+                    temp_E_lin[stim_condition_idx, :] = Et_lin
+                    temp_I_lin[stim_condition_idx, :] = It_lin
+                if not sample_ok:
+                    break
+            
+            if sample_ok:
+                # 1. Clean deterministic values
+                all_E_wc_clean[sample_idx, :, 0, :] = temp_E_wc
+                all_I_wc_clean[sample_idx, :, 0, :] = temp_I_wc
+                all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
+                all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
+                all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
+                all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+                
+                # Derive final steady-state parameters
+                _, _, final_wc_params = init_WC_steadystate(params_wc.copy())
+                _, _, final_wcs_params = init_WCS_steadystate(params_wcs.copy())
+                _, _, final_lin_params = init_lin_steadystate(params_lin.copy())
+
+                parameters_json[f"sample_{sample_idx}"] = {
+                    "wc": final_wc_params,
+                    "wcs": final_wcs_params,
+                    "lin": final_lin_params,
+                }
+                        
+                valid_sample = True
+                break
+        
+        if not valid_sample:
+            # Fallback in case no valid sample is generated after max_retries
+            print(f"Warning: Could not find parameters satisfying the stability condition within {max_retries} retries for sample {sample_idx}.")
+            # Store fallback deterministic
+            all_E_wc_clean[sample_idx, :, 0, :] = temp_E_wc
+            all_I_wc_clean[sample_idx, :, 0, :] = temp_I_wc
+            all_E_wcs_clean[sample_idx, :, 0, :] = temp_E_wcs
+            all_I_wcs_clean[sample_idx, :, 0, :] = temp_I_wcs
+            all_E_lin_clean[sample_idx, :, 0, :] = temp_E_lin
+            all_I_lin_clean[sample_idx, :, 0, :] = temp_I_lin
+
+            # Derive and store fallback steady-state parameters
+            _, _, final_wc_params = init_WC_steadystate(params_wc.copy())
+            _, _, final_wcs_params = init_WCS_steadystate(params_wcs.copy())
+            _, _, final_lin_params = init_lin_steadystate(params_lin.copy())
+
+            parameters_json[f"sample_{sample_idx}"] = {
+                "wc": final_wc_params,
+                "wcs": final_wcs_params,
+                "lin": final_lin_params,
+                "warning": "Did not meet stability criteria"
+            }
+            
+    # Save parameters JSON file in root directory
+    with open(save_path / "test_parameters.json", "w") as f:
+        json.dump(parameters_json, f, indent=4)
+
+    # Save clean datasets in root directory
+    np.savez(
+        save_path / "synthetic_test_data_clean_wc.npz",
+        E=all_E_wc_clean,
+        I=all_I_wc_clean,
+        E_design=all_E_design,
+        I_design=all_I_design,
+        pulse_type=all_pulse_type_array,
+        time=time_array
+    )
+    np.savez(
+        save_path / "synthetic_test_data_clean_wcs.npz",
+        E=all_E_wcs_clean,
+        I=all_I_wcs_clean,
+        E_design=all_E_design,
+        I_design=all_I_design,
+        pulse_type=all_pulse_type_array,
+        time=time_array
+    )
+    np.savez(
+        save_path / "synthetic_test_data_clean.npz",
+        E=all_E_lin_clean,
+        I=all_I_lin_clean,
+        E_design=all_E_design,
+        I_design=all_I_design,
+        pulse_type=all_pulse_type_array,
+        time=time_array
+    )
+
+    # Loop over each noise level to generate and save noisy data and plots in subdirectories
+    for noise_level in noise_levels:
+        noise_path = save_path / f"noise_{noise_level:.2f}"
+        noise_path.mkdir(parents=True, exist_ok=True)
+
+        all_E_wc_noisy = add_noise(np.repeat(all_E_wc_clean, n_repeats, axis=2), noise_level)
+        all_I_wc_noisy = add_noise(np.repeat(all_I_wc_clean, n_repeats, axis=2), noise_level)
+        all_E_wcs_noisy = add_noise(np.repeat(all_E_wcs_clean, n_repeats, axis=2), noise_level)
+        all_I_wcs_noisy = add_noise(np.repeat(all_I_wcs_clean, n_repeats, axis=2), noise_level)
+        all_E_lin_noisy = add_noise(np.repeat(all_E_lin_clean, n_repeats, axis=2), noise_level)
+        all_I_lin_noisy = add_noise(np.repeat(all_I_lin_clean, n_repeats, axis=2), noise_level)
+
         np.savez(
-            out_path,
-            train_data=train_data,
-            test_data=test_data,
-            stimuli=stimuli,
-            params=params,
-            fold=f,
-            test_repeats=test_idx,
-            train_repeats=train_idx,
+            noise_path / "synthetic_test_data_noisy_wc.npz",
+            E=all_E_wc_noisy,
+            I=all_I_wc_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
         )
-        paths.append(out_path)
-    return paths
+        np.savez(
+            noise_path / "synthetic_test_data_noisy_wcs.npz",
+            E=all_E_wcs_noisy,
+            I=all_I_wcs_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
+        )
+        np.savez(
+            noise_path / "synthetic_test_data_noisy.npz",
+            E=all_E_lin_noisy,
+            I=all_I_lin_noisy,
+            E_design=all_E_design,
+            I_design=all_I_design,
+            pulse_type=all_pulse_type_array,
+            time=time_array
+        )
 
-
-def build_dataset(model: str, noiseless: bool = False):
-    """(Re)generate a model's raw dataset if missing, then (re)build its k-folds."""
-    fold_prefix = MODELS[model]["fold_prefix"]
-    raw_path = _raw_path(model, noiseless=noiseless)
-    tag = "noiseless " if noiseless else ""
-    if not os.path.exists(raw_path):
-        print(f"[simulate_data] {tag}raw dataset missing -> generating {raw_path}")
-        save_data(model=model, noiseless=noiseless)
-    for p in save_kfold_splits(raw_path=raw_path, fold_prefix=fold_prefix):
-        print(f"[simulate_data] wrote {p}")
-
+        plot_simulation_results(
+            save_path=noise_path,
+            n_samples=n_samples,
+            interpulse_ts=interpulse_ts,
+            pulse_type_labels=pulse_type_labels,
+            all_E_wc_clean=all_E_wc_clean,
+            all_I_wc_clean=all_I_wc_clean,
+            all_E_wcs_clean=all_E_wcs_clean,
+            all_I_wcs_clean=all_I_wcs_clean,
+            all_E_lin_clean=all_E_lin_clean,
+            all_I_lin_clean=all_I_lin_clean,
+            all_E_wc_noisy=all_E_wc_noisy,
+            all_I_wc_noisy=all_I_wc_noisy,
+            all_E_wcs_noisy=all_E_wcs_noisy,
+            all_I_wcs_noisy=all_I_wcs_noisy,
+            all_E_lin_noisy=all_E_lin_noisy,
+            all_I_lin_noisy=all_I_lin_noisy,
+            time=time_array
+        )
 
 if __name__ == "__main__":
-    import argparse
-
-    ap = argparse.ArgumentParser(description="Simulate WC / WCS datasets and k-fold splits.")
-    ap.add_argument("--model", default="wilson_cowan", choices=list(MODELS),
-                    help="which dynamical-system model to simulate")
-    args = ap.parse_args()
-
-    # Noisy dataset + folds.
-    build_dataset(args.model, noiseless=False)
-    # Noiseless twin (train == test) for the GD parameter-recovery sanity check.
-    build_dataset(args.model, noiseless=True)
+    generate_synthetic_dataset(
+        save_path=Path("synthetic"), #point load_data to relevant .npz file in synthetic folder after running this script
+        n_samples=2, 
+        tmax=450, 
+        stim_t=50, 
+        # stim_dur=1, 
+        # interpulse_ts=(5, 50, 100, 200), 
+        # noise_levels=[0.05, 0.1, 0.2, 0.3], 
+        stim_dur=2, 
+        interpulse_ts=(3, 10, 120), 
+        noise_levels=[0.05, 0.1, 0.2, 0.3], 
+        n_repeats=20,
+        delta=0.5, 
+        max_retries=10
+    )
