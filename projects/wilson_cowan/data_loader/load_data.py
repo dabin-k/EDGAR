@@ -11,17 +11,18 @@ The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``)
       the ``s0_`` prefix; ``_split_params_s0`` strips them
       into the scan carry and hands the rest to ``model``.
 
-This module drives that single transition in the modes required by the four training
-objectives — teacher-forced one-step, autonomous rollout from anchors, and a full autonomous rollout — 
-and assembles``model_output`` dict that the loss functions consume. 
+This module drives that single transition in the modes required by the three training
+objectives — teacher-forced one-step (``A``), autonomous rollout from anchors (``B``), and a full
+autonomous rollout (``C``) — and assembles the ``model_output`` dict that the loss functions
+consume.
 
-The four objectives live in ``losses/`` (one file each). ``loss_fn`` dispatches to one of them by
-the objective set in the project ``config.yaml`` (``project_params.objective``, ``A``/``B``/``C``/
-``D``) so a benchmark run selects its objective without editing code. The rollout horizon/anchors
+The objectives live in ``losses/`` (one file each). ``loss_fn`` dispatches to one of them by
+the objective set in the project ``config.yaml`` (``project_params.objective``, ``A``/``B``/
+``C``) so a benchmark run selects its objective without editing code. The rollout horizon/anchors
 are likewise config-driven (``project_params.rollout_k`` / ``anchor_stride``); see the
 configuration note below for how they reach ``apply_model`` / ``loss_fn``. The time-axis dt is
 inferred from each session's stored ``time_axis`` on the real opto path; ``dt_seconds`` is only a
-bin->seconds convention for the synthetic files, which store no time axis.
+bin->seconds convention for the synthetic files, which store no time axis. Objective C is the full-trajectory rollout.
 
 Cross-validation is over repeats: ``simulate_data.save_kfold_splits`` writes ``wc*_fold{f}.npz``
 files, each a repeat-averaged ``train_data`` / ``test_data`` pair (shape ``(n_samples, 2, T, 2)``);
@@ -49,8 +50,7 @@ if _repo_root not in sys.path:
 from projects.wilson_cowan.data_loader.losses import (
     loss_A_one_step_tf,
     loss_B_rollout,
-    loss_C_latent_consistency,
-    loss_D_dynamics_aware,
+    loss_C_full_rollout,
 )
 from projects.wilson_cowan.data_loader.neural_data import (
     DEFAULT_GLOB,
@@ -71,8 +71,7 @@ try:
         "projects.wilson_cowan.data_loader.losses.loss_common",
         "projects.wilson_cowan.data_loader.losses.loss_a_one_step",
         "projects.wilson_cowan.data_loader.losses.loss_b_rollout",
-        "projects.wilson_cowan.data_loader.losses.loss_c_latent_consistency",
-        "projects.wilson_cowan.data_loader.losses.loss_d_dynamics_aware",
+        "projects.wilson_cowan.data_loader.losses.loss_c_full",
     ):
         _cloudpickle.register_pickle_by_value(_importlib.import_module(_modname))
 except Exception:
@@ -81,7 +80,7 @@ except Exception:
 
 # ── Objective + rollout configuration ──
 # Precedence: explicit config kwarg > env var > built-in default (below).
-DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B rollout MSE | C +latent-consistency | D +signatures
+DEFAULT_OBJECTIVE = "A"       # A one-step MSE | B anchored K-step rollout MSE | C full-trajectory rollout MSE
 DEFAULT_ROLLOUT_K = 3        # autonomous-rollout horizon (bins)
 DEFAULT_ANCHOR_STRIDE = 1   # bins between rollout anchors
 DEFAULT_DT_SECONDS = 0.001    # SYNTHETIC-only fallback bin width; real data infers dt from time_axis
@@ -90,15 +89,14 @@ DEFAULT_WARMUP_BINS = 0       # burn-in bins excluded from the loss (plan §6); 
 _OBJECTIVES = {
     "A": loss_A_one_step_tf,
     "B": loss_B_rollout,
-    "C": loss_C_latent_consistency,
-    "D": loss_D_dynamics_aware,
+    "C": loss_C_full_rollout,
 }
 
 
 def _rollout_anchors(T: int) -> tuple[np.ndarray, int]:
-    """Pick the start times for the autonomous-rollout training windows (objectives B/C/D).
+    """Pick the start times for the autonomous-rollout training windows (objective B).
 
-    Objectives B/C/D don't just roll the model out once from the start of the trajectory — they
+    Objective B doesn't just roll the model out once from the start of the trajectory — they
     roll it out from many starting points *along* the trajectory and average the error. Each such
     starting time is an "anchor". From anchor ``a`` the model is seeded with the state inferred at
     time ``a`` and then run autonomously (feeding its own predictions back) to predict the next
@@ -110,7 +108,7 @@ def _rollout_anchors(T: int) -> tuple[np.ndarray, int]:
       * anchors = an evenly spaced grid ``w, w+anchor_stride, w+2*anchor_stride, ...`` up to the
         last start for which a full ``K``-step window still fits (``T-1-K``), where ``w`` is the
         warmup offset ``EDGAR_WC_WARMUP_BINS``. Starting the grid at ``w`` keeps every
-        scored rollout window out of the burn-in region, so the burn-in is excluded from B/C/D
+        scored rollout window out of the burn-in region, so the burn-in is excluded from the B
         loss without any per-window masking (Objective A masks its own one-step window).
 
     Example: ``T=8000``, ``rollout_k=50``, ``anchor_stride=200``, ``warmup_bins=0`` → ``K=50`` and
@@ -562,18 +560,16 @@ def apply_model(model_fn, data, params):
     """Drive the evolved transition in every mode the objectives need → the §8 ``model_output``.
 
     vmaps over samples (axis 0, matched to per-sample ``params``) and, inside, over the two stim
-    conditions (params shared across conditions — same cell). The latent state is
-    ``z = [E, I, *sorted(hidden_carry)]`` (``z_dim = 2`` for the stateless base model, ``3`` for
-    the slow-``S`` variant). Returned dict, shapes ``[n, n_stim, ...]``:
+    conditions (params shared across conditions — same cell). Returned dict, shapes
+    ``[n, n_stim, ...]``:
 
     * ``pred_y_1step``        ``[…, T-1, 2]`` — teacher-forced one-step prediction (data E/I fed in).
-    * ``z_inferred``          ``[…, T, z]``   — latent inferred along the teacher-forced trajectory.
-    * ``pred_y_rollout``      ``[…, A, K, 2]``— autonomous rollout from A anchors (own E/I fed back).
-    * ``z_rollout``           ``[…, A, K, z]``— latent along those autonomous rollouts.
-    * ``z_target_future``     ``[…, A, K, z]``— inferred latent at the same absolute times.
-    * ``pred_y_full_rollout`` ``[…, T, 2]``   — one full-length autonomous rollout (Objective D only;
-      a placeholder equal to the observed trajectory otherwise, to avoid a long autonomous
-      backprop scan the other objectives never read).
+    * ``pred_y_rollout``      ``[…, A, K, 2]``— autonomous rollout from A anchors (own E/I fed back),
+      each seeded with the hidden state inferred along the teacher-forced pass.
+    * ``pred_y_full_rollout`` ``[…, T-1, 2]`` — one full-length autonomous rollout from ``t=0``
+      (predictions for ``t = 1..T-1``). Always computed so the plot can show the free rollout
+      whatever the objective; under A/B ``loss_fn`` never reads it, so JAX drops it from the
+      optimizer's traced ``value_and_grad`` (no training cost).
 
     Always returns this dict (including for ``X_eval``); the engine's ``_eval_fingerprint`` reduces
     it to the dedup fingerprint array using the field named by ``X_eval["_eval_fingerprint_key_name"]``
@@ -587,7 +583,6 @@ def apply_model(model_fn, data, params):
 
     T = E.shape[-1]
     anchor_starts, K = _rollout_anchors(T)
-    want_full = os.environ.get("EDGAR_WC_OBJECTIVE", DEFAULT_OBJECTIVE).upper() == "D"
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
         init_state, dyn_params = _split_params_s0(p)
@@ -609,13 +604,23 @@ def apply_model(model_fn, data, params):
 
             _, (means, hid_seq) = jax.lax.scan(tf_step, init_state, xs)  # (T-1,2), (T-1,nh)
 
-            obs = jnp.stack([E_c, I_c], axis=-1)                        # (T,2)
             hid_full = jnp.concatenate(
                 [_hidden_vec(init_state, hkeys)[None, :], hid_seq], axis=0
             )                                                          # (T,nh)
-            z_inferred = jnp.concatenate([obs, hid_full], axis=-1)     # (T,z)
 
-            # ── Autonomous rollout from each anchor (feed own E/I back; §7 free-running) ──
+            # One free-running step (feed own E/I back; §7), shared by both autonomous rollouts.
+            def free_step(carry, inp):
+                state, E_p, I_p = carry
+                sE_p, sI_p = inp
+                y_prev = {
+                    "E_prev": E_p, "I_prev": I_p,
+                    "stim_E_prev": sE_p, "stim_I_prev": sI_p,
+                }
+                new_state, mean = model_fn(state, y_prev, dyn_params)
+                E_n, I_n = mean
+                return (new_state, E_n, I_n), jnp.stack([E_n, I_n])
+
+            # ── Autonomous K-step rollout from each anchor ──
             def rollout(a):
                 E0 = jax.lax.dynamic_slice_in_dim(E_c, a, 1, 0)[0]
                 I0 = jax.lax.dynamic_slice_in_dim(I_c, a, 1, 0)[0]
@@ -623,56 +628,19 @@ def apply_model(model_fn, data, params):
                 state0 = {k: hid0[i] for i, k in enumerate(hkeys)}
                 sE_win = jax.lax.dynamic_slice_in_dim(sE_c, a, K, 0)   # (K,)
                 sI_win = jax.lax.dynamic_slice_in_dim(sI_c, a, K, 0)
+                _, pred = jax.lax.scan(free_step, (state0, E0, I0), (sE_win, sI_win))
+                return pred                                            # (K,2)
 
-                def r_step(carry, inp):
-                    state, E_p, I_p = carry
-                    sE_p, sI_p = inp
-                    y_prev = {
-                        "E_prev": E_p, "I_prev": I_p,
-                        "stim_E_prev": sE_p, "stim_I_prev": sI_p,
-                    }
-                    new_state, mean = model_fn(state, y_prev, dyn_params)
-                    E_n, I_n = mean
-                    y = jnp.stack([E_n, I_n])
-                    z = jnp.concatenate([y, _hidden_vec(new_state, hkeys)])
-                    return (new_state, E_n, I_n), (y, z)
+            pred_rollout = jax.vmap(rollout)(anchor_starts)            # (A,K,2)
 
-                _, (pred, zr) = jax.lax.scan(r_step, (state0, E0, I0), (sE_win, sI_win))
-                return pred, zr                                        # (K,2), (K,z)
-
-            pred_rollout, z_rollout = jax.vmap(rollout)(anchor_starts)  # (A,K,2), (A,K,z)
-
-            def gather_future(a):
-                return jax.lax.dynamic_slice_in_dim(z_inferred, a + 1, K, 0)  # (K,z)
-
-            z_target_future = jax.vmap(gather_future)(anchor_starts)   # (A,K,z)
-
-            # ── Full-length autonomous rollout (Objective D only) ──
-            if want_full:
-                def f_step(carry, inp):
-                    state, E_p, I_p = carry
-                    sE_p, sI_p = inp
-                    y_prev = {
-                        "E_prev": E_p, "I_prev": I_p,
-                        "stim_E_prev": sE_p, "stim_I_prev": sI_p,
-                    }
-                    new_state, mean = model_fn(state, y_prev, dyn_params)
-                    E_n, I_n = mean
-                    return (new_state, E_n, I_n), jnp.stack([E_n, I_n])
-
-                _, pred_full = jax.lax.scan(
-                    f_step, (init_state, E_c[0], I_c[0]), (sE_c[:-1], sI_c[:-1])
-                )                                                     # (T-1,2)
-                pred_full = jnp.concatenate([obs[:1], pred_full], axis=0)  # (T,2)
-            else:
-                pred_full = obs                                        # unused placeholder
+            # ── Full-length autonomous rollout from t=0 ──
+            _, pred_full = jax.lax.scan(
+                free_step, (init_state, E_c[0], I_c[0]), (sE_c[:-1], sI_c[:-1])
+            )                                                         # (T-1,2)
 
             return {
                 "pred_y_1step": means,
-                "z_inferred": z_inferred,
                 "pred_y_rollout": pred_rollout,
-                "z_rollout": z_rollout,
-                "z_target_future": z_target_future,
                 "pred_y_full_rollout": pred_full,
             }
 
@@ -682,7 +650,7 @@ def apply_model(model_fn, data, params):
 
 
 def loss_fn(model_output, data):
-    """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C/D).
+    """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C).
 
     Returns ``(n,)``. The engine wraps this in ``jnp.mean(loss_fn(...))``; each objective returns
     per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term. The

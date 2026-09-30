@@ -15,7 +15,7 @@ import os
 from .loss_common import per_sample_mse
 
 
-def loss_full_rollout(model_output, data):
+def loss_C_full_rollout(model_output, data):
     """Full-trajectory rollout MSE, per sample ``(n,)``.
 
     ``pred_y_full_rollout`` is ``[n, n_stim, T-1, 2]`` (prediction of ``y[t]`` for ``t = 1..T-1``),
