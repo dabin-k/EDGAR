@@ -59,8 +59,19 @@ def _evaluate_model_output(
     """
     if apply_model_fn is None:
         apply_model_fn = apply_model_plain
-    return apply_model_fn(model_fn, data, params)
-
+    out = apply_model_fn(model_fn, data, params)
+    # Fingerprint dedup (population/island) needs a flat array. A project whose apply_model returns
+    # a dict of named outputs names the field to fingerprint on via X_eval["_eval_fingerprint_key_name"]
+    # (set in its load_data, alongside "_sample_indices"); array-returning projects are unaffected.
+    if isinstance(out, dict):
+        fp_key = data.get("_eval_fingerprint_key_name")
+        if fp_key is not None:
+            out = out[fp_key]
+        else:
+            out = jax.numpy.concatenate(
+                [jax.numpy.ravel(v) for v in jax.tree_util.tree_leaves(out)]
+            )
+    return out
 
 def evaluate_sample_losses(
     model_fn: Callable[[dict, dict], jax.Array],
