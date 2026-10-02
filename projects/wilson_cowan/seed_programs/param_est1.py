@@ -49,9 +49,9 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         norm = np.convolve(np.ones(x.shape[-1]), w, mode="same")
         return np.apply_along_axis(lambda v: np.convolve(v, w, mode="same") / norm, -1, x)
 
-    # dt_ms = 1.0 in data - fine to hardcode 
-    E = _smooth_hamming(target_y[..., 0], dt_ms=1.0, bandwidth_ms=40.0)   # (C, T)
-    I = _smooth_hamming(target_y[..., 1], dt_ms=1.0, bandwidth_ms=40.0)
+    # dt_ms = 10.0 in data (10 ms bins) - fine to hardcode
+    E = _smooth_hamming(target_y[..., 0], dt_ms=10.0, bandwidth_ms=40.0)   # (C, T)
+    I = _smooth_hamming(target_y[..., 1], dt_ms=10.0, bandwidth_ms=40.0)
 
     # 1. Estimate E_max and I_max from observed peaks
     # This gives rather good estimates

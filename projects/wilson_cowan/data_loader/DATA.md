@@ -36,8 +36,10 @@ Values are per-fold trial-averaged firing rates, Hamming-smoothed (40 ms) and
 baseline-normalised (divided by mean rate in −0.5 to −0.1 s, so baseline ≈ 1.0).
 A fold with no trials (condition with fewer trials than `n_folds`) is all-NaN.
 
-`time_axis`: seconds relative to pulse onset. Default window −0.5 to +1.5 s,
-1 ms bins → 2000 bins, centres −0.4995 … +1.4995.
+`time_axis`: seconds relative to the onset of the first pulse. Spikes (recorded at 30 kHz) are
+binned into 10 ms bins; default window −0.5 to +1.5 s → 200 bins, centres −0.495 … +1.495. Bin k
+covers `[t_k − 5 ms, t_k + 5 ms)`, so the first pulse (t = 0) falls in the bin centred at +5 ms.
+The 1–2 ms pulses are shorter than one bin: `make_stimulus` marks every bin a pulse overlaps.
 
 ## k-fold splitting logic
 - Per condition, trials are permuted with `np.random.default_rng(fold_seed)` then split by `np.array_split(perm, n_folds)`.

@@ -2,27 +2,24 @@
 model:
   base: 'You are an AI scientist learning the dynamics of a **coupled neural
     circuit** with two interacting populations: an **excitatory** population E and
-    an **inhibitory** population I. Both are fully observed at every timestep. A
-    brief external **stimulus pulse** is delivered to the circuit early in each
-    trajectory. There are two stimulus conditions — a pulse to E or a pulse to
-    I, each stimulating the corresponding population - i.e. a pulse to E increases 
-    E activity, a pulse to I increases I activity.
+    an **inhibitory** population I. Your aim is to come up with an improved model that 
+    accurately captures the dynamics of the circuit seen across different stimulus conditions.
 
-    The model takes the previous excitatory and inhibitory activity (E[t-1], I[t-1]) and 
-    the previous stimulus, and outputs the next activity (E[t], I[t]). 
+    Optogenetic stimulation is used to deliver external pulses of varying lengths. The pulse can 
+    target either the excitatory or inhibitory population, and in some cases two stimuli can 
+    be delivered with varying inter-pulse intervals. The E pulse drives the excitatory population,
+    and the I pulse drives the inhibitory population.
+    
+    The model takes the previous excitatory and inhibitory activity (E[t-1], I[t-1]), the hidden_state, 
+    the previous stimulus (stim_E[t-1], stim_I[t-1]), and outputs the next activity (E[t], I[t]). 
+    The hidden_state would be necessary if the activities of E(t) and I(t) are not fully determined by their 
+    previous values and the previous stimulus. But increasing the complexity of the hidden_state will create 
+    a more powerful model, but the performance of the model will be penalised by the increased complexity of the 
+    hidden state.
+
     The objective of the model is to predict the mean activity of the E and I populations.
-    Models are scored by a Gaussian negative log-likelihood (NLL), and E and I population noise levels 
-    log_noise_coefs are fitted by graident descent alongside the other parameters of the model.
-    The NLL is averaged over stimulus conditions and time. Lower is better.
-
-    Models are scored on a FREE-ROLLOUT, NOT on one-step prediction. The rollout is seeded 
-    with the true first observation, and subsequent activities take model predictions as input. 
-    Errors therefore compound. 
-
-    To do better your model must capture (a) how each population relaxes toward a
-    baseline with its own time constant, (b) how the two populations DRIVE each
-    other — E excites, I inhibits, (c) how the external stimulus feeds in, and 
-    (d) how the population returns to baseline after the pulse. 
+    Models are scored by a MSE between the observed values of E and I firing rates against the free-rollout 
+    predictions of the model. Lower is better.
 
     Below are {num_parents} models, sorted from worst to best. *Analyze* their
     progression, *generalize* what lowers the loss, and *create* a new model that
@@ -31,7 +28,7 @@ model:
     '
   code_guidelines: '**Code Generation Guidelines:**
 
-    * Import any packages you use (use numpy as np).
+    * Import any packages you use (import numpy as np).
 
     * Model signature must be `def model(state, y_prev, params):` — a SINGLE
     forward step of the circuit. `params` is a dict of learnable scalar floats.
@@ -50,15 +47,13 @@ model:
     * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
     derivative. Compute a rate of change and take one Euler step with the fixed
     sampling interval, e.g.
-        H = 1.0   # integration step (module-level constant; time is unitless, dt=1)
+        H = 1.0   # integration step (module-level constant): one step = one 10 ms data bin
         E_dot = (-E_prev + drive_E) / tau_E
         E = E_prev + H * E_dot
     and return `E` (and likewise `I`). `H` is the known sampling grid — keep it a
     module-level constant, NOT a learnable parameter.
 
-    * HIDDEN STATE IS OPTIONAL. Both E and I are observed, and only add hidden_state if you think
-    the dynamics of E and I is not fully captured by the observed variables. 
-    `hidden_state` is a dict; if you use none, return `new_hidden_state = {{}}`.
+    * HIDDEN STATE IS OPTIONAL. `hidden_state` is a dict; if you use none, return `new_hidden_state = {{}}`.
     If a slow process helps (e.g. a slowly accumulating adaptation / slow
     inhibition variable that is NOT directly observed), you MAY carry it: read it
     from `hidden_state` (e.g. `hidden_state["S"]`) and return `new_hidden_state` with the SAME keys. Give
@@ -68,31 +63,29 @@ model:
     * Provide `model.DEFAULT_PARAMS`: a dict of sensible float initial values for
     EVERY key read from `params`. Values must be plain floats.
 
-    * Include `log_noise_coef` in `model.DEFAULT_PARAMS` (e.g. -4.6, i.e.
-    log(0.01)). This is the log observation-noise coefficient: the scorer models the
-    observation variance as `exp(log_noise_coef) * max(mean, 0.1)` and fits it per cell by
-    gradient descent. Your model body does NOT read or use `log_noise_coef` — just declare
-    it in `DEFAULT_PARAMS` so it becomes a learnable parameter.
-
     '
   image_analysis_instructions: '**Image Analysis Instructions:**
 
-    The image has two parts. The TOP strip shows two randomly chosen example
-    populations, each split into an E panel (left) and an I panel (right) showing that
-    population''s activity over timee — the data against your model''s FREE ROLLOUT. Therefore 
-    a wrong model VISIBLY DIVERGES from the data here — wrong amplitude,
-    wrong decay rate, spurious or missing oscillations, or an outright blow-up — while a
-    good model tracks the true trace across the whole trajectory.
+    The image shows the FREE ROLLOUT of the best-scoring parent model (named in the
+    title, with its objective loss). Each row is one randomly drawn (sample, stimulus
+    condition) pair; the row title gives the sample, the condition and that row''s
+    rollout MSE. The LEFT panel is E and the RIGHT panel is I. In each panel the grey
+    line is the observed data and the coloured line is the model''s free rollout (red
+    for E, blue for I); red shading marks when the E pulse is on and blue shading
+    marks when the I pulse is on. The x-axis is time from the first stimulus onset (ms). The first 100 ms of the
+    window (up to -50 ms) is an unscored warm-up that lets any hidden state settle;
+    the error after that is what counts.
 
-    The 2x2 grid BELOW plots the rollout errors (residuals) :
-    r_E = observed_E - predicted_E against the previous OBSERVED value of E or I, and
-    similarly for r_I. Leftover structure that TRENDS with a regressor still points at a
-    missing term in that variable, so it tells you what to add; but because rollout
-    errors ACCUMULATE along the trajectory, read the residual as a qualitative direction
-    (which variable, which term) rather than an exact estimate of the omitted term.
+    The rollout is seeded only with the first observation (and the `s0_` hidden
+    state) and then feeds on its own predictions, so errors compound and a wrong model
+    VISIBLY DIVERGES from the data: wrong peak amplitude, wrong rise or decay rate,
+    drift away from baseline, a missing undershoot/rebound, a wrong response to the
+    second pulse of a paired condition, spurious oscillations, or an outright blow-up.
+    A good model tracks the data across the whole trajectory in every row.
 
-    Use this to create a new model that adds exactly the indicated term(s) and beats
-    the parent models.
+    Compare where the mismatch appears (which population, during or after which pulse,
+    in which condition) to decide which mechanism is missing or wrong, then create a new
+    model that fixes it and beats the parent models.
 
     '
 parameter_estimator:

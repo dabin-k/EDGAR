@@ -310,17 +310,24 @@ def flatten_runs(spec: dict) -> list[dict]:
 
 
 def _sha256_file(path: Path) -> str:
-    """Compute the SHA256 hash of a file.
+    """Compute the SHA256 hash of a file, or of a directory's files.
 
-    Reads the file in chunks to efficiently handle large files.
+    Reads files in chunks to efficiently handle large files. A directory hashes each
+    file's relative path and content hash in sorted order, so renames and edits both
+    change the digest.
 
     Args:
-        path: The `Path` object of the file to hash.
+        path: The `Path` object of the file or directory to hash.
 
     Returns:
-        A hexadecimal string representing the SHA256 hash of the file's content.
+        A hexadecimal string representing the SHA256 hash of the content.
     """
     h = hashlib.sha256()
+    if path.is_dir():
+        for f in sorted(q for q in path.rglob("*") if q.is_file()):
+            h.update(f.relative_to(path).as_posix().encode() + b"\0")
+            h.update(_sha256_file(f).encode())
+        return h.hexdigest()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
@@ -356,7 +363,8 @@ def _gcs_exists(uri: str) -> bool:
         True if the URI exists, False otherwise.
     """
     try:
-        subprocess.run(["gsutil", "-q", "stat", uri], check=True, capture_output=True)
+        # `ls` (not `stat`) so a directory upload's prefix also counts as present.
+        subprocess.run(["gsutil", "-q", "ls", uri], check=True, capture_output=True)
         return True
     except Exception:
         return False
@@ -390,7 +398,7 @@ def ensure_data_uploaded(bucket: str, data_path: str, dry_run: bool) -> tuple[st
         print(f"Data already present: {uri}")
     else:
         print(f"Uploading data {p} -> {uri}")
-        _run(["gsutil", "cp", str(p), uri])
+        _run(["gsutil", "-m", "cp", "-r", str(p), uri])
     return uri, basename
 
 

@@ -115,6 +115,18 @@ def test_data_object_uri_is_content_hashed(tmp_path):
     assert basename == "data.npy"
 
 
+def test_data_object_uri_hashes_directories(tmp_path):
+    d = tmp_path / "sessions"
+    d.mkdir()
+    (d / "a.npz").write_bytes(b"a")
+    (d / "b.npz").write_bytes(b"b")
+    uri, basename = data_object_uri("mybucket", str(d))
+    assert uri.startswith("gs://mybucket/data/") and uri.endswith("/sessions")
+    assert basename == "sessions"
+    (d / "b.npz").write_bytes(b"changed")
+    assert data_object_uri("mybucket", str(d))[0] != uri
+
+
 # ── build_overrides ──
 
 

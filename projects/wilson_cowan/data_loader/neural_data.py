@@ -11,7 +11,7 @@ that is the sibling ``load_data.py``, which loads the *synthetic* ``wc_fold*.npz
 
 One sample = one ``(animal x experiment_type x condition x fold)`` per-fold trial-averaged
 E/I trace (§4). Folds with no trials are all-NaN (``DATA.md``) and are dropped. Every trace
-lives on the same -0.5..+1.5 s, 1 ms grid, so samples are stacked into batched arrays with a
+lives on the same -0.5..+1.5 s, 10 ms grid, so samples are stacked into batched arrays with a
 parallel metadata list. ``sample_weight`` is 1.0 for every fold (equal weighting, §4).
 """
 from __future__ import annotations
@@ -27,12 +27,15 @@ import jax.numpy as jnp
 
 
 DEFAULT_RESULTS_DIR = "/home/dabin/code/ichun_opto/results"
-DEFAULT_GLOB = "smoothed_population_rates_*_s1_trimmed.npz"
+DEFAULT_GLOB = "b300_population_rates_*_s1.npz"
 
 # All experiment types that may be present; a type is present iff its keys exist (§17.2).
 EXPERIMENT_TYPES = (
     "single_E", "single_I", "paired_EE", "paired_II", "paired_EI", "paired_IE",
 )
+
+# Bin width of the saved rates (DATA.md): 30 kHz spikes binned into 10 ms bins.
+BIN_S = 0.010
 
 # Pre-stimulus baseline-normalisation window used by the generator (DATA.md): rates are
 # divided by the mean over -0.5..-0.1 s, so baseline ~ 1 there.
@@ -42,7 +45,7 @@ BASELINE_WINDOW = (-0.5, -0.1)
 CHOP_PRE_S = -0.05
 CHOP_POST_S = 0.40
 
-_ANIMAL_RE = re.compile(r"smoothed_population_rates_(.+)_s1_trimmed\.npz$")
+_ANIMAL_RE = re.compile(r"b300_population_rates_(.+)_s1\.npz$")
 
 
 @dataclass
@@ -72,8 +75,15 @@ def make_stimulus(time_axis: np.ndarray, condition: dict) -> np.ndarray:
     Pulse 1 drives ``first_pop`` at onset 0 s; for paired conditions (``ipi_ms > 0``) pulse 2
     drives ``second_pop`` at ``ipi_ms/1000``. Durations come from ``dur_ms`` (scalar -> both
     pulses; 2-element list -> per pulse). Channel 0 = E, channel 1 = I. Returns ``[T, 2]``.
+
+    ``time_axis`` holds bin CENTRES (10 ms bins, see ``DATA.md``), so bin ``k`` spans
+    ``[t_k - dt/2, t_k + dt/2)``. A bin is set to 1 if a pulse overlaps any part of it: the 1-2 ms
+    pulses are shorter than a bin, so testing only the bin centre would drop most of them.
     """
     u = np.zeros((len(time_axis), 2), dtype=np.float32)
+    dt = float(time_axis[1] - time_axis[0]) if len(time_axis) > 1 else BIN_S
+    bin_lo = time_axis - dt / 2
+    bin_hi = time_axis + dt / 2
 
     durations = condition["dur_ms"]
     if np.isscalar(durations):
@@ -90,7 +100,9 @@ def make_stimulus(time_axis: np.ndarray, condition: dict) -> np.ndarray:
             continue
         channel = 0 if pop == "E" else 1
         offset = onset + dur_ms / 1000.0
-        active = (time_axis >= onset) & (time_axis < offset)
+        # Pulse overlaps the bin; the 1 us tolerance stops float error at an exact bin edge
+        # (e.g. onset 120 ms vs the 115-125 ms bin) from also switching on the neighbouring bin.
+        active = (bin_lo < offset - 1e-6) & (bin_hi > onset + 1e-6)
         u[active, channel] = 1.0
 
     return u
@@ -154,7 +166,7 @@ def load_neural_dataset(
     """Load every matching session and stack into one batched ``NeuralDataset``.
 
     All traces are asserted to share one time grid before stacking (they should: -0.5..+1.5 s
-    at 1 ms per ``DATA.md``); a mismatch raises with the offending session/type named.
+    at 10 ms per ``DATA.md``); a mismatch raises with the offending session/type named.
     """
     paths = sorted(_glob.glob(os.path.join(results_dir, glob)))
     if not paths:
@@ -303,7 +315,7 @@ def build_cv_samples(
     max_conditions: int | None = None,
     subsample_seed: int = 0,
 ) -> CVSamples:
-    """Build one ``(train, test)`` CV split from a ``smoothed_population_rates_*_s1_trimmed.npz`` session.
+    """Build one ``(train, test)`` CV split from a ``b300_population_rates_*_s1.npz`` session.
 
     Dispatches on ``cv_type`` to one of two train/test conventions (see ``CVSamples``):
 
@@ -498,8 +510,8 @@ def verify_dataset(ds: NeuralDataset, baseline_tol: float = 0.15) -> None:
     assert ds.sample_weight.shape == (N,)
     assert not np.isnan(y).any(), "NaNs remain in target_y (empty folds should be dropped)"
 
-    # dt matches a 1 ms grid.
-    assert abs(ds.dt - 0.001) < 1e-6, f"dt={ds.dt} not ~0.001 s"
+    # dt matches the 10 ms grid.
+    assert abs(ds.dt - BIN_S) < 1e-6, f"dt={ds.dt} not ~{BIN_S} s"
 
     # Baseline ~ 1 over the pre-stimulus normalisation window, per channel.
     lo, hi = BASELINE_WINDOW
@@ -511,10 +523,10 @@ def verify_dataset(ds: NeuralDataset, baseline_tol: float = 0.15) -> None:
             print(f"[verify] WARNING: {name} baseline mean {base_mean[ci]:.3f} "
                   f"deviates from 1 by > {baseline_tol}")
 
-    # Pulse timing matches ipi_ms on a sampled subset: the first bin at/after each onset
-    # (centres straddle 0, so the boxcar starts at the first bin with time >= onset).
+    # Pulse timing matches ipi_ms on a sampled subset: the bin whose [centre - dt/2,
+    # centre + dt/2) span contains each onset must be on.
     def _first_active(onset: float) -> int:
-        return int(np.argmax(time >= onset))
+        return int(np.argmax(time + ds.dt / 2 > onset + 1e-6))   # same edge tolerance as make_stimulus
 
     rng = np.random.default_rng(0)
     check = rng.choice(N, size=min(N, 64), replace=False)
