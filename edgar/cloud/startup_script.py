@@ -119,7 +119,7 @@ else
   echo "WARN: no secret configured; LLM calls will fail"
 fi
 if [ -n "$DATA_URI" ]; then
-  gsutil cp "$DATA_URI" "${DATA_DIR}/$(basename "$DATA_URI")"
+  gsutil -m cp -r "$DATA_URI" "${DATA_DIR}/"   # file or directory
 fi
 
 # Overrides -> bash array (newline-delimited preserves spaces in list values).

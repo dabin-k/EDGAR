@@ -18,6 +18,7 @@ every panel (params + train/test loss), alongside the standard per-width sweep.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -37,7 +38,8 @@ import matplotlib.pyplot as plt                               # noqa: E402
 from neural_data import build_cv_samples                      # noqa: E402
 from load_data import apply_model, loss_fn                    # noqa: E402
 from edgar.scoring.scoring import _optimize, _eval_loss       # noqa: E402
-import model2                                                 # noqa: E402
+from edgar.llm.code_loading import load_function_from_source  # noqa: E402
+import jax_model2                                                 # noqa: E402
 
 INIT_WIDTH = 40      # source of the "dynamics/scale" params in the mixed init
 REST_WIDTH = 5       # source of the remaining params (the connection weights) in the init
@@ -189,9 +191,9 @@ def main() -> None:
             print(f"  [warm-start] obj {obj} seeded from mixed_params_{obj}.npz")
         else:
             params_init = hybrid_init
-        fit = _optimize(model2.model_jax, loss_fn, params_init, X_train, gd, apply_model)
-        train_loss = float(_eval_loss(model2.model_jax, loss_fn, fit, X_train, apply_model))
-        test_loss = float(_eval_loss(model2.model_jax, loss_fn, fit, X_test, apply_model))
+        fit = _optimize(jax_model2.model_jax, loss_fn, params_init, X_train, gd, apply_model)
+        train_loss = float(_eval_loss(jax_model2.model_jax, loss_fn, fit, X_train, apply_model))
+        test_loss = float(_eval_loss(jax_model2.model_jax, loss_fn, fit, X_test, apply_model))
 
         fit_scalar = {k: float(np.asarray(fit[k]).reshape(-1)[0]) for k in F.PARAM_KEYS}
         p_scalar = {k: jnp.asarray(v) for k, v in fit_scalar.items()}

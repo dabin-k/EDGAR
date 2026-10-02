@@ -3,16 +3,17 @@ run:
 
 io:
   # data_path: "/home/dabin/data/wc_simulations/archive/wcs_fold0.npz"
-  data_path: "/home/dabin/code/ichun_opto/results"
+  # data_path: "/home/dabin/code/ichun_opto/results"
+  data_path: "/home/dabin/code/ichun_opto/edgar_b300_s1"   # only the 4 b300_*_s1.npz sessions (small GCP upload)
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
-  n_generations: 6
-  n_islands: 4
-  batch_size: 4
-  critical_population_size: 6
-  n_migrants: 2
-  topology: [1, 2, 3, 0]
+  n_generations: 4
+  n_islands: 3
+  batch_size: 2
+  critical_population_size: 8
+  n_migrants: 1
+  topology: [1, 2, 0]
 
 llms:
   num_parents: 2
@@ -21,18 +22,18 @@ llms:
   # jax_model_translator_llm: claude-code-headless
   # model_llm: gemini-3.6-flash
   # param_est_llm: gemini-3.6-flash
-  model_llm : gemini-2.5-flash-lite # while testing
-  param_est_llm: gemini-2.5-flash-lite # while testing
-  jax_model_translator_llm: gemini-2.5-flash-lite
+  model_llm : gemini-3.6-flash 
+  param_est_llm: gemini-3.6-flash 
+  jax_model_translator_llm: gemini-3.1-flash-lite
   max_tokens: 10000
 
 scoring:
   timeout_s: 600.0
   param_penalty_weight: 0.01
   gradient_descent:
-    max_iter: 5000          # match the sibling state-space projects (was inheriting 1000)
+    max_iter: 4000 
     learning_rate: 0.001
-    gradient_clip_norm: 5.0 # pre-Adam global-norm clip; needed for long lax.scan backprop
+    gradient_clip_norm: 10.0 # pre-Adam global-norm clip; needed for long lax.scan backprop
 
 project_params:
   random_seed: 42   # seeds the discover/validate split (mice for real data; samples for synthetic)
@@ -52,7 +53,7 @@ project_params:
   chop_post_ms: 400.0
   # Loss not computed during warmup steps
   warmup_steps_ms: 100.0
-  # max_conditions: 8     # cap #conditions (n_stim) per split for fast smoke runs; unset = all
+  max_conditions: 52      # cap #conditions (n_stim) per split; M150823_ICTP2 has 38 vs 40 for the others. unset = all
   # Train/test split within each mouse-sample:
   #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)
   #   exp_cond — fit on train_types conditions, test on held-out test_types conditions

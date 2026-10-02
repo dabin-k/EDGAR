@@ -1,6 +1,6 @@
 """Full free-rollout prediction vs observed values. These images are fed as diagnostic input to the LLM.
 
-The rollout shown is always ``pred_y_full_rollout`` from the project's ``apply_model`` — seeded
+All parent programs are overlaid (best = red/blue, next = orange/green). The rollout shown is always ``pred_y_full_rollout`` from the project's ``apply_model`` — seeded
 from the first observation (and the ``s0_`` hidden state) and then fed its own E/I predictions,
 with only the stimulus supplied — whatever the training objective (A/B/FULL). It is the one view
 that exposes the model's own dynamics (drift, missing rebounds, instability) that teacher-forced
@@ -28,11 +28,13 @@ def plot_model_fits(
     program_names=None,
     params=None,
     rng: np.random.Generator | None = None,
-    max_show: int = 6,
+    max_show: int = 5,
 ):
     """Data vs full free rollout for ``max_show`` randomly drawn (sample, stim condition) pairs.
 
     One row per pair; E panel (left) and I panel (right). x-axis: time from stim onset (ms).
+    Every program that compiles and has params is overlaid in each panel, ranked by loss: the
+    best (lowest-loss) model is drawn in red (E) / blue (I), the next in orange (E) / green (I).
     """
     if not save_path:
         raise ValueError("Please provide a save_path for the plot")
@@ -72,7 +74,7 @@ def plot_model_fits(
     time_ms = np.asarray(data["time"])[0] * 1000.0   # (T,) shared grid, t=0 at stim onset
     n_samples, n_stim, T, _ = target_y.shape
 
-    # Pick the best program that actually compiles and has params: lowest loss.
+    # Keep every program that compiles and has params, ranked best (lowest loss) first.
     candidates = []
     for j, p in enumerate(programs):
         if params[j] is None:
@@ -85,7 +87,9 @@ def plot_model_fits(
         candidates.append((loss_j, j, fn))
     if not candidates:
         raise RuntimeError("no program could be compiled for the rollout plot")
-    _, best_j, model_fn = min(candidates, key=lambda t: t[0])
+    candidates.sort(key=lambda t: t[0])
+    # (E colour, I colour) per rank: strong red/blue for the best model, orange/green for the next.
+    palette = [("tab:red", "tab:blue"), ("tab:orange", "tab:green"), ("tab:purple", "tab:brown")]
 
     # Randomly draw distinct (sample, condition) pairs, then run apply_model on just those:
     # each pair becomes its own "sample" (its sample's params) with a single condition.
@@ -98,14 +102,18 @@ def plot_model_fits(
         "stim_E": jnp.asarray(stim_E[s_idx, c_idx][:, None]),       # (n_show, 1, T)
         "stim_I": jnp.asarray(stim_I[s_idx, c_idx][:, None]),
     }
-    show_params = {k: jnp.asarray(np.asarray(v)[s_idx]) for k, v in params[best_j].items()}
-    out = apply_model_fn(model_fn, show_data, show_params)
-    pred = np.asarray(out["pred_y_full_rollout"])[:, 0]           # (n_show, T-1, 2): t = 1..T-1
     obs = target_y[s_idx, c_idx]                                   # (n_show, T, 2)
-    rollout_mse = np.mean((pred - obs[:, 1:]) ** 2, axis=(1, 2))   # (n_show,)
 
-    loss_str = f"{losses[best_j]:.4f}" if losses[best_j] is not None else "n/a"
-    model_name = f"{program_names[best_j]}: objective loss={loss_str}"
+    # One free rollout per ranked program, each with its own per-sample params.
+    models = []   # (name, loss_str, pred (n_show, T-1, 2), rollout_mse (n_show,), colours)
+    for rank, (loss_j, j, fn) in enumerate(candidates):
+        show_params = {k: jnp.asarray(np.asarray(v)[s_idx]) for k, v in params[j].items()}
+        out = apply_model_fn(fn, show_data, show_params)
+        pred = np.asarray(out["pred_y_full_rollout"])[:, 0]       # (n_show, T-1, 2): t = 1..T-1
+        rollout_mse = np.mean((pred - obs[:, 1:]) ** 2, axis=(1, 2))
+        loss_str = f"{loss_j:.4f}" if np.isfinite(loss_j) else "n/a"
+        models.append((program_names[j], loss_str, pred, rollout_mse,
+                       palette[min(rank, len(palette) - 1)]))
 
     def _runs(mask):
         """(start, end_exclusive) index pairs for each contiguous True run in mask."""
@@ -117,9 +125,9 @@ def plot_model_fits(
         ends = np.concatenate((idx[brk], [idx[-1]])) + 1
         return list(zip(starts.tolist(), ends.tolist()))
 
-    dt_ms = float(time_ms[1] - time_ms[0]) if T > 1 else 1.0
+    dt_ms = float(time_ms[1] - time_ms[0]) if T > 1 else 10.0   # time_ms holds bin centres
     fig, axes = plt.subplots(
-        n_show, 2, figsize=(11, 2.2 * n_show + 0.5), squeeze=False,
+        n_show, 2, figsize=(14, 3.0 * n_show + 0.6), squeeze=False,
     )
     for row in range(n_show):
         s, c = int(s_idx[row]), int(c_idx[row])
@@ -127,30 +135,35 @@ def plot_model_fits(
         # faint red where the E pulse is on, faint blue where the I pulse is on.
         e_spans = _runs(stim_E[s, c] > 0.5)
         i_spans = _runs(stim_I[s, c] > 0.5)
-        for ci, (chan, mcolor) in enumerate([("E", "tab:red"), ("I", "tab:blue")]):
+        for ci, chan in enumerate(("E", "I")):
             ax = axes[row, ci]
             for a, b in e_spans:
-                ax.axvspan(time_ms[a], time_ms[b - 1] + dt_ms, color="tab:red", alpha=0.12, lw=0)
+                ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:red", alpha=0.12, lw=0)
             for a, b in i_spans:
-                ax.axvspan(time_ms[a], time_ms[b - 1] + dt_ms, color="tab:blue", alpha=0.12, lw=0)
-            ax.plot(time_ms, obs[row, :, ci], color="0.35", lw=0.9, label="data")
-            ax.plot(time_ms[1:], pred[row, :, ci], color=mcolor, lw=0.9,
-                    alpha=0.9, label="model (free rollout)")
-            ax.set_title(
-                f"sample {s}, cond {c} — {chan}   (rollout MSE={rollout_mse[row]:.4f})",
-                fontsize=9,
-            )
-            ax.tick_params(labelsize=7)
+                ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:blue", alpha=0.12, lw=0)
+            ax.scatter(time_ms, obs[row, :, ci], color="k", alpha=0.5, linewidths=0, label="data")
+            # Best model drawn last (on top); legend order stays best-first.
+            for rank in reversed(range(len(models))):
+                name, _, pred, rollout_mse, colours = models[rank]
+                ax.plot(time_ms[1:], pred[row, :, ci], color=colours[ci], lw=1.1, alpha=0.9,
+                        zorder=3 + len(models) - rank,
+                        label=f"{name} (rollout MSE={rollout_mse[row]:.4f})")
+            handles, labels = ax.get_legend_handles_labels()
+            order = [0] + list(range(len(handles) - 1, 0, -1))   # data, then best -> worst
+            ax.legend([handles[i] for i in order], [labels[i] for i in order],
+                      fontsize=8, loc="upper left", framealpha=0.8)
+            ax.set_title(f"sample {s}, cond {c} — {chan}", fontsize=10)
+            ax.tick_params(labelsize=8)
             y_max = float(np.max(obs[row, :, ci]))
             ax.set_ylim(-0.1, y_max * 1.1)
             if ci == 0:
-                ax.set_ylabel("activity", fontsize=8)
+                ax.set_ylabel("activity", fontsize=9)
             if row == n_show - 1:
-                ax.set_xlabel("time from stim onset (ms)", fontsize=8)
-            if row == 0 and ci == 0:
-                ax.legend(fontsize=7, loc="upper right")
+                ax.set_xlabel("time from stim onset (ms)", fontsize=9)
 
-    fig.suptitle(f"Data vs full free rollout  |  {model_name}", fontsize=11)
+    model_summary = "   vs   ".join(f"{name}: objective loss={loss_str}"
+                                   for name, loss_str, *_ in models)
+    fig.suptitle(f"Data vs full free rollout  |  {model_summary}", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(save_path, dpi=130, bbox_inches="tight", facecolor="white")
     plt.close(fig)

@@ -53,13 +53,13 @@ def model(state_prev, y_prev, params):
     return new_state, (E, I)
 
 model.DEFAULT_PARAMS = {
-    "tau_E": 60.0,
-    "tau_I": 120.0,
+    "tau_E": 6.0,    # time constants in 10 ms bins
+    "tau_I": 12.0,
     "C_E": 1.0,
     "C_I": 1.0,
     "XE": 3.0,
     "XI": 1.0,
-    "tau_S": 300.0,
+    "tau_S": 30.0,
     "W_ES": 0.5,
     "W_IS": 0.5,
     "s0_S": 1.0,  # learnable initial value of the latent S (GD-fit per sample; seeds the scan carry)

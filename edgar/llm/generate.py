@@ -458,6 +458,11 @@ async def _translate_one_model(
         and load_function_from_source(model_result.code, "model") is not None
     ):
         program.code.model_jax = model_result.code
+    else:
+        warnings.warn(
+            f"[translate] no loadable `model` in JAX translation of program "
+            f"{program.idx} ({program.name}); it will not be scored."
+        )
 
 
 async def translate_programs(
