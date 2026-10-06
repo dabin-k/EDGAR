@@ -24,9 +24,12 @@ configuration note below for how they reach ``apply_model`` / ``loss_fn``. The t
 inferred from each session's stored ``time_axis`` on the real opto path; ``dt_seconds`` is only a
 bin->seconds convention for the synthetic files, which store no time axis. Objective C is the full-trajectory rollout.
 
-Cross-validation is over repeats: ``simulate_data.save_kfold_splits`` writes ``wc*_fold{f}.npz``
-files, each a repeat-averaged ``train_data`` / ``test_data`` pair (shape ``(n_samples, 2, T, 2)``);
-``load_data`` reads one and splits the *samples* 50/50 into EDGAR's discover / validate sets.
+Two data paths:
+  * **Real opto data** (``trial_counts_b30_*_s1.npz``, see ``neural_data.py``): individual trials
+    on the ``n_stim`` axis, padded to a common count with a ``mask``; one sample per
+    (mouse × trial fold); mice are split into discover / validate.
+  * **Synthetic** (``wc*_fold{f}.npz`` from ``simulate_data.save_kfold_splits``): repeat-averaged
+    train/test pairs; the *samples* are split 50/50 into discover / validate.
 """
 from __future__ import annotations
 
@@ -54,8 +57,7 @@ from projects.wilson_cowan.data_loader.losses import (
 )
 from projects.wilson_cowan.data_loader.neural_data import (
     DEFAULT_GLOB,
-    EXPERIMENT_TYPES,
-    _animal_id,
+    FILE_PREFIX,
     build_cv_samples,
 )
 
@@ -146,16 +148,20 @@ def load_data(
     warmup_steps_ms: float = 0.0,
     chop_pre_ms: float = -150.0,
     chop_post_ms: float = 400.0,
-    max_conditions: int | None = None,
+    bin_ms: float = 1.0,
+    n_folds: int = 3,
+    fold_seed: int = 0,
+    contrast: int = 0,
     cv_type: str = "k_fold",
     train_types: list[str] | None = None,
     test_types: list[str] | None = None,
 ):
-    """Load one k-fold file and return EDGAR's ``(discover, validate, X_eval)`` split.
+    """Load real or synthetic data and return EDGAR's ``(discover, validate, X_eval)`` split.
 
-    ``data_path`` points at a ``wc*_fold{f}.npz`` from ``simulate_data.save_kfold_splits``. The
-    ``n_samples`` samples are split 50/50 into discover / validate; params are fit per sample on
-    ``train_data`` and cross-validated on the held-out (repeat-averaged) ``test_data``.
+    ``data_path`` is either real single-trial sessions (a dir / glob / file of
+    ``trial_counts_*.npz``, handled by ``_load_real``) or a synthetic ``wc*_fold{f}.npz`` from
+    ``simulate_data.save_kfold_splits`` (``_load_synthetic``). ``bin_ms``, ``n_folds``,
+    ``fold_seed`` and ``contrast`` apply to real data only.
 
     Every top-level ``data`` value carries axis 0 = n_samples (matched to per-sample params);
     ``"target_y"`` is first so the engine's ``next(iter(data.values())).shape[0]`` reads n_samples.
@@ -191,7 +197,10 @@ def load_data(
             n_eval=n_eval,
             warmup_steps_ms=warmup_steps_ms,
             chop=(chop_pre_ms / 1000.0, chop_post_ms / 1000.0),
-            max_conditions=max_conditions,
+            bin_ms=bin_ms,
+            n_folds=n_folds,
+            fold_seed=fold_seed,
+            contrast=contrast,
             cv_type=cv_type,
             train_types=train_types,
             test_types=test_types,
@@ -213,26 +222,17 @@ def load_data(
 
 
 def _resolve_mouse_paths(data_path: str) -> list[str]:
-    """Resolve ``data_path`` to a sorted list of real ``b300_population_rates_*_s1.npz`` sessions.
+    """Resolve ``data_path`` to a sorted list of real ``trial_counts_b30_*_s1.npz`` sessions.
 
     ``data_path`` may be a directory (globbed for the default pattern), a glob, or a single file.
-    Only files whose basename starts with ``b300_population_rates_`` are treated as real sessions, so a
+    Only files whose basename starts with ``trial_counts_`` are treated as real sessions, so a
     synthetic ``wc*_fold*.npz`` path resolves to ``[]`` and falls through to the synthetic loader.
     """
     if os.path.isdir(data_path):
         matches = _glob.glob(os.path.join(data_path, DEFAULT_GLOB))
     else:
         matches = _glob.glob(data_path)
-    return sorted(m for m in matches if os.path.basename(m).startswith("b300_population_rates_"))
-
-
-def _read_n_folds(path: str) -> int:
-    """Number of trial-CV folds stored in a session npz (from ``n_folds`` or the responses shape)."""
-    d = np.load(path, allow_pickle=True)
-    if "n_folds" in d.files:
-        return int(d["n_folds"])
-    rkey = next(k for k in d.files if k.endswith("__responses"))
-    return int(np.asarray(d[rkey]).shape[1])
+    return sorted(m for m in matches if os.path.basename(m).startswith(FILE_PREFIX))
 
 
 def _load_real(
@@ -242,7 +242,10 @@ def _load_real(
     n_eval: int,
     warmup_steps_ms: float,
     chop: tuple[float, float],
-    max_conditions: int | None,
+    bin_ms: float = 1.0,
+    n_folds: int = 3,
+    fold_seed: int = 0,
+    contrast: int = 0,
     cv_type: str = "k_fold",
     train_types: list[str] | None = None,
     test_types: list[str] | None = None,
@@ -250,37 +253,43 @@ def _load_real(
     """Real opto path for ``load_data``: multiple mice → EDGAR's ``(discover, validate, X_eval)``.
 
     **Mouse-level parameters.** One parameter set is fit per EDGAR sample, and a sample is one
-    mouse (× CV rotation): the ``n_stim`` axis holds all of that mouse's conditions, so the fitted
-    parameters must reproduce every stimulus condition at once with a single ``F_theta``. Only the
-    equation form is shared across samples.
+    mouse (× CV rotation): the ``n_stim`` axis holds that mouse's **individual trials** (no trial
+    averaging), so the fitted parameters must reproduce every trial of every stimulus condition
+    with a single ``F_theta``. Only the equation form is shared across samples.
 
     **Discover/validate splits by mouse.** The sessions are split 50/50 into discover vs validate
     mice (seeded by ``random_seed``); the discovered equation is thus validated on held-out
-    *animals*. Because every dict is a dense ``(n_samples, n_stim, …)`` array, **all sessions must
-    share the same condition count** — a mismatch raises (curate the sessions to one protocol).
+    *animals*.
+
+    **Ragged trial counts → pad + mask.** Mice have different numbers of trials, but every dict is
+    a dense ``(n_samples, C, …)`` array, so each split's trial axis is padded to its largest unit.
+    Padding rows are cyclic copies of the unit's own real trials (so a parameter estimator that
+    ignores ``mask`` still only sees real-looking data) and carry ``mask == 0``; the losses
+    average over ``mask == 1`` rows only.
 
     **Train/test within a sample** is set by ``cv_type`` (see ``build_cv_samples``):
-      * ``"k_fold"``   — one sample per ``(mouse, held-out fold)``; ``train`` = other folds'
-        trial-weighted mean, ``test`` = held-out fold (trial-noise CV, all condition types).
-      * ``"exp_cond"`` — one sample per mouse; ``train`` = ``train_types`` conditions, ``test`` =
-        disjoint ``test_types`` conditions (held-out-perturbation CV). ``train``/``test`` then have
-        different ``n_stim``.
+      * ``"k_fold"``   — one sample per ``(mouse, held-out fold)``; ``train`` = the trials of the
+        other ``n_folds - 1`` folds, ``test`` = the held-out fold's trials.
+      * ``"exp_cond"`` — one sample per mouse; ``train`` = ``train_types`` trials, ``test`` =
+        disjoint ``test_types`` trials.
 
     Args:
         paths: Real session files (from ``_resolve_mouse_paths``); ≥2 for the mouse split.
-        random_seed: Seeds the mouse discover/validate split, the ``build_cv_samples``
-            subsample, and the ``X_eval`` subset.
+        random_seed: Seeds the mouse discover/validate split and the ``X_eval`` subset.
         T_eval, n_eval: Length / number of discover samples for the ``X_eval`` fingerprint.
         chop: ``(pre_s, post_s)`` peri-stimulus window kept, in seconds.
-        max_conditions: Cap on conditions per split (deterministic subsample); ``None`` = all.
+        bin_ms: Bin width (ms); a multiple of the files' 1 ms bins.
+        n_folds, fold_seed: Trial-fold grouping for ``k_fold``.
+        contrast: Screen contrast of the conditions kept (0 = the paper's blank screen).
         cv_type: ``"k_fold"`` or ``"exp_cond"``.
         train_types, test_types: Experiment-type train/test partition, required for ``exp_cond``.
 
     Returns:
         ``((X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval)``. Each ``X_*`` dict
         carries ``target_y`` ``[n, C, T, 2]``, ``stim_E``/``stim_I`` ``[n, C, T]``,
-        ``target_y_future`` ``[n, C, A, K, 2]`` and ``time`` ``[n, T]``; ``n`` = number of
-        (mouse × fold) samples on that side, ``C`` = that split's condition count.
+        ``target_y_future`` ``[n, C, A, K, 2]``, ``time`` ``[n, T]``, ``mask`` ``[n, C]`` (1 = real
+        trial) and ``cond_id`` ``[n, C]`` (the trial's condition-table row, −1 for padding);
+        ``n`` = number of (mouse × fold) samples on that side, ``C`` = that split's padded trial count.
     """
     if len(paths) < 2:
         raise ValueError(
@@ -290,44 +299,29 @@ def _load_real(
 
     # Split mice 50/50 into discover / validate (held-out animals).
     perm = np.random.default_rng(random_seed).permutation(len(paths))
-    if len(paths) < 2:
-        raise ValueError(
-            f"Fewer than 2 samples; got {len(paths)}: "
-            f"{[os.path.basename(p) for p in paths]}"
-        )
     n_val = max(1, len(paths) // 2)
     disc_paths = [paths[i] for i in sorted(perm[n_val:])]
     val_paths = [paths[i] for i in sorted(perm[:n_val])]
+
+    common = dict(chop=chop, bin_ms=bin_ms, contrast=contrast)
 
     def _mouse_units(path: str) -> list:
         """CV sample-units for one mouse: n_folds of them for k_fold, one for exp_cond."""
         if cv_type == "k_fold":
             return [
-                build_cv_samples(
-                    path, cv_type="k_fold", held_out_fold=f, chop=chop,
-                    max_conditions=max_conditions, subsample_seed=random_seed,
-                )
-                for f in range(_read_n_folds(path))
+                build_cv_samples(path, cv_type="k_fold", held_out_fold=f, n_folds=n_folds,
+                                 fold_seed=fold_seed, **common)
+                for f in range(n_folds)
             ]
         return [
-            build_cv_samples(
-                path, cv_type="exp_cond", train_types=train_types, test_types=test_types,
-                chop=chop, max_conditions=max_conditions, subsample_seed=random_seed,
-            )
+            build_cv_samples(path, cv_type="exp_cond", train_types=train_types,
+                             test_types=test_types, **common)
         ]
 
     disc_units = [u for p in disc_paths for u in _mouse_units(p)]
     val_units = [u for p in val_paths for u in _mouse_units(p)]
     all_units = disc_units + val_units
 
-    # Enforce a shared condition count across sessions (dense arrays can't be ragged), and a
-    # shared time grid. Report per-mouse counts on failure.
-    per_mouse = {u.train.meta[0]["animal_id"]: (u.train.n, u.test.n) for u in all_units}
-    if len({n for n, _ in per_mouse.values()}) != 1 or len({n for _, n in per_mouse.values()}) != 1:
-        raise ValueError(
-            "all sessions must have the same n_stim (condition count); per-mouse "
-            f"(train_n_stim, test_n_stim): {per_mouse}. Curate sessions to one protocol."
-        )
     time_axis = np.asarray(all_units[0].time).astype(np.float32)   # (T,) seconds, t=0 at onset
     for u in all_units:
         if u.time.shape != time_axis.shape or not np.allclose(u.time, time_axis, atol=1e-9):
@@ -342,23 +336,27 @@ def _load_real(
     A = len(anchor_starts)
 
     def _build(units: list, split: str) -> dict:
-        # Sample axis (axis 0) = mouse × CV rotation; n_stim axis (axis 1) = that mouse's conditions.
-        target_y = jnp.asarray(
-            np.stack([getattr(u, split).target_y for u in units], axis=0)
-        )                                                            # (n, C, T, 2)
-        stim = np.stack([getattr(u, split).stim for u in units], axis=0)  # (n, C, T, 2)
-        sE = jnp.asarray(stim[..., 0])                              # (n, C, T)
-        sI = jnp.asarray(stim[..., 1])
+        # Sample axis (axis 0) = mouse × CV rotation; n_stim axis (axis 1) = that unit's trials,
+        # padded to C with cyclic copies of its own trials (mask 0).
+        sides = [getattr(u, split) for u in units]
+        C = max(sp.n for sp in sides)
+        pad = [np.arange(C) % sp.n for sp in sides]                 # row -> source trial
+        real = np.stack([np.arange(C) < sp.n for sp in sides])      # (n, C)
+        target_y = jnp.asarray(np.stack([sp.target_y[i] for sp, i in zip(sides, pad)]))  # (n, C, T, 2)
+        stim = np.stack([sp.stim[i] for sp, i in zip(sides, pad)])  # (n, C, T, 2)
+        cond_id = np.where(real, np.stack([sp.cond_idx[i] for sp, i in zip(sides, pad)]), -1)
         target_y_future = jnp.stack(
             [target_y[:, :, a + 1: a + 1 + K, :] for a in anchor_starts], axis=2
         )                                                            # (n, C, A, K, 2)
         time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (len(units), T))
         return {
             "target_y": target_y,
-            "stim_E": sE,
-            "stim_I": sI,
+            "stim_E": jnp.asarray(stim[..., 0]),                     # (n, C, T)
+            "stim_I": jnp.asarray(stim[..., 1]),
             "target_y_future": target_y_future,
             "time": time,
+            "mask": jnp.asarray(real.astype(np.float32)),            # (n, C)
+            "cond_id": jnp.asarray(cond_id.astype(np.int32)),        # (n, C)
         }
 
     X_disc_train = _build(disc_units, "train")
@@ -366,7 +364,8 @@ def _load_real(
     X_val_train = _build(val_units, "train")
     X_val_test = _build(val_units, "test")
 
-    # X_eval: a small, short subset of the discover samples for fingerprint dedup.
+    # X_eval: a small, short subset of the discover samples for fingerprint dedup. Every row of
+    # it is a real trial: the first n_real trials, the smallest real count among those samples.
     n_disc_samples = len(disc_units)
     n_eval_actual = int(min(max(1, n_eval), n_disc_samples))
     T_eval_actual = int(min(T_eval, T))
@@ -375,28 +374,36 @@ def _load_real(
             n_disc_samples, n_eval_actual, replace=False
         )
     )
+    n_real = int(np.asarray(X_disc_train["mask"])[eval_pos].sum(axis=1).min())
     disc_train = np.asarray(X_disc_train["target_y"])          # (n, C, T, 2)
     disc_sE = np.asarray(X_disc_train["stim_E"])               # (n, C, T)
     disc_sI = np.asarray(X_disc_train["stim_I"])
     X_eval = {
-        "target_y": jnp.asarray(disc_train[eval_pos, :, :T_eval_actual, :]),
-        "stim_E": jnp.asarray(disc_sE[eval_pos, :, :T_eval_actual]),
-        "stim_I": jnp.asarray(disc_sI[eval_pos, :, :T_eval_actual]),
+        "target_y": jnp.asarray(disc_train[eval_pos, :n_real, :T_eval_actual, :]),
+        "stim_E": jnp.asarray(disc_sE[eval_pos, :n_real, :T_eval_actual]),
+        "stim_I": jnp.asarray(disc_sI[eval_pos, :n_real, :T_eval_actual]),
         "_sample_indices": eval_pos,
         "_eval_fingerprint_key_name": "pred_y_1step",
     }
 
     disc_ids = [os.path.basename(p) for p in disc_paths]
     val_ids = [os.path.basename(p) for p in val_paths]
+    n_trials = {
+        side: [int(sp.n) for sp in (getattr(u, side) for u in all_units)]
+        for side in ("train", "test")
+    }
     print(
-        f"[wilson_cowan/real] {len(paths)} sessions, cv_type={cv_type}, T={T}, chop={chop} s; "
+        f"[wilson_cowan/real] {len(paths)} sessions, cv_type={cv_type}, bin={dt_s * 1e3:.3g} ms, "
+        f"T={T}, chop={chop} s; "
         f"objective={os.environ.get('EDGAR_WC_OBJECTIVE', DEFAULT_OBJECTIVE).upper()}, "
         f"K={K}, anchors={A}, warmup_bins={warmup_bins} (first anchor @ {anchor_starts[0]}); "
         f"mouse-level params; "
-        f"discover {len(disc_paths)} mice={disc_ids} -> {len(disc_units)} samples (mouse x fold) / "
-        f"validate {len(val_paths)} mice={val_ids} -> {len(val_units)} samples (mouse x fold); "
-        f"n_stim train/test={all_units[0].train.n}/{all_units[0].test.n}; "
-        f"X_eval n={n_eval_actual}, T={T_eval_actual}"
+        f"discover {len(disc_paths)} mice={disc_ids} -> {len(disc_units)} samples / "
+        f"validate {len(val_paths)} mice={val_ids} -> {len(val_units)} samples; "
+        f"single trials per sample (train {n_trials['train']}, test {n_trials['test']}), "
+        f"padded to C train/test disc={X_disc_train['mask'].shape[1]}/{X_disc_test['mask'].shape[1]} "
+        f"val={X_val_train['mask'].shape[1]}/{X_val_test['mask'].shape[1]}; "
+        f"X_eval n={n_eval_actual}, C={n_real}, T={T_eval_actual}"
     )
 
     return (

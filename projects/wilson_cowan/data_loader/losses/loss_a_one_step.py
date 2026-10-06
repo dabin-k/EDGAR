@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from .loss_common import per_sample_mse
+from .loss_common import per_sample_masked_mse
 
 
 def loss_A_one_step_tf(model_output, data):
@@ -27,4 +27,4 @@ def loss_A_one_step_tf(model_output, data):
     w = max(0, int(os.environ.get("EDGAR_WC_WARMUP_BINS", "0")))
     pred = model_output["pred_y_1step"][:, :, w:, :]        # [n, n_stim, T-1-w, 2]
     target = data["target_y"][:, :, 1 + w:, :]             # [n, n_stim, T-1-w, 2]
-    return per_sample_mse(pred, target)
+    return per_sample_masked_mse(pred, target, data.get("mask"))

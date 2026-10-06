@@ -4,7 +4,7 @@ run:
 io:
   # data_path: "/home/dabin/data/wc_simulations/archive/wcs_fold0.npz"
   # data_path: "/home/dabin/code/ichun_opto/results"
-  data_path: "/home/dabin/code/ichun_opto/edgar_b300_s1"   # only the 4 b300_*_s1.npz sessions (small GCP upload)
+  data_path: "/home/dabin/code/ichun_opto/edgar_b30_s1"   # only the 5 trial_counts_b30_*_s1.npz sessions (small GCP upload)
 
 evolution:
   # Smoke defaults — override on the CLI for real runs (e.g. --evolution.n_generations=20).
@@ -53,10 +53,14 @@ project_params:
   chop_post_ms: 400.0
   # Loss not computed during warmup steps
   warmup_steps_ms: 100.0
-  max_conditions: 52      # cap #conditions (n_stim) per split; M150823_ICTP2 has 38 vs 40 for the others. unset = all
+  bin_ms: 1               # bin width; multiple of the files' 1 ms bins (rollout_k / anchor_stride / T are in bins)
+  contrast: 0             # keep conditions with this screen contrast (0 = paper's blank-screen paradigm)
+  # Individual trials (no averaging) are the n_stim axis, padded per split with a mask.
   # Train/test split within each mouse-sample:
-  #   k_fold   — trial CV over all conditions (train = other folds, test = held-out fold)
-  #   exp_cond — fit on train_types conditions, test on held-out test_types conditions
+  #   k_fold   — trials grouped into n_folds condition-stratified folds; train = other folds' trials, test = held-out fold's trials
+  #   exp_cond — train = train_types trials, test = held-out test_types trials
   cv_type: "k_fold" # exp_cond | k_fold
+  n_folds: 3              # k_fold only
+  fold_seed: 0            # k_fold only
   train_types: ["single_E", "single_I", "paired_EE", "paired_IE"]  # exp_cond only
   test_types: ["paired_II", "paired_EI"]                            # exp_cond only
