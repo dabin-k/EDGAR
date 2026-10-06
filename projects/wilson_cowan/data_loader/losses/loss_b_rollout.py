@@ -7,7 +7,7 @@ prediction is scored against the future data window.
 """
 from __future__ import annotations
 
-from .loss_common import per_sample_mse
+from .loss_common import per_sample_masked_mse
 
 
 def loss_B_rollout(model_output, data):
@@ -18,4 +18,4 @@ def loss_B_rollout(model_output, data):
     """
     pred = model_output["pred_y_rollout"]       # [n, n_stim, A, K, 2]
     target = data["target_y_future"]            # [n, n_stim, A, K, 2]
-    return per_sample_mse(pred, target)
+    return per_sample_masked_mse(pred, target, data.get("mask"))

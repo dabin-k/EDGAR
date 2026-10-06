@@ -21,3 +21,18 @@ def per_sample_mse(pred, target):
     """MSE reduced over every axis except the leading sample axis → ``(n,)``."""
     diff = (pred - target) ** 2
     return jnp.mean(diff, axis=tuple(range(1, diff.ndim)))
+
+
+def per_sample_masked_mse(pred, target, mask=None):
+    """MSE over real rows only → ``(n,)``.
+
+    ``pred``/``target`` are ``[n, C, ...]``; ``mask`` is ``[n, C]`` (1 = real trial, 0 = padding,
+    see ``load_data._load_real``). Each sample averages over its own real rows, so padding never
+    changes the loss. ``mask=None`` (synthetic data has no padding) is plain ``per_sample_mse``.
+    """
+    if mask is None:
+        return per_sample_mse(pred, target)
+    diff = (pred - target) ** 2
+    m = mask.reshape(mask.shape + (1,) * (diff.ndim - mask.ndim))
+    per_row = diff[0, 0].size
+    return jnp.sum(diff * m, axis=tuple(range(1, diff.ndim))) / (jnp.sum(mask, axis=1) * per_row)

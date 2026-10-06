@@ -33,6 +33,9 @@ def plot_model_fits(
     """Data vs full free rollout for ``max_show`` randomly drawn (sample, stim condition) pairs.
 
     One row per pair; E panel (left) and I panel (right). x-axis: time from stim onset (ms).
+    On real single-trial data (``mask``/``cond_id`` present) only real trials are drawn, and the
+    noisy trial (grey dots) is overlaid with the mean of that sample's trials of the same
+    condition (black line) — a single 1 ms trial alone is unreadable.
     Every program that compiles and has params is overlaid in each panel, ranked by loss: the
     best (lowest-loss) model is drawn in red (E) / blue (I), the next in orange (E) / green (I).
     """
@@ -73,6 +76,8 @@ def plot_model_fits(
     stim_I = np.asarray(data["stim_I"])
     time_ms = np.asarray(data["time"])[0] * 1000.0   # (T,) shared grid, t=0 at stim onset
     n_samples, n_stim, T, _ = target_y.shape
+    mask = np.asarray(data["mask"]) if "mask" in data else np.ones((n_samples, n_stim))
+    cond_id = np.asarray(data["cond_id"]) if "cond_id" in data else None
 
     # Keep every program that compiles and has params, ranked best (lowest loss) first.
     candidates = []
@@ -93,8 +98,9 @@ def plot_model_fits(
 
     # Randomly draw distinct (sample, condition) pairs, then run apply_model on just those:
     # each pair becomes its own "sample" (its sample's params) with a single condition.
-    n_show = int(min(max_show, n_samples * n_stim))
-    flat = np.sort(rng.choice(n_samples * n_stim, n_show, replace=False))
+    real_flat = np.flatnonzero(mask.reshape(-1) > 0)
+    n_show = int(min(max_show, real_flat.size))
+    flat = np.sort(rng.choice(real_flat, n_show, replace=False))
     s_idx, c_idx = np.divmod(flat, n_stim)
 
     show_data = {
@@ -103,6 +109,14 @@ def plot_model_fits(
         "stim_I": jnp.asarray(stim_I[s_idx, c_idx][:, None]),
     }
     obs = target_y[s_idx, c_idx]                                   # (n_show, T, 2)
+    if cond_id is not None:
+        # Mean over the same sample's real trials of the same condition, (n_show, T, 2).
+        cond_mean = np.stack([
+            target_y[s][(cond_id[s] == cond_id[s, c]) & (mask[s] > 0)].mean(axis=0)
+            for s, c in zip(s_idx, c_idx)
+        ])
+    else:
+        cond_mean = None
 
     # One free rollout per ranked program, each with its own per-sample params.
     models = []   # (name, loss_str, pred (n_show, T-1, 2), rollout_mse (n_show,), colours)
@@ -141,7 +155,12 @@ def plot_model_fits(
                 ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:red", alpha=0.12, lw=0)
             for a, b in i_spans:
                 ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:blue", alpha=0.12, lw=0)
-            ax.scatter(time_ms, obs[row, :, ci], color="k", alpha=0.5, linewidths=0, label="data")
+            if cond_mean is None:
+                ax.scatter(time_ms, obs[row, :, ci], color="k", alpha=0.5, linewidths=0, label="data")
+            else:
+                ax.scatter(time_ms, obs[row, :, ci], color="0.6", s=4, alpha=0.5, linewidths=0,
+                           label="this trial")
+                ax.plot(time_ms, cond_mean[row, :, ci], color="k", lw=1.2, label="condition mean")
             # Best model drawn last (on top); legend order stays best-first.
             for rank in reversed(range(len(models))):
                 name, _, pred, rollout_mse, colours = models[rank]
@@ -149,12 +168,17 @@ def plot_model_fits(
                         zorder=3 + len(models) - rank,
                         label=f"{name} (rollout MSE={rollout_mse[row]:.4f})")
             handles, labels = ax.get_legend_handles_labels()
-            order = [0] + list(range(len(handles) - 1, 0, -1))   # data, then best -> worst
+            n_data = 1 if cond_mean is None else 2
+            # data first, then models best -> worst
+            order = list(range(n_data)) + list(range(len(handles) - 1, n_data - 1, -1))
             ax.legend([handles[i] for i in order], [labels[i] for i in order],
                       fontsize=8, loc="upper left", framealpha=0.8)
-            ax.set_title(f"sample {s}, cond {c} — {chan}", fontsize=10)
+            what = f"cond {c}" if cond_id is None else f"trial {c} (cond {cond_id[s, c]})"
+            ax.set_title(f"sample {s}, {what} — {chan}", fontsize=10)
             ax.tick_params(labelsize=8)
-            y_max = float(np.max(obs[row, :, ci]))
+            # Scale to the condition mean when present: single-trial spikes would flatten it.
+            ref = obs[row, :, ci] if cond_mean is None else cond_mean[row, :, ci]
+            y_max = max(float(np.max(ref)), 1e-6)
             ax.set_ylim(-0.1, y_max * 1.1)
             if ci == 0:
                 ax.set_ylabel("activity", fontsize=9)
