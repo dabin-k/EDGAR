@@ -32,7 +32,7 @@ def plot_model_fits(
 ):
     """Data vs full free rollout for ``max_show`` randomly drawn (sample, stim condition) pairs.
 
-    One row per pair; E panel (left) and I panel (right). x-axis: time from stim onset (ms).
+    One column per pair; E panel (top) and I panel (bottom), sharing the x-axis. x-axis: time from stim onset (ms).
     On real single-trial data (``mask``/``cond_id`` present) only real trials are drawn, and the
     noisy trial (grey dots) is overlaid with the mean of that sample's trials of the same
     condition (black line) — a single 1 ms trial alone is unreadable.
@@ -141,49 +141,52 @@ def plot_model_fits(
         return list(zip(starts.tolist(), ends.tolist()))
 
     dt_ms = float(time_ms[1] - time_ms[0]) if T > 1 else 10.0   # time_ms holds bin centres
+    # One column per (sample, condition) pair; E on top, I below, sharing the x-axis so the
+    # pulse windows line up vertically between the two populations.
     fig, axes = plt.subplots(
-        n_show, 2, figsize=(14, 3.0 * n_show + 0.6), squeeze=False,
+        2, n_show, figsize=(4.6 * n_show, 7.0), squeeze=False, sharex="col",
     )
-    for row in range(n_show):
-        s, c = int(s_idx[row]), int(c_idx[row])
+    for col in range(n_show):
+        s, c = int(s_idx[col]), int(c_idx[col])
         # Pulse windows for this condition — shaded in BOTH panels:
         # faint red where the E pulse is on, faint blue where the I pulse is on.
         e_spans = _runs(stim_E[s, c] > 0.5)
         i_spans = _runs(stim_I[s, c] > 0.5)
         for ci, chan in enumerate(("E", "I")):
-            ax = axes[row, ci]
+            ax = axes[ci, col]
             for a, b in e_spans:
                 ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:red", alpha=0.12, lw=0)
             for a, b in i_spans:
                 ax.axvspan(time_ms[a] - dt_ms / 2, time_ms[b - 1] + dt_ms / 2, color="tab:blue", alpha=0.12, lw=0)
             if cond_mean is None:
-                ax.scatter(time_ms, obs[row, :, ci], color="k", alpha=0.5, linewidths=0, label="data")
+                ax.scatter(time_ms, obs[col, :, ci], color="k", alpha=0.5, linewidths=0, label="data")
             else:
-                ax.scatter(time_ms, obs[row, :, ci], color="0.6", s=4, alpha=0.5, linewidths=0,
+                ax.scatter(time_ms, obs[col, :, ci], color="0.6", s=4, alpha=0.5, linewidths=0,
                            label="this trial")
-                ax.plot(time_ms, cond_mean[row, :, ci], color="k", lw=1.2, label="condition mean")
+                ax.plot(time_ms, cond_mean[col, :, ci], color="k", lw=1.2, label="condition mean")
             # Best model drawn last (on top); legend order stays best-first.
             for rank in reversed(range(len(models))):
                 name, _, pred, rollout_mse, colours = models[rank]
-                ax.plot(time_ms[1:], pred[row, :, ci], color=colours[ci], lw=1.1, alpha=0.9,
+                ax.plot(time_ms[1:], pred[col, :, ci], color=colours[ci], lw=1.1, alpha=0.9,
                         zorder=3 + len(models) - rank,
-                        label=f"{name} (rollout MSE={rollout_mse[row]:.4f})")
+                        label=f"{name} (rollout MSE={rollout_mse[col]:.4f})")
             handles, labels = ax.get_legend_handles_labels()
             n_data = 1 if cond_mean is None else 2
             # data first, then models best -> worst
             order = list(range(n_data)) + list(range(len(handles) - 1, n_data - 1, -1))
             ax.legend([handles[i] for i in order], [labels[i] for i in order],
-                      fontsize=8, loc="upper left", framealpha=0.8)
-            what = f"cond {c}" if cond_id is None else f"trial {c} (cond {cond_id[s, c]})"
-            ax.set_title(f"sample {s}, {what} — {chan}", fontsize=10)
+                      fontsize=7, loc="upper left", framealpha=0.8)
+            if ci == 0:
+                what = f"cond {c}" if cond_id is None else f"trial {c} (cond {cond_id[s, c]})"
+                ax.set_title(f"sample {s}, {what}", fontsize=10)
             ax.tick_params(labelsize=8)
             # Scale to the condition mean when present: single-trial spikes would flatten it.
-            ref = obs[row, :, ci] if cond_mean is None else cond_mean[row, :, ci]
+            ref = obs[col, :, ci] if cond_mean is None else cond_mean[col, :, ci]
             y_max = max(float(np.max(ref)), 1e-6)
             ax.set_ylim(-0.1, y_max * 1.1)
-            if ci == 0:
-                ax.set_ylabel("activity", fontsize=9)
-            if row == n_show - 1:
+            if col == 0:
+                ax.set_ylabel(f"{chan} activity", fontsize=9)
+            if ci == 1:
                 ax.set_xlabel("time from stim onset (ms)", fontsize=9)
 
     model_summary = "   vs   ".join(f"{name}: objective loss={loss_str}"
