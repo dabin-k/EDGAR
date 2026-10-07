@@ -28,6 +28,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
             - "target_y": Observed activity array of shape (C, T, 2); last axis = (E, I)
             - "stim_E": Excitatory stimulus array of shape (C, T)
             - "stim_I": Inhibitory stimulus array of shape (C, T)
+            - "time": Time axis of shape (T,), in seconds; its spacing is the bin width dt
           where C is the number of stimulus conditions.
 
     Returns:
@@ -39,6 +40,8 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     target_y = np.asarray(data["target_y"], dtype=np.float64)  # (C, T, 2)
     stim_E = np.asarray(data["stim_E"], dtype=np.float64)  # (C, T)
     stim_I = np.asarray(data["stim_I"], dtype=np.float64)
+    time = np.asarray(data["time"], dtype=np.float64)  # (T,) seconds
+    dt = float(time[1] - time[0])                      # bin width (s); time constants come out in s
 
     # Smooth the E and I rates first - otherwise we get a lot of noise in the decay rate estimates 
     def _smooth_hamming(x: np.ndarray, dt_ms: float, bandwidth_ms: float = 40.0):
@@ -51,9 +54,8 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         norm = np.convolve(np.ones(x.shape[-1]), w, mode="same")
         return np.apply_along_axis(lambda v: np.convolve(v, w, mode="same") / norm, -1, x)
 
-    # dt_ms = 10.0 in data (10 ms bins) - fine to hardcode
-    E = _smooth_hamming(target_y[..., 0], dt_ms=10.0, bandwidth_ms=40.0)   # (C, T)
-    I = _smooth_hamming(target_y[..., 1], dt_ms=10.0, bandwidth_ms=40.0)
+    E = _smooth_hamming(target_y[..., 0], dt_ms=dt * 1e3, bandwidth_ms=40.0)   # (C, T)
+    I = _smooth_hamming(target_y[..., 1], dt_ms=dt * 1e3, bandwidth_ms=40.0)
 
     C, T = E.shape
 
@@ -76,7 +78,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
 
     # tau_E: post-stimulus steps with high activity where the system is decaying
     mask_E_decay = (stim_E_prev == 0) & (E_prev > 0.5 * max_obs_E) & (dE < 0)
-    ratio_E_est = np.percentile(dE[mask_E_decay] / E_prev[mask_E_decay], 10)  # min 10% -> robust to noise
+    ratio_E_est = np.percentile(dE[mask_E_decay] / E_prev[mask_E_decay], 10) / dt  # min 10% -> robust to noise; per second
     tau_E = -1.0 / ratio_E_est
     tau_I = tau_E  # just assume the same, hard to extract good value due to low SNR 
 
@@ -89,9 +91,9 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
 
     # tau_S is the slow-inhibition constant: search the slow regime (well above the
     # fast tau_E) up to a couple of trace lengths, log-spaced.
-    tau_S_grid = np.geomspace(5.0 * tau_E, max(20.0 * tau_E, 2.0 * T), 10)
-    a = (1.0 - 1.0 / tau_S_grid)[:, None]                       # (G, 1)
-    b = (1.0 / tau_S_grid)[:, None]                             # (G, 1)
+    tau_S_grid = np.geomspace(5.0 * tau_E, max(20.0 * tau_E, 2.0 * T * dt), 10)   # seconds
+    a = (1.0 - dt / tau_S_grid)[:, None]                        # (G, 1)
+    b = (dt / tau_S_grid)[:, None]                              # (G, 1)
     S = np.empty((tau_S_grid.size, C, T))
     S[:, :, 0] = s0_per_cond[None, :]
     for t in range(1, T):
@@ -102,8 +104,8 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     # 3. Fixed design points (masks depend only on activity, not on tau_S).
     mask_E_active = (E_prev > 0.5)
     mask_I_active = (I_prev > 0.5)
-    LHS_E = (dE[mask_E_active] + E_prev[mask_E_active] / tau_E) / (E_max - E_prev[mask_E_active])
-    LHS_I = (dI[mask_I_active] + I_prev[mask_I_active] / tau_I) / (I_max - I_prev[mask_I_active])
+    LHS_E = (dE[mask_E_active] / dt + E_prev[mask_E_active] / tau_E) / (E_max - E_prev[mask_E_active])
+    LHS_I = (dI[mask_I_active] / dt + I_prev[mask_I_active] / tau_I) / (I_max - I_prev[mask_I_active])
     base_E = np.column_stack([
         E_prev[mask_E_active], -I_prev[mask_E_active],
         np.ones(int(mask_E_active.sum())), stim_E_prev[mask_E_active],

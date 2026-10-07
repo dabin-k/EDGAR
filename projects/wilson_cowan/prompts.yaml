@@ -38,6 +38,7 @@ model:
         - `y_prev["I_prev"]`   — inhibitory activity at t-1
         - `y_prev["stim_E_prev"]` — external drive to E at t-1 (1 during pulse, 0 otherwise) 
         - `y_prev["stim_I_prev"]` — external drive to I at t-1 (1 during pulse, 0 otherwise)
+        - `y_prev["dt"]`          — the step size: the data''s bin width, in SECONDS
 
     * OUTPUT: return the tuple `(new_hidden_state, mean)` where `mean` is the tuple
     `(E, I)` — your prediction of the next excitatory and inhibitory activity. Do
@@ -45,13 +46,13 @@ model:
     scalars.
 
     * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
-    derivative. Compute a rate of change and take one Euler step with the fixed
-    sampling interval, e.g.
-        H = 1.0   # integration step (module-level constant): one step = one 10 ms data bin
+    derivative. Compute a rate of change and take one Euler step of `y_prev["dt"]`, e.g.
+        dt = y_prev["dt"]   # bin width in seconds, supplied by the data
         E_dot = (-E_prev + drive_E) / tau_E
-        E = E_prev + H * E_dot
-    and return `E` (and likewise `I`). `H` is the known sampling grid — keep it a
-    module-level constant, NOT a learnable parameter.
+        E = E_prev + dt * E_dot
+    and return `E` (and likewise `I`). Write every equation in physical time: time
+    constants are in SECONDS, and any hidden state is integrated with the same `dt`.
+    Never hard-code the step size or make it a learnable parameter.
 
     * HIDDEN STATE IS OPTIONAL. `hidden_state` is a dict; if you use none, return `new_hidden_state = {{}}`.
     If a slow process helps (e.g. a slowly accumulating adaptation / slow
@@ -68,9 +69,11 @@ model:
 
     The image shows the FREE ROLLOUT of the best-scoring parent model (named in the
     title, with its objective loss). Each row is one randomly drawn (sample, stimulus
-    condition) pair; the row title gives the sample, the condition and that row''s
-    rollout MSE. The LEFT panel is E and the RIGHT panel is I. In each panel the grey
-    line is the observed data and the coloured line is the model''s free rollout (red
+    condition) pair; the row title gives the sample, the trial and its condition, and
+    the legend gives that row''s rollout MSE. The LEFT panel is E and the RIGHT panel is I.
+    In each panel the grey dots are the observed single trial, the black line is the
+    mean of that sample''s trials of the same condition (for reference only; the model
+    is fit to single trials), and the coloured line is the model''s free rollout (red
     for E, blue for I); red shading marks when the E pulse is on and blue shading
     marks when the I pulse is on. The x-axis is time from the first stimulus onset (ms). The first 100 ms of the
     window (up to -50 ms) is an unscored warm-up that lets any hidden state settle;
@@ -94,11 +97,14 @@ parameter_estimator:
     * Import any packages you use (use numpy as np).
 
     * Function signature must be `def parameter_estimator(data):`. `data` is ONE
-    mouse''s training dict; the two stimulus conditions are stacked along axis 0:
-        - `data["target_y"]`  — observed activity, `(n_stim, T, 2)`; the last axis is
+    mouse''s training dict; its individual trials are stacked along axis 0:
+        - `data["target_y"]`  — observed activity, `(n_trials, T, 2)`; the last axis is
           (E, I), so `E = data["target_y"][..., 0]` and `I = data["target_y"][..., 1]`,
-          each `(n_stim, T)`.
-        - `data["stim_E"]`, `data["stim_I"]`   — the stimulus, `(n_stim, T)`
+          each `(n_trials, T)`.
+        - `data["stim_E"]`, `data["stim_I"]`   — the stimulus, `(n_trials, T)`
+        - `data["time"]`      — the time axis, `(T,)`, in SECONDS; `dt = time[1] - time[0]`
+          is the bin width. Return time constants in seconds, consistent with a model that
+          steps by `y_prev["dt"]`.
 
     * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`.
     Missing or extra keys will cause your estimator to be rejected. All values must
@@ -125,16 +131,15 @@ jax_translator_model:
     exactly. Do NOT collapse `(E, I)` into an array.
 
     * `y_prev` is a dict with keys `E_prev`, `I_prev`, `stim_E_prev`,
-    `stim_I_prev`. stim_E_prev and stim_I_prev are 0 if no stimulus, 1 if stimulus present.
-    Read from it exactly as the numpy model does.
+    `stim_I_prev`, `dt`. stim_E_prev and stim_I_prev are 0 if no stimulus, 1 if stimulus present;
+    `dt` is the step size in seconds. Read from it exactly as the numpy model does.
 
     * `state` and `new_state` are dicts with the SAME keys throughout the scan
     (possibly empty). Do not add, remove, or rename keys.
 
     * Preserve `model.DEFAULT_PARAMS` verbatim, INCLUDING any `s0_`-prefixed keys
     (the learnable initial values of hidden-state variables — the framework strips
-    the prefix to seed the scan carry). Preserve any module-level integration
-    constant (e.g. `H = 1.0`) as a Python literal.
+    the prefix to seed the scan carry).
 
     * Replace all boolean indexing / Python `max`/`min` on array values with
     `jnp.maximum` / `jnp.minimum` / `jnp.where`. Use `jnp.clip` for clipping — not

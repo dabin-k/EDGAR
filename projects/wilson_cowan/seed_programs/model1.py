@@ -10,12 +10,15 @@ def model(state_prev, y_prev, params):
         tau_E * dE/dt = -E + (E_max - E) * max(W_EE*E - W_EI*I + C_E + XE*stim_E, 0)
         tau_I * dI/dt = -I + (I_max - I) * max(W_IE*E - W_II*I + C_I + XI*stim_I, 0)
 
+        One Euler step of dt seconds (y_prev["dt"], the data's bin width); tau_E, tau_I in seconds.
+
         C_E and C_I : constant baseline drive to the excitatory and inhibitory populations, respectively,
         stim_E and stim_I : binary variable that is 1 when the stimulus is present and 0 otherwise,
 
     Args:
         state_prev: a dictionary representing the previous state of the system -- not used in this function, but included for compatibility with the EDGAR framework
-        y_prev: tuple of ((E_prev, I_prev), (stim_E_prev, stim_I_prev)) representing the previous state and previous stimuli
+        y_prev: dict {'E_prev','I_prev','stim_E_prev','stim_I_prev','dt'} — the previous observation,
+            the previous stimulus and the step size dt (seconds)
         params: dictionary of model parameters
 
     '''
@@ -42,25 +45,30 @@ def model(state_prev, y_prev, params):
     I_prev = y_prev['I_prev']
     stim_E_prev = y_prev['stim_E_prev']
     stim_I_prev = y_prev['stim_I_prev']
+    dt = y_prev['dt']
 
     E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E_prev), 0)
     I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I_prev), 0)
-    E = E_prev + E_dot/tau_E
-    I = I_prev + I_dot/tau_I
+    E = E_prev + dt * E_dot / tau_E
+    I = I_prev + dt * I_dot / tau_I
 
     # hard code new state as empty state 
     new_state = {}
     return new_state, (E, I)
 
 model.DEFAULT_PARAMS = {
-    "tau_E": 6.0,    # time constants in 10 ms bins
-    "tau_I": 12.0,
-    "C_E": 1.0,
-    "C_I": 1.0,
+    "tau_E": 0.06,   # time constants in seconds
+    "tau_I": 0.12,
+    "W_EE": 0.01,
+    "W_EI": 0.01,
+    "W_IE": 0.01,
+    "W_II": 0.01,
+    "E_max": 20.0,
+    "I_max": 20.0,
+    # With E = I = 1 the W terms cancel, so the fixed point is E_max * C / (1 + C) ~ 1: the
+    # baseline-normalised data level.
+    "C_E": 0.05,
+    "C_I": 0.05,
     "XE": 3.0,
     "XI": 1.0,
-    "tau_S": 30.0,
-    "W_ES": 0.5,
-    "W_IS": 0.5,
-    "s0_S": 1.0,  # learnable initial value of the latent S (GD-fit per sample; seeds the scan carry)
 }
