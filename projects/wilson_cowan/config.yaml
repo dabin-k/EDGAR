@@ -57,10 +57,12 @@ project_params:
   contrast: 0             # keep conditions with this screen contrast (0 = paper's blank-screen paradigm)
   # Individual trials (no averaging) are the n_stim axis, padded per split with a mask.
   # Train/test split within each mouse-sample:
-  #   k_fold   — trials grouped into n_folds condition-stratified folds; train = other folds' trials, test = held-out fold's trials
+  #   k_fold   — trials grouped into n_folds condition-stratified folds; params fit on the other folds' trials (train),
+  #              scored on held_out_fold's trials (test). One sample per mouse; folds are not rotated.
   #   exp_cond — train = train_types trials, test = held-out test_types trials
   cv_type: "k_fold" # exp_cond | k_fold
   n_folds: 3              # k_fold only
+  held_out_fold: 0        # k_fold only: the test fold
   fold_seed: 0            # k_fold only
   train_types: ["single_E", "single_I", "paired_EE", "paired_IE"]  # exp_cond only
   test_types: ["paired_II", "paired_EI"]                            # exp_cond only

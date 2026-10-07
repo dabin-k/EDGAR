@@ -28,7 +28,7 @@ that dt (seconds) to the model as ``y_prev["dt"]``. Objective C is the full-traj
 Two data paths:
   * **Real opto data** (``trial_counts_b30_*_s1.npz``, see ``neural_data.py``): individual trials
     on the ``n_stim`` axis, padded to a common count with a ``mask``; one sample per
-    (mouse × trial fold); mice are split into discover / validate.
+    mouse; mice are split into discover / validate.
   * **Synthetic** (``wc*_fold{f}.npz`` from ``simulate_data.save_kfold_splits``): repeat-averaged
     train/test pairs; the *samples* are split 50/50 into discover / validate.
 """
@@ -151,6 +151,7 @@ def load_data(
     chop_post_ms: float = 400.0,
     bin_ms: float = 1.0,
     n_folds: int = 3,
+    held_out_fold: int = 0,
     fold_seed: int = 0,
     contrast: int = 0,
     cv_type: str = "k_fold",
@@ -162,7 +163,7 @@ def load_data(
     ``data_path`` is either real single-trial sessions (a dir / glob / file of
     ``trial_counts_*.npz``, handled by ``_load_real``) or a synthetic ``wc*_fold{f}.npz`` from
     ``simulate_data.save_kfold_splits`` (``_load_synthetic``). ``bin_ms``, ``n_folds``,
-    ``fold_seed`` and ``contrast`` apply to real data only.
+    ``held_out_fold``, ``fold_seed`` and ``contrast`` apply to real data only.
 
     Every top-level ``data`` value carries axis 0 = n_samples (matched to per-sample params);
     ``"target_y"`` is first so the engine's ``next(iter(data.values())).shape[0]`` reads n_samples.
@@ -200,6 +201,7 @@ def load_data(
             chop=(chop_pre_ms / 1000.0, chop_post_ms / 1000.0),
             bin_ms=bin_ms,
             n_folds=n_folds,
+            held_out_fold=held_out_fold,
             fold_seed=fold_seed,
             contrast=contrast,
             cv_type=cv_type,
@@ -246,6 +248,7 @@ def _load_real(
     chop: tuple[float, float],
     bin_ms: float = 1.0,
     n_folds: int = 3,
+    held_out_fold: int = 0,
     fold_seed: int = 0,
     contrast: int = 0,
     cv_type: str = "k_fold",
@@ -255,7 +258,7 @@ def _load_real(
     """Real opto path for ``load_data``: multiple mice → EDGAR's ``(discover, validate, X_eval)``.
 
     **Mouse-level parameters.** One parameter set is fit per EDGAR sample, and a sample is one
-    mouse (× CV rotation): the ``n_stim`` axis holds that mouse's **individual trials** (no trial
+    mouse: the ``n_stim`` axis holds that mouse's **individual trials** (no trial
     averaging), so the fitted parameters must reproduce every trial of every stimulus condition
     with a single ``F_theta``. Only the equation form is shared across samples.
 
@@ -270,8 +273,10 @@ def _load_real(
     average over ``mask == 1`` rows only.
 
     **Train/test within a sample** is set by ``cv_type`` (see ``build_cv_samples``):
-      * ``"k_fold"``   — one sample per ``(mouse, held-out fold)``; ``train`` = the trials of the
-        other ``n_folds - 1`` folds, ``test`` = the held-out fold's trials.
+      * ``"k_fold"``   — one sample per mouse; its trials are grouped into ``n_folds`` folds,
+        ``train`` = the trials of the other ``n_folds - 1`` folds (the params are fit on these),
+        ``test`` = the trials of the single ``held_out_fold``. Folds are not rotated: each
+        rotation would give a separate parameter set, and those cannot be merged.
       * ``"exp_cond"`` — one sample per mouse; ``train`` = ``train_types`` trials, ``test`` =
         disjoint ``test_types`` trials.
 
@@ -281,7 +286,7 @@ def _load_real(
         T_eval, n_eval: Length / number of discover samples for the ``X_eval`` fingerprint.
         chop: ``(pre_s, post_s)`` peri-stimulus window kept, in seconds.
         bin_ms: Bin width (ms); a multiple of the files' 1 ms bins.
-        n_folds, fold_seed: Trial-fold grouping for ``k_fold``.
+        n_folds, held_out_fold, fold_seed: Trial-fold grouping and the test fold for ``k_fold``.
         contrast: Screen contrast of the conditions kept (0 = the paper's blank screen).
         cv_type: ``"k_fold"`` or ``"exp_cond"``.
         train_types, test_types: Experiment-type train/test partition, required for ``exp_cond``.
@@ -291,7 +296,7 @@ def _load_real(
         carries ``target_y`` ``[n, C, T, 2]``, ``stim_E``/``stim_I`` ``[n, C, T]``,
         ``target_y_future`` ``[n, C, A, K, 2]``, ``time`` ``[n, T]``, ``mask`` ``[n, C]`` (1 = real
         trial) and ``cond_id`` ``[n, C]`` (the trial's condition-table row, −1 for padding);
-        ``n`` = number of (mouse × fold) samples on that side, ``C`` = that split's padded trial count.
+        ``n`` = number of mice on that side, ``C`` = that split's padded trial count.
     """
     if len(paths) < 2:
         raise ValueError(
@@ -308,12 +313,11 @@ def _load_real(
     common = dict(chop=chop, bin_ms=bin_ms, contrast=contrast)
 
     def _mouse_units(path: str) -> list:
-        """CV sample-units for one mouse: n_folds of them for k_fold, one for exp_cond."""
+        """The single CV sample-unit for one mouse."""
         if cv_type == "k_fold":
             return [
-                build_cv_samples(path, cv_type="k_fold", held_out_fold=f, n_folds=n_folds,
-                                 fold_seed=fold_seed, **common)
-                for f in range(n_folds)
+                build_cv_samples(path, cv_type="k_fold", held_out_fold=held_out_fold,
+                                 n_folds=n_folds, fold_seed=fold_seed, **common)
             ]
         return [
             build_cv_samples(path, cv_type="exp_cond", train_types=train_types,
@@ -338,7 +342,7 @@ def _load_real(
     A = len(anchor_starts)
 
     def _build(units: list, split: str) -> dict:
-        # Sample axis (axis 0) = mouse × CV rotation; n_stim axis (axis 1) = that unit's trials,
+        # Sample axis (axis 0) = mouse; n_stim axis (axis 1) = that unit's trials,
         # padded to C with cyclic copies of its own trials (mask 0).
         sides = [getattr(u, split) for u in units]
         C = max(sp.n for sp in sides)
