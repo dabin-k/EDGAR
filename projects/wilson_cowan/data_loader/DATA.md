@@ -17,7 +17,8 @@ five session files. That keeps uploads (GCP) small.
    t = 0 must stay a bin edge.
 3. **Split trials** (no averaging; every row is one trial):
    - `k_fold`: trials are grouped into `n_folds` folds, stratified by condition and seeded by
-     `fold_seed`. Test = the held-out fold's trials; train = all other trials.
+     `fold_seed`. Test = the trials of `held_out_fold`; train = the trials of the other folds.
+     Folds are not rotated: rotating would give one parameter set per fold, and those can't be merged.
    - `exp_cond`: train = trials of `train_types`, test = trials of `test_types`.
 4. **Normalise**: rate = counts / bin width, divided per population (E, I) by the mean rate over
    −0.5 to −0.1 s across the **train** trials only. Test trials use the same divisor, so the
@@ -28,7 +29,7 @@ five session files. That keeps uploads (GCP) small.
    if a pulse overlaps any part of it.
 
 ## EDGAR dicts (`load_data._load_real`)
-- One sample = one (mouse × held-out fold) for `k_fold`, or one mouse for `exp_cond`. Mice are
+- One sample = one mouse, for both `k_fold` and `exp_cond`, so one parameter set per mouse. Mice are
   split 50/50 into discover / validate.
 - The `n_stim` axis holds that sample's **individual trials**. Trial counts differ across samples,
   so each split is padded to its largest sample:
