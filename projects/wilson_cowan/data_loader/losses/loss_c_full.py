@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import os
 
-from .loss_common import per_sample_masked_mse
+from .loss_common import per_sample_loss
 
 
 def loss_C_full_rollout(model_output, data):
-    """Full-trajectory rollout MSE, per sample ``(n,)``.
+    """Full-trajectory rollout MSE divided by the mouse's train variance (``loss_common.per_sample_loss``), per sample ``(n,)``.
 
     ``pred_y_full_rollout`` is ``[n, n_stim, T-1, 2]`` (prediction of ``y[t]`` for ``t = 1..T-1``),
     aligned to the ``[1:]`` slice of ``target_y`` — same indexing as ``pred_y_1step``.
@@ -24,4 +24,4 @@ def loss_C_full_rollout(model_output, data):
     w = max(0, int(os.environ.get("EDGAR_WC_WARMUP_BINS", "0")))
     pred = model_output["pred_y_full_rollout"][:, :, w:, :]   # [n, n_stim, T-1-w, 2]
     target = data["target_y"][:, :, 1 + w:, :]                # [n, n_stim, T-1-w, 2]
-    return per_sample_masked_mse(pred, target, data.get("mask"))
+    return per_sample_loss(pred, target, data)

@@ -29,7 +29,7 @@ llms:
 
 scoring:
   timeout_s: 600.0
-  param_penalty_weight: 0.01
+  param_penalty_weight: 0.001
   gradient_descent:
     max_iter: 4000 
     learning_rate: 0.001
