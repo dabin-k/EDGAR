@@ -107,6 +107,7 @@ def plot_model_fits(
         "target_y": jnp.asarray(target_y[s_idx, c_idx][:, None]),   # (n_show, 1, T, 2)
         "stim_E": jnp.asarray(stim_E[s_idx, c_idx][:, None]),       # (n_show, 1, T)
         "stim_I": jnp.asarray(stim_I[s_idx, c_idx][:, None]),
+        "time": jnp.asarray(np.asarray(data["time"])[s_idx]),       # (n_show, T) seconds
     }
     obs = target_y[s_idx, c_idx]                                   # (n_show, T, 2)
     if cond_id is not None:
