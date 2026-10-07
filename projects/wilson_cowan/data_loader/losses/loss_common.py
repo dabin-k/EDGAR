@@ -36,3 +36,15 @@ def per_sample_masked_mse(pred, target, mask=None):
     m = mask.reshape(mask.shape + (1,) * (diff.ndim - mask.ndim))
     per_row = diff[0, 0].size
     return jnp.sum(diff * m, axis=tuple(range(1, diff.ndim))) / (jnp.sum(mask, axis=1) * per_row)
+
+
+def per_sample_loss(pred, target, data):
+    """The objectives' per-sample loss ``(n,)``: masked MSE over real trials, divided by the
+    sample's ``loss_scale``.
+
+    ``loss_scale`` is the sample's mean per-trial variance over its TRAIN trials, carried on both
+    the train and test dicts (``load_data._loss_scale``, which validates it), so the loss is
+    mean(per-trial MSE) / mean(per-trial train variance): the fraction of variance unexplained
+    (0 = perfect, 1 = no better than each trial's own mean).
+    """
+    return per_sample_masked_mse(pred, target, data.get("mask")) / data["loss_scale"]

@@ -18,8 +18,8 @@ model:
     hidden state.
 
     The objective of the model is to predict the mean activity of the E and I populations.
-    Models are scored by a MSE between the observed values of E and I firing rates against the free-rollout 
-    predictions of the model. Lower is better.
+    Models are scored by the MSE between the observed single-trial E and I activity and the
+    model''s free-rollout predictions. The score is the average over mice. Lower is better.
 
     Below are {num_parents} models, sorted from worst to best. *Analyze* their
     progression, *generalize* what lowers the loss, and *create* a new model that

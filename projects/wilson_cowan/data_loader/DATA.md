@@ -37,8 +37,15 @@ five session files. That keeps uploads (GCP) small.
     real data;
   - `mask [n, C]` = 1 for real trials and 0 for padding;
   - `cond_id [n, C]` = the trial's condition row (−1 for padding).
-- The losses (`losses/loss_common.per_sample_masked_mse`) average over real rows only, so padding
+- The losses (`losses/loss_common.per_sample_loss`) average over real rows only, so padding
   never changes a loss value.
+- **Per-mouse loss scale.** `loss_scale [n]` is the mouse's mean per-trial variance over the scored
+  bins (t ≥ 1 + warmup), averaged over E and I and computed on **train** trials only. Both the train
+  and test dicts carry the same value. Each objective's loss is mean(per-trial MSE) / `loss_scale`:
+  the fraction of variance unexplained. Mice with different firing rates then count equally in the
+  score, and trials count equally within a mouse. It is one constant per mouse, with nothing
+  condition- or trial-specific. `load_data._loss_scale` raises at load time if it isn't finite and
+  positive; the losses require it (synthetic data gets the same scale from its train curves).
 - Other keys are unchanged: `target_y [n, C, T, 2]`, `stim_E`/`stim_I [n, C, T]`,
   `target_y_future [n, C, A, K, 2]`, `time [n, T]`.
 

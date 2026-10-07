@@ -295,7 +295,8 @@ def _load_real(
         ``((X_disc_train, X_disc_test), (X_val_train, X_val_test), X_eval)``. Each ``X_*`` dict
         carries ``target_y`` ``[n, C, T, 2]``, ``stim_E``/``stim_I`` ``[n, C, T]``,
         ``target_y_future`` ``[n, C, A, K, 2]``, ``time`` ``[n, T]``, ``mask`` ``[n, C]`` (1 = real
-        trial) and ``cond_id`` ``[n, C]`` (the trial's condition-table row, −1 for padding);
+        trial), ``cond_id`` ``[n, C]`` (the trial's condition-table row, −1 for padding) and
+        ``loss_scale`` ``[n]`` (the mouse's mean per-trial train variance; losses divide by it);
         ``n`` = number of mice on that side, ``C`` = that split's padded trial count.
     """
     if len(paths) < 2:
@@ -341,6 +342,12 @@ def _load_real(
     anchor_starts, K = _rollout_anchors(T)
     A = len(anchor_starts)
 
+    # Loss = mean(MSE of test trials) / mean(variance of train trials) per mouse, then averaged
+    loss_scale = {
+        id(u): _loss_scale(u.train.target_y, warmup_bins, u.train.meta[0]["animal_id"])
+        for u in all_units
+    }
+
     def _build(units: list, split: str) -> dict:
         # Sample axis (axis 0) = mouse; n_stim axis (axis 1) = that unit's trials,
         # padded to C with cyclic copies of its own trials (mask 0).
@@ -363,6 +370,7 @@ def _load_real(
             "time": time,
             "mask": jnp.asarray(real.astype(np.float32)),            # (n, C)
             "cond_id": jnp.asarray(cond_id.astype(np.int32)),        # (n, C)
+            "loss_scale": jnp.asarray([loss_scale[id(u)] for u in units], dtype=jnp.float32),  # (n,)
         }
 
     X_disc_train = _build(disc_units, "train")
@@ -418,6 +426,20 @@ def _load_real(
         (X_val_train, X_val_test),
         X_eval,
     )
+
+def _loss_scale(train_y: np.ndarray, warmup_bins: int, name: str) -> float:
+    """One sample's loss scale: the mean over its TRAIN trials of each trial's variance over the
+    scored bins (t >= 1 + warmup), averaged over E and I. ``train_y`` is ``(N, T, 2)`` real trials.
+
+    The losses divide by it, so a sample's score is mean(per-trial test MSE) / mean(per-trial train
+    variance): the fraction of variance unexplained. It is one constant per sample, nothing
+    condition- or trial-specific. Raises here, at load time, if it is not finite and positive.
+    """
+    scale = float(np.asarray(train_y)[:, 1 + warmup_bins:, :].var(axis=1).mean())
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f"loss_scale for {name} is {scale}; need finite > 0 train-trial variance")
+    return scale
+
 
 def _load_synthetic(
     data_path: str,
@@ -504,12 +526,16 @@ def _load_synthetic(
             [target_y[:, :, a + 1: a + 1 + K, :] for a in anchor_starts], axis=2
         )
         time = jnp.broadcast_to(jnp.asarray(time_axis)[None, :], (n, T))
+        warmup_bins = int(os.environ.get("EDGAR_WC_WARMUP_BINS", DEFAULT_WARMUP_BINS))
+        loss_scale = [_loss_scale(train_data_split[i], warmup_bins, f"synthetic sample {i}")
+                      for i in idx]
         return {
             "target_y": target_y,
             "stim_E": sE,
             "stim_I": sI,
             "target_y_future": target_y_future,
             "time": time,
+            "loss_scale": jnp.asarray(loss_scale, dtype=jnp.float32),   # (n,)
         }
 
     X_disc_train = _build(train_data_split, disc_idx, train_stim)
@@ -682,7 +708,8 @@ def loss_fn(model_output, data):
     """Dispatch to the objective selected in config.yaml (``project_params.objective``, A/B/C).
 
     Returns ``(n,)``. The engine wraps this in ``jnp.mean(loss_fn(...))``; each objective returns
-    per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term. The
+    per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term — and,
+    on real data, divided by the mouse's mean per-trial train variance (``loss_scale``). The
     selection is read from the ``EDGAR_WC_OBJECTIVE`` env var that ``load_data`` republishes from
     config.
     """

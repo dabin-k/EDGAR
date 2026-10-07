@@ -7,15 +7,15 @@ prediction is scored against the future data window.
 """
 from __future__ import annotations
 
-from .loss_common import per_sample_masked_mse
+from .loss_common import per_sample_loss
 
 
 def loss_B_rollout(model_output, data):
-    """Autonomous-rollout MSE, per sample ``(n,)``.
+    """Autonomous-rollout MSE divided by the mouse's train variance (``loss_common.per_sample_loss``), per sample ``(n,)``.
 
     ``pred_y_rollout`` and ``target_y_future`` are both ``[n, n_stim, A, K, 2]`` (A anchors,
     K-step horizon).
     """
     pred = model_output["pred_y_rollout"]       # [n, n_stim, A, K, 2]
     target = data["target_y_future"]            # [n, n_stim, A, K, 2]
-    return per_sample_masked_mse(pred, target, data.get("mask"))
+    return per_sample_loss(pred, target, data)
