@@ -61,8 +61,18 @@ model:
     its initial value as an `s0_`-prefixed entry in `model.DEFAULT_PARAMS` (e.g.
     `"s0_S": 1.0`): the framework strips the `s0_` prefix and seeds the scan carry
     with it (`hidden_state["S"]`), and its value is refined by gradient descent. 
+    * POSITIVE PARAMETERS ARE FITTED IN LOG SPACE. Decide for every parameter whether it
+    must be positive (e.g. time constants, connection weights whose sign is already written
+    into the equation, stimulus gains, saturation levels). Declare each positive parameter in
+    `model.DEFAULT_PARAMS` with a `log_` prefix and its LOG value, e.g.
+    `"log_tau_E": np.log(0.03)`. The framework fits the log value and passes
+    `params["tau_E"] = exp(log_tau_E)` to your model, so the model code reads `params["tau_E"]`
+    in natural units and never reads a `log_` key. A parameter that may change sign (e.g. a
+    tonic drive) keeps a plain name. A positive hidden-state initial value is `log_s0_<name>`
+    (e.g. `"log_s0_S": np.log(1.0)`).
     * Provide `model.DEFAULT_PARAMS`: a dict of sensible float initial values for
-    EVERY key read from `params`. Values must be plain floats.
+    EVERY parameter the model reads (the log value under the `log_` key for positive ones).
+    Values must be plain floats.
 
     '
   image_analysis_instructions: '**Image Analysis Instructions:**
@@ -112,6 +122,12 @@ parameter_estimator:
     values of hidden-state variables): return a sensible float (the model''s default is
     fine); gradient descent refines it.
 
+    * For every `log_`-prefixed key return the LOG of a strictly positive estimate in natural
+    units, e.g. `"log_tau_E": float(np.log(tau_E))`. Never return log(0) or log of a negative
+    number: floor the estimate at a small positive value on the parameter''s natural scale.
+    Gradient descent moves the log by only a few units, so an estimate that is many orders of
+    magnitude too small effectively freezes the parameter.
+
     * Sensible, cheap estimates (no fitting — just statistics of the traces):
 
     * Your response **must** be less than {max_lines} lines including imports.
@@ -139,7 +155,9 @@ jax_translator_model:
 
     * Preserve `model.DEFAULT_PARAMS` verbatim, INCLUDING any `s0_`-prefixed keys
     (the learnable initial values of hidden-state variables — the framework strips
-    the prefix to seed the scan carry).
+    the prefix to seed the scan carry) and any `log_`-prefixed keys (positive parameters
+    fitted in log space — the framework exponentiates them and passes the model the
+    natural-unit value under the unprefixed name). Do not exponentiate inside the model.
 
     * Replace all boolean indexing / Python `max`/`min` on array values with
     `jnp.maximum` / `jnp.minimum` / `jnp.where`. Use `jnp.clip` for clipping — not

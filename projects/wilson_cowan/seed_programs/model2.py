@@ -69,21 +69,22 @@ def model(state_prev, y_prev, params):
     return new_state, (E, I)
 
 
+# Positive parameters are fitted in log space
 model.DEFAULT_PARAMS = {
-    'tau_E': 0.3,   # time constant for excitatory population (s)
-    'tau_I': 0.2,   # time constant for inhibitory population (s)
-    'W_EE': 0.01,   # weight of excitatory to excitatory connections
-    'W_IE': 0.01,   # weight of inhibitory to excitatory connections
-    'W_EI': 0.01,   # weight of excitatory to inhibitory connections
-    'W_II': 0.01,   # weight of inhibitory to inhibitory connections
-    'E_max': 20.0,
-    'I_max': 20.0,
+    'log_tau_E': np.log(0.3),   # time constant for excitatory population (s)
+    'log_tau_I': np.log(0.2),   # time constant for inhibitory population (s)
+    'log_W_EE': np.log(0.01),   # weight of excitatory to excitatory connections
+    'log_W_IE': np.log(0.01),   # weight of inhibitory to excitatory connections
+    'log_W_EI': np.log(0.01),   # weight of excitatory to inhibitory connections
+    'log_W_II': np.log(0.01),   # weight of inhibitory to inhibitory connections
+    'log_E_max': np.log(20.0),
+    'log_I_max': np.log(20.0),
     'C_E': 0.001,
     'C_I': 0.001,
-    'tau_S': 0.3,   # slow-inhibition time constant (s)
-    'W_ES': 0.001,
-    'W_IS': 0.001,
-    'XE': 1.0,
-    'XI': 1.0,
-    's0_S': 1.0,  # learnable initial value of the latent S (GD-fit; seeds the scan carry)
+    'log_tau_S': np.log(0.3),   # slow-inhibition time constant (s)
+    'log_W_ES': np.log(0.001),
+    'log_W_IS': np.log(0.001),
+    'log_XE': np.log(1.0),
+    'log_XI': np.log(1.0),
+    'log_s0_S': np.log(1.0),  # learnable initial value of the latent S (> 0; seeds the scan carry)
 }
