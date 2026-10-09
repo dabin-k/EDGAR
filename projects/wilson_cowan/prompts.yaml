@@ -11,9 +11,9 @@ model:
     and the I pulse drives the inhibitory population.
     
     The model takes the previous excitatory and inhibitory activity (E[t-1], I[t-1]), the hidden_state, 
-    the previous stimulus (stim_E[t-1], stim_I[t-1]), and outputs the next activity (E[t], I[t]). 
+    the stimulus of the bin being predicted (stim_E[t], stim_I[t]), and outputs the next activity (E[t], I[t]). 
     The hidden_state would be necessary if the activities of E(t) and I(t) are not fully determined by their 
-    previous values and the previous stimulus. But increasing the complexity of the hidden_state will create 
+    previous values and the stimulus. But increasing the complexity of the hidden_state will create 
     a more powerful model, but the performance of the model will be penalised by the increased complexity of the 
     hidden state.
 
@@ -36,8 +36,8 @@ model:
     * `y_prev` is a DICT of scalars with EXACTLY these keys:
         - `y_prev["E_prev"]`   — excitatory activity at t-1
         - `y_prev["I_prev"]`   — inhibitory activity at t-1
-        - `y_prev["stim_E_prev"]` — external drive to E at t-1 (1 during pulse, 0 otherwise) 
-        - `y_prev["stim_I_prev"]` — external drive to I at t-1 (1 during pulse, 0 otherwise)
+        - `y_prev["stim_E"]` — external drive to E during the bin being predicted, t (1 during pulse, 0 otherwise)
+        - `y_prev["stim_I"]` — external drive to I during the bin being predicted, t (1 during pulse, 0 otherwise)
         - `y_prev["dt"]`          — the step size: the data''s bin width, in SECONDS
 
     * OUTPUT: return the tuple `(new_hidden_state, mean)` where `mean` is the tuple
@@ -130,8 +130,8 @@ jax_translator_model:
     scalars. Preserve this signature and the two-element return-tuple structure
     exactly. Do NOT collapse `(E, I)` into an array.
 
-    * `y_prev` is a dict with keys `E_prev`, `I_prev`, `stim_E_prev`,
-    `stim_I_prev`, `dt`. stim_E_prev and stim_I_prev are 0 if no stimulus, 1 if stimulus present;
+    * `y_prev` is a dict with keys `E_prev`, `I_prev`, `stim_E`,
+    `stim_I`, `dt`. stim_E and stim_I are 0 if no stimulus, 1 if stimulus present;
     `dt` is the step size in seconds. Read from it exactly as the numpy model does.
 
     * `state` and `new_state` are dicts with the SAME keys throughout the scan

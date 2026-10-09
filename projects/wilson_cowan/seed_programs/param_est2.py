@@ -69,15 +69,15 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     E_prev = E[:, :-1].reshape(-1)
     E_next = E[:, 1:].reshape(-1)
     dE = E_next - E_prev
-    stim_E_prev = stim_E[:, :-1].reshape(-1)
+    stim_E_t = stim_E[:, 1:].reshape(-1)
 
     I_prev = I[:, :-1].reshape(-1)
     I_next = I[:, 1:].reshape(-1)
     dI = I_next - I_prev
-    stim_I_prev = stim_I[:, :-1].reshape(-1)
+    stim_I_t = stim_I[:, 1:].reshape(-1)
 
     # tau_E: post-stimulus steps with high activity where the system is decaying
-    mask_E_decay = (stim_E_prev == 0) & (E_prev > 0.5 * max_obs_E) & (dE < 0)
+    mask_E_decay = (stim_E_t == 0) & (E_prev > 0.5 * max_obs_E) & (dE < 0)
     ratio_E_est = np.percentile(dE[mask_E_decay] / E_prev[mask_E_decay], 10) / dt  # min 10% -> robust to noise; per second
     tau_E = -1.0 / ratio_E_est
     tau_I = tau_E  # just assume the same, hard to extract good value due to low SNR 
@@ -108,11 +108,11 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     LHS_I = (dI[mask_I_active] / dt + I_prev[mask_I_active] / tau_I) / (I_max - I_prev[mask_I_active])
     base_E = np.column_stack([
         E_prev[mask_E_active], -I_prev[mask_E_active],
-        np.ones(int(mask_E_active.sum())), stim_E_prev[mask_E_active],
+        np.ones(int(mask_E_active.sum())), stim_E_t[mask_E_active],
     ])
     base_I = np.column_stack([
         E_prev[mask_I_active], -I_prev[mask_I_active],
-        np.ones(int(mask_I_active.sum())), stim_I_prev[mask_I_active],
+        np.ones(int(mask_I_active.sum())), stim_I_t[mask_I_active],
     ])
 
     def _fit(X, y):

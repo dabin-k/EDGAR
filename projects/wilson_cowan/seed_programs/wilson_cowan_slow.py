@@ -18,8 +18,8 @@ def model(hidden_state, y_prev, params):
     Args
     ----
     hidden_state : dict with the previous hidden state {'S': S_prev}.
-    y_prev : dict {'E_prev','I_prev','stim_E_prev','stim_I_prev'} — the previous
-        observation bundled with the previous stimulus.
+    y_prev : dict {'E_prev','I_prev','stim_E','stim_I'} — the previous
+        observation bundled with the stimulus of the bin being predicted.
     params : dict of model parameters (adds tau_S, W_ES, W_IS over the base WC set).
     """
     E_max = params['E_max']
@@ -43,17 +43,17 @@ def model(hidden_state, y_prev, params):
 
     E_prev = y_prev['E_prev']
     I_prev = y_prev['I_prev']
-    stim_E_prev = y_prev['stim_E_prev']
-    stim_I_prev = y_prev['stim_I_prev']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
 
     S_prev = hidden_state['S']
 
     S_dot = (-S_prev + I_prev) / tau_S
     S = S_prev + H * S_dot
 
-    E_dot = -E_prev + (E_max - E_prev) * np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev), 0)
+    E_dot = -E_prev + (E_max - E_prev) * np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E), 0)
     E_dot /= tau_E
-    I_dot = -I_prev + (I_max - I_prev) * np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I_prev), 0)
+    I_dot = -I_prev + (I_max - I_prev) * np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I), 0)
     I_dot /= tau_I
     E = E_prev + H * E_dot
     I = I_prev + H * I_dot
@@ -105,17 +105,17 @@ def model_jax(hidden_state, y_prev, params):
 
     E_prev = y_prev['E_prev']
     I_prev = y_prev['I_prev']
-    stim_E_prev = y_prev['stim_E_prev']
-    stim_I_prev = y_prev['stim_I_prev']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
 
     S_prev = hidden_state['S']
 
     S_dot = (-S_prev + I_prev) / tau_S
     S = S_prev + H * S_dot
 
-    E_dot = -E_prev + (E_max - E_prev) * jnp.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev), 0)
+    E_dot = -E_prev + (E_max - E_prev) * jnp.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E), 0)
     E_dot /= tau_E
-    I_dot = -I_prev + (I_max - I_prev) * jnp.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I_prev), 0)
+    I_dot = -I_prev + (I_max - I_prev) * jnp.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I), 0)
     I_dot /= tau_I
     E = E_prev + H * E_dot
     I = I_prev + H * I_dot

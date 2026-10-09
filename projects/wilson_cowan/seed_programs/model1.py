@@ -17,8 +17,8 @@ def model(state_prev, y_prev, params):
 
     Args:
         state_prev: a dictionary representing the previous state of the system -- not used in this function, but included for compatibility with the EDGAR framework
-        y_prev: dict {'E_prev','I_prev','stim_E_prev','stim_I_prev','dt'} — the previous observation,
-            the previous stimulus and the step size dt (seconds)
+        y_prev: dict {'E_prev','I_prev','stim_E','stim_I','dt'} — the previous observation,
+            the stimulus of the bin being predicted and the step size dt (seconds)
         params: dictionary of model parameters
 
     '''
@@ -43,12 +43,12 @@ def model(state_prev, y_prev, params):
 
     E_prev = y_prev['E_prev']
     I_prev = y_prev['I_prev']
-    stim_E_prev = y_prev['stim_E_prev']
-    stim_I_prev = y_prev['stim_I_prev']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
     dt = y_prev['dt']
 
-    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E_prev), 0)
-    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I_prev), 0)
+    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E), 0)
+    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I), 0)
     E = E_prev + dt * E_dot / tau_E
     I = I_prev + dt * I_dot / tau_I
 

@@ -15,8 +15,8 @@ def model(state_prev, y_prev, params):
         
         tau_S * dS/dt = -S + I
 
-        tau_E * dE/dt = -E_prev + (E_max - E_prev) * max(W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev, 0)
-        tau_I * dI/dt = -I_prev + (I_max - I_prev) * max(W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I_prev, 0)
+        tau_E * dE/dt = -E_prev + (E_max - E_prev) * max(W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E, 0)
+        tau_I * dI/dt = -I_prev + (I_max - I_prev) * max(W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I, 0)
         E = E_prev + dt * dE/dt,  I = I_prev + dt * dI/dt,  S = S_prev + dt * dS/dt
 
         dt is y_prev["dt"], the data's bin width in seconds; tau_E, tau_I, tau_S are in seconds.
@@ -24,8 +24,8 @@ def model(state_prev, y_prev, params):
     Args
     ----
     state_prev : dict with the previous hidden state {'S': S_prev}.
-    y_prev : dict {'E_prev','I_prev','stim_E_prev','stim_I_prev','dt'} — the previous
-        observation bundled with the previous stimulus and the step size dt (seconds).
+    y_prev : dict {'E_prev','I_prev','stim_E','stim_I','dt'} — the previous
+        observation bundled with the stimulus of the bin being predicted and the step size dt (seconds).
     params : dict of model parameters (adds tau_S, W_ES, W_IS over the base WC set).
     """
     E_max = params['E_max']
@@ -49,8 +49,8 @@ def model(state_prev, y_prev, params):
 
     E_prev = y_prev['E_prev']
     I_prev = y_prev['I_prev']
-    stim_E_prev = y_prev['stim_E_prev']
-    stim_I_prev = y_prev['stim_I_prev']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
 
     S_prev = state_prev['S']
     dt = y_prev['dt']
@@ -58,9 +58,9 @@ def model(state_prev, y_prev, params):
     S_dot = (-S_prev + I_prev) / tau_S
     S = S_prev + dt * S_dot
 
-    E_dot = -E_prev + (E_max - E_prev) * np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev), 0)
+    E_dot = -E_prev + (E_max - E_prev) * np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E), 0)
     E_dot /= tau_E
-    I_dot = -I_prev + (I_max - I_prev) * np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I_prev), 0)
+    I_dot = -I_prev + (I_max - I_prev) * np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I), 0)
     I_dot /= tau_I
     E = E_prev + dt * E_dot
     I = I_prev + dt * I_dot

@@ -1,7 +1,8 @@
 """Structural anti-leakage self-test for the Wilson-Cowan state-space DSL.
 
 WC's premise is cheat-proof one-step-ahead autoregression: the model sees only the
-PREVIOUS observation (bundled with the previous stimulus) and must predict the next.
+PREVIOUS observation (bundled with the stimulus of the bin being predicted — the stimulus is
+exogenous and known in advance, so seeing stim[t] is not leakage) and must predict the next.
 Because ``y_prev`` here is a *dict* carrying the stimulus, there is more surface for
 an accidental future-index or wrong slice than in the scalar fhn task — so a
 structural regression guard matters. We verify:
@@ -111,7 +112,7 @@ def check_shape(model_fn, default_params) -> tuple[bool, dict]:
     dyn_j = jax.tree_util.tree_map(jnp.asarray, dyn_params)
     y_prev = {
         "E_prev": jnp.asarray(0.5), "I_prev": jnp.asarray(0.5),
-        "stim_E_prev": jnp.asarray(0.0), "stim_I_prev": jnp.asarray(0.0),
+        "stim_E": jnp.asarray(0.0), "stim_I": jnp.asarray(0.0), "dt": jnp.asarray(0.001),
     }
     try:
         new_hidden_state, mean = model_fn(init_j, y_prev, dyn_j)
