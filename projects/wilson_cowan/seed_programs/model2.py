@@ -3,30 +3,28 @@ import jax.numpy as jnp
 
 # Wilson-Cowan model WITH slow inhibition (WCS).
 #
-# Adds a hidden slow-inhibition variable S (from TRN activity) that integrates the
-# inhibitory activity and feeds back onto both populations. Under teacher forcing
-# I_prev is the observed I, so S is recovered by carrying it through the scan;
-# apply_model seeds the carry from the learnable `s0_S` param below. E and I use the
-# PREVIOUS S (S_prev), matching the generator in data_loader/simulate_data.py.
-def model(state_prev, y_prev, params):
-    """Network with hidden slow-inhibition dynamics update.
+# Adds a hidden slow-inhibition variable S (from TRN activity) that low-pass filters the
+# inhibitory activity and feeds back onto both populations. apply_model seeds S from the
+# learnable `log_s0_S` param below and integrates all of E, I, S itself.
+def model(z, u, params):
+    """Right-hand side of the WCS ODE: time derivatives of E, I and the hidden S (per second).
 
-    Equation : 
-        
+    Equations:
         tau_S * dS/dt = -S + I
+        tau_E * dE/dt = -E + (E_max - E) * max(W_EE * E - W_EI * I - W_ES * S + C_E + XE * stim_E, 0)
+        tau_I * dI/dt = -I + (I_max - I) * max(W_IE * E - W_II * I - W_IS * S + C_I + XI * stim_I, 0)
 
-        tau_E * dE/dt = -E_prev + (E_max - E_prev) * max(W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E, 0)
-        tau_I * dI/dt = -I_prev + (I_max - I_prev) * max(W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I, 0)
-        E = E_prev + dt * dE/dt,  I = I_prev + dt * dI/dt,  S = S_prev + dt * dS/dt
-
-        dt is y_prev["dt"], the data's bin width in seconds; tau_E, tau_I, tau_S are in seconds.
+    tau_E, tau_I, tau_S are in seconds. The framework integrates these derivatives over each bin.
 
     Args
     ----
-    state_prev : dict with the previous hidden state {'S': S_prev}.
-    y_prev : dict {'E_prev','I_prev','stim_E','stim_I','dt'} — the previous
-        observation bundled with the stimulus of the bin being predicted and the step size dt (seconds).
-    params : dict of model parameters (adds tau_S, W_ES, W_IS over the base WC set).
+    z : dict {'E','I','S'} — current values of the observed E, I and the hidden S.
+    u : dict {'stim_E','stim_I'} — the stimulus of the bin.
+    params : dict of model parameters in natural units (adds tau_S, W_ES, W_IS over the base WC set).
+
+    Returns
+    -------
+    {'E': dE/dt, 'I': dI/dt, 'S': dS/dt} — same keys as z.
     """
     E_max = params['E_max']
     I_max = params['I_max']
@@ -47,26 +45,17 @@ def model(state_prev, y_prev, params):
     XE = params['XE']  # transient input to the excitatory population
     XI = params['XI']  # transient input to the inhibitory population
 
-    E_prev = y_prev['E_prev']
-    I_prev = y_prev['I_prev']
-    stim_E = y_prev['stim_E']
-    stim_I = y_prev['stim_I']
+    E = z['E']
+    I = z['I']
+    S = z['S']
+    stim_E = u['stim_E']
+    stim_I = u['stim_I']
 
-    S_prev = state_prev['S']
-    dt = y_prev['dt']
+    dS = (-S + I) / tau_S
+    dE = (-E + (E_max - E) * np.maximum(W_EE * E - W_EI * I - W_ES * S + C_E + XE * stim_E, 0)) / tau_E
+    dI = (-I + (I_max - I) * np.maximum(W_IE * E - W_II * I - W_IS * S + C_I + XI * stim_I, 0)) / tau_I
 
-    S_dot = (-S_prev + I_prev) / tau_S
-    S = S_prev + dt * S_dot
-
-    E_dot = -E_prev + (E_max - E_prev) * np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E), 0)
-    E_dot /= tau_E
-    I_dot = -I_prev + (I_max - I_prev) * np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I), 0)
-    I_dot /= tau_I
-    E = E_prev + dt * E_dot
-    I = I_prev + dt * I_dot
-
-    new_state = {'S': S}
-    return new_state, (E, I)
+    return {'E': dE, 'I': dI, 'S': dS}
 
 
 # Positive parameters are fitted in log space

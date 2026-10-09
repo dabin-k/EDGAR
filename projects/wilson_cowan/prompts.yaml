@@ -10,10 +10,11 @@ model:
     be delivered with varying inter-pulse intervals. The E pulse drives the excitatory population,
     and the I pulse drives the inhibitory population.
     
-    The model takes the previous excitatory and inhibitory activity (E[t-1], I[t-1]), the hidden_state, 
-    the stimulus of the bin being predicted (stim_E[t], stim_I[t]), and outputs the next activity (E[t], I[t]). 
-    The hidden_state would be necessary if the activities of E(t) and I(t) are not fully determined by their 
-    previous values and the stimulus. But increasing the complexity of the hidden_state will create 
+    The model is the right-hand side of an ODE: given the current excitatory and inhibitory activity
+    (E, I), any hidden variables and the stimulus (stim_E, stim_I), it returns their time derivatives
+    dE/dt, dI/dt (and those of the hidden variables). The framework integrates them over time using exponential Euler.
+    Hidden variables would be necessary if the activities of E(t) and I(t) are not fully determined by their 
+    current values and the stimulus. But increasing the number of hidden variables will create 
     a more powerful model, but the performance of the model will be penalised by the increased complexity of the 
     hidden state.
 
@@ -30,37 +31,30 @@ model:
 
     * Import any packages you use (import numpy as np).
 
-    * Model signature must be `def model(state, y_prev, params):` — a SINGLE
-    forward step of the circuit. `params` is a dict of learnable scalar floats.
+    * Model signature must be `def model(z, u, params):` — the RIGHT-HAND SIDE of
+    the ODE dz/dt = f(z, u), evaluated at one instant. `params` is a dict of learnable scalar floats.
 
-    * `y_prev` is a DICT of scalars with EXACTLY these keys:
-        - `y_prev["E_prev"]`   — excitatory activity at t-1
-        - `y_prev["I_prev"]`   — inhibitory activity at t-1
-        - `y_prev["stim_E"]` — external drive to E during the bin being predicted, t (1 during pulse, 0 otherwise)
-        - `y_prev["stim_I"]` — external drive to I during the bin being predicted, t (1 during pulse, 0 otherwise)
-        - `y_prev["dt"]`          — the step size: the data''s bin width, in SECONDS
+    * `z` is a DICT of scalars with the CURRENT VALUE of every variable:
+        - `z["E"]`      — excitatory activity
+        - `z["I"]`      — inhibitory activity
+        - plus one key per hidden variable you add (e.g. `z["S"]`), see below.
 
-    * OUTPUT: return the tuple `(new_hidden_state, mean)` where `mean` is the tuple
-    `(E, I)` — your prediction of the next excitatory and inhibitory activity. Do
-    NOT return a scalar, a single array, or a distribution: return `(E, I)` as two
-    scalars.
+    * `u` is a DICT of scalars with EXACTLY these keys:
+        - `u["stim_E"]` — external drive to E (1 during pulse, 0 otherwise)
+        - `u["stim_I"]` — external drive to I (1 during pulse, 0 otherwise)
 
-    * DO YOUR OWN INTEGRATION. You are predicting the next *value*, not a
-    derivative. Compute a rate of change and take one Euler step of `y_prev["dt"]`, e.g.
-        dt = y_prev["dt"]   # bin width in seconds, supplied by the data
-        E_dot = (-E_prev + drive_E) / tau_E
-        E = E_prev + dt * E_dot
-    and return `E` (and likewise `I`). Write every equation in physical time: time
-    constants are in SECONDS, and any hidden state is integrated with the same `dt`.
-    Never hard-code the step size or make it a learnable parameter.
+    * OUTPUT: return ONE dict with EXACTLY the keys of `z`, each holding that variable''s TIME
+    DERIVATIVE (per second), e.g. `{{"E": dE_dt, "I": dI_dt}}`. Do not return a tuple, an array, or a distribution.
 
-    * HIDDEN STATE IS OPTIONAL. `hidden_state` is a dict; if you use none, return `new_hidden_state = {{}}`.
-    If a slow process helps (e.g. a slowly accumulating adaptation / slow
-    inhibition variable that is NOT directly observed), you MAY carry it: read it
-    from `hidden_state` (e.g. `hidden_state["S"]`) and return `new_hidden_state` with the SAME keys. Give
-    its initial value as an `s0_`-prefixed entry in `model.DEFAULT_PARAMS` (e.g.
-    `"s0_S": 1.0`): the framework strips the `s0_` prefix and seeds the scan carry
-    with it (`hidden_state["S"]`), and its value is refined by gradient descent. 
+    Write every equation in physical time: time constants are in SECONDS.
+
+    * HIDDEN VARIABLES ARE OPTIONAL. If a slow process helps (e.g. a slowly accumulating
+    adaptation / slow inhibition variable that is NOT directly observed), you MAY add one: it
+    appears in `z` under its own name (e.g. `z["S"]`; never `E` or `I`) and you return its
+    time derivative under the same key (e.g. `"S": (-S + I) / tau_S`). Declare it by giving its
+    initial value as an `s0_`-prefixed entry in `model.DEFAULT_PARAMS` (e.g. `"s0_S": 1.0`):
+    the framework adds `z["S"]`, starts it from that value, and refines the value by gradient
+    descent. 
     * POSITIVE PARAMETERS ARE FITTED IN LOG SPACE. Decide for every parameter whether it
     must be positive (e.g. time constants, connection weights whose sign is already written
     into the equation, stimulus gains, saturation levels). Declare each positive parameter in
@@ -113,8 +107,8 @@ parameter_estimator:
           each `(n_trials, T)`.
         - `data["stim_E"]`, `data["stim_I"]`   — the stimulus, `(n_trials, T)`
         - `data["time"]`      — the time axis, `(T,)`, in SECONDS; `dt = time[1] - time[0]`
-          is the bin width. Return time constants in seconds, consistent with a model that
-          steps by `y_prev["dt"]`.
+          is the bin width. Return time constants in seconds (the model is an ODE in physical
+          time).
 
     * Return a param dict whose keys EXACTLY match the model''s `DEFAULT_PARAMS`.
     Missing or extra keys will cause your estimator to be rejected. All values must
@@ -141,17 +135,16 @@ parameter_estimator:
 jax_translator_model:
   code_guidelines: 'CRITICAL JAX compatibility requirements :
 
-    * The model signature is `def model(state, y_prev, params)` and returns
-    `(new_state, mean)` where `mean` is the Python tuple `(E, I)` of two jnp
-    scalars. Preserve this signature and the two-element return-tuple structure
-    exactly. Do NOT collapse `(E, I)` into an array.
+    * The model signature is `def model(z, u, params)` and returns ONE dict of time
+    derivatives with exactly the keys of `z` (jnp scalars). Preserve this signature and the
+    return structure exactly; do not return a tuple or array, and do not add any time stepping.
 
-    * `y_prev` is a dict with keys `E_prev`, `I_prev`, `stim_E`,
-    `stim_I`, `dt`. stim_E and stim_I are 0 if no stimulus, 1 if stimulus present;
-    `dt` is the step size in seconds. Read from it exactly as the numpy model does.
+    * `z` is a dict with keys `E`, `I` and any hidden variables; `u` is a dict with keys
+    `stim_E`, `stim_I` (0 if no stimulus, 1 if stimulus present). Read from them exactly as
+    the numpy model does. Do not add, remove, or rename keys.
 
-    * `state` and `new_state` are dicts with the SAME keys throughout the scan
-    (possibly empty). Do not add, remove, or rename keys.
+    * The framework differentiates the model with respect to its inputs, so keep it smooth
+    where the numpy model is smooth.
 
     * Preserve `model.DEFAULT_PARAMS` verbatim, INCLUDING any `s0_`-prefixed keys
     (the learnable initial values of hidden-state variables — the framework strips
