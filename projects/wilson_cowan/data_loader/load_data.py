@@ -1,12 +1,14 @@
 """EDGAR entry points for the Wilson-Cowan (WC) neural-dynamics training-objective benchmark.
 
-The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``):
-    ``model(state, y_prev, params) -> (new_state, mean)``
-    * ``y_prev`` is a **dict** ``{"E_prev","I_prev","stim_E","stim_I","dt"}`` — the previous
-      observation, bundled with the stimulus of the bin being predicted and the step size.
-    * ``new_state`` is the hidden carry (an empty dict for the stateless base model; a model
-      with a latent ``S`` carries ``{"S": ...}``).
-    * ``mean`` is ``(E, I)`` — the predicted next observation.
+The evolved program is the right-hand side of the WC ODE, dz/dt = f(z, u) (see
+``seed_programs/model2.py``):
+    ``model(z, u, params) -> dz_dt``
+    * ``z`` is a **dict** of the current values of every variable: the observed ``"E"``, ``"I"``
+      and any hidden variables (e.g. a latent ``"S"``).
+    * ``u`` is a **dict** ``{"stim_E","stim_I"}`` — the stimulus of the bin being integrated over.
+    * ``dz_dt`` is a dict with exactly the keys of ``z``: each variable's time derivative, per second.
+    The model never integrates: ``apply_model`` advances every variable by one bin with the
+    exponential-Euler step ``_exp_euler_step``, which the evolved code cannot touch.
     * ``params`` is a dict of learnable WC params. Hidden-state initial values are declared with
       the ``s0_`` prefix, and parameters that must be positive are fitted in log space under a
       ``log_`` prefix; ``_split_params`` exponentiates the ``log_`` keys, routes the ``s0_`` keys
@@ -23,8 +25,8 @@ the objective set in the project ``config.yaml`` (``project_params.objective``, 
 are likewise config-driven (``project_params.rollout_k`` / ``anchor_stride``); see the
 configuration note below for how they reach ``apply_model`` / ``loss_fn``. The time-axis dt is
 inferred from each session's stored ``time_axis`` on the real opto path; ``dt_seconds`` is only a
-bin->seconds convention for the synthetic files, whose time axis is in bins. ``apply_model`` hands
-that dt (seconds) to the model as ``y_prev["dt"]``. Objective C is the full-trajectory rollout.
+bin->seconds convention for the synthetic files, whose time axis is in bins. ``apply_model``
+integrates the model's derivatives over that dt (seconds). Objective C is the full-trajectory rollout.
 
 Two data paths:
   * **Real opto data** (``trial_counts_b30_*_s1.npz``, see ``neural_data.py``): individual trials
@@ -171,7 +173,7 @@ def load_data(
     The dict carries ``target_y`` (both observed channels, last axis = (E, I)), the stimulus
     (``stim_E``, ``stim_I``), the rollout targets ``target_y_future``, and ``time`` — all with a
     leading n-axis so the param estimator's per-sample ``v[i]`` indexing stays valid. ``apply_model``
-    reads E/I back off ``target_y`` and assembles the per-step ``y_prev`` dict internally.
+    reads E/I back off ``target_y`` and assembles the per-step ``z`` / ``u`` dicts internally.
     """
     if not data_path:
         raise ValueError(
@@ -612,6 +614,44 @@ def _split_params(params: dict) -> tuple[dict, dict]:
     return init_state, dyn_params
 
 
+Z_KEYS_OBSERVED = ("E", "I")
+
+
+def _exp_euler_step(model_fn, params, z, u, dt):
+    """Advance the variables ``z`` (dict: E, I, hidden...) by one bin of ``dt`` seconds → new ``z``.
+
+    The model supplies only the time derivatives f(z, u), a dict with the same keys as ``z``.
+    Exponential Euler integrates each variable's own linear rate a_i = -df_i/dz_i exactly (the
+    Jacobian diagonal, by forward-mode AD) while the remaining dynamics are frozen over the step:
+
+        z_new = z + (1 - exp(-a dt)) / a * f(z)
+
+    For a > 0 the factor is at most min(dt, 1/a), so a variable never overshoots the point its own
+    dynamics relax to, however small its time constant (forward Euler diverges once a*dt > 2). For
+    a < 0 (local self-excitation) it grows as the ODE does. To first order in dt it is forward Euler.
+    """
+    keys = list(z)
+
+    def f(vec):
+        dz = model_fn({k: vec[i] for i, k in enumerate(keys)}, u, params)
+        if not isinstance(dz, dict) or set(dz) != set(keys):
+            raise ValueError(
+                f"model must return a dict of time derivatives with exactly the keys of z {sorted(keys)}; "
+                f"got {sorted(dz) if isinstance(dz, dict) else type(dz).__name__}")
+        return jnp.stack([jnp.asarray(dz[k]) for k in keys])
+
+    vec = jnp.stack([z[k] for k in keys]).astype(jnp.result_type(float))
+    basis = jnp.eye(vec.shape[0], dtype=vec.dtype)
+    fz, J = jax.vmap(lambda v: jax.jvp(f, (vec,), (v,)))(basis)  # fz repeated per row; J[i] = df/dz_i
+    fz, a = fz[0], -jnp.diagonal(J)
+    adt = a * dt
+    small = jnp.abs(adt) < 1e-6                                   # series limit; keeps gradients finite
+    adt_safe = jnp.where(small, 1.0, adt)
+    phi = jnp.where(small, dt * (1.0 - 0.5 * adt), dt * (-jnp.expm1(-adt_safe)) / adt_safe)
+    new = vec + phi * fz
+    return {k: new[i] for i, k in enumerate(keys)}
+
+
 def _hidden_vec(state: dict, hkeys: list[str]):
     """Flatten a hidden-carry dict into a vector in fixed ``hkeys`` order (``[0]`` if stateless)."""
     if hkeys:
@@ -626,10 +666,10 @@ def apply_model(model_fn, data, params):
     conditions (params shared across conditions — same cell). Returned dict, shapes
     ``[n, n_stim, ...]``:
 
-    ``y_prev`` carries the previous E/I, the stimulus of the bin being predicted (``stim_E/I[t]``
-    for the step ``t-1 -> t``: a pulse drives the response within its own bin, which matters once
-    bins are as long as the opto response latency), and ``dt`` (bin width in seconds, from
-    ``data["time"]``) so models integrate in physical time.
+    Every step ``t-1 -> t`` is ``_exp_euler_step``: the model's derivatives are evaluated at the
+    E/I (and hidden state) of ``t-1`` with the stimulus of the bin being predicted (``stim_E/I[t]``:
+    a pulse drives the response within its own bin, which matters once bins are as long as the
+    opto response latency), and integrated over ``dt`` (bin width in seconds, from ``data["time"]``).
 
     * ``pred_y_1step``        ``[…, T-1, 2]`` — teacher-forced one-step prediction (data E/I fed in).
     * ``pred_y_rollout``      ``[…, A, K, 2]``— autonomous rollout from A anchors (own E/I fed back),
@@ -648,8 +688,8 @@ def apply_model(model_fn, data, params):
     I = target_y[..., 1]
     sE = data["stim_E"]
     sI = data["stim_I"]
-    # Bin width in seconds, from the shared time grid; handed to the model as y_prev["dt"] so the
-    # equations (and their time constants) are in physical time, independent of bin width.
+    # Bin width in seconds, from the shared time grid: the integration step, so the equations (and
+    # their time constants) are in physical time, independent of bin width.
     time = jnp.asarray(data["time"])
     dt = (time[..., 1] - time[..., 0]).reshape(-1)[0]
 
@@ -658,21 +698,25 @@ def apply_model(model_fn, data, params):
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
         init_state, dyn_params = _split_params(p)
+        init_state = {k: jnp.asarray(v, dtype=jnp.result_type(float)) for k, v in init_state.items()}
         hkeys = sorted(init_state.keys())
+        if set(hkeys) & set(Z_KEYS_OBSERVED):
+            raise ValueError(f"hidden variables may not be named {Z_KEYS_OBSERVED}: got s0_ keys {hkeys}")
+
+        def step(state, E_p, I_p, sE_t, sI_t):
+            """One exp.-Euler bin from (E_p, I_p, hidden state) → (new hidden state, E, I)."""
+            z_new = _exp_euler_step(model_fn, dyn_params, {"E": E_p, "I": I_p, **state},
+                                    {"stim_E": sE_t, "stim_I": sI_t}, dt)
+            return {k: z_new[k] for k in hkeys}, z_new["E"], z_new["I"]
 
         def per_stim(E_c, I_c, sE_c, sI_c):
-            # ── Teacher-forced one-step pass (feed the data E/I into y_prev) ──
-            # Step t-1 -> t sees E/I at t-1 and the stimulus at t.
+            # ── Teacher-forced one-step pass (each step starts from the data E/I) ──
+            # Step t-1 -> t starts from E/I at t-1 and sees the stimulus at t.
             xs = (E_c[:-1], I_c[:-1], sE_c[1:], sI_c[1:])
 
             def tf_step(state, inp):
                 E_p, I_p, sE_t, sI_t = inp
-                y_prev = {
-                    "E_prev": E_p, "I_prev": I_p,
-                    "stim_E": sE_t, "stim_I": sI_t, "dt": dt,
-                }
-                new_state, mean = model_fn(state, y_prev, dyn_params)
-                E_n, I_n = mean
+                new_state, E_n, I_n = step(state, E_p, I_p, sE_t, sI_t)
                 return new_state, (jnp.stack([E_n, I_n]), _hidden_vec(new_state, hkeys))
 
             _, (means, hid_seq) = jax.lax.scan(tf_step, init_state, xs)  # (T-1,2), (T-1,nh)
@@ -685,12 +729,7 @@ def apply_model(model_fn, data, params):
             def free_step(carry, inp):
                 state, E_p, I_p = carry
                 sE_t, sI_t = inp
-                y_prev = {
-                    "E_prev": E_p, "I_prev": I_p,
-                    "stim_E": sE_t, "stim_I": sI_t, "dt": dt,
-                }
-                new_state, mean = model_fn(state, y_prev, dyn_params)
-                E_n, I_n = mean
+                new_state, E_n, I_n = step(state, E_p, I_p, sE_t, sI_t)
                 return (new_state, E_n, I_n), jnp.stack([E_n, I_n])
 
             # ── Autonomous K-step rollout from each anchor ──

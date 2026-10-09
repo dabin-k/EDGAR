@@ -3,25 +3,25 @@ import jax.numpy as jnp
 
 
 # Wilson-Cowan model 
-def model(state_prev, y_prev, params):
-    ''' Dynamics update function with non-linearity 
+def model(z, u, params):
+    """Right-hand side of the WC ODE: time derivatives of E and I (per second).
 
-    Equation : 
+    Equations:
         tau_E * dE/dt = -E + (E_max - E) * max(W_EE*E - W_EI*I + C_E + XE*stim_E, 0)
         tau_I * dI/dt = -I + (I_max - I) * max(W_IE*E - W_II*I + C_I + XI*stim_I, 0)
 
-        One Euler step of dt seconds (y_prev["dt"], the data's bin width); tau_E, tau_I in seconds.
-
+        tau_E, tau_I in seconds. The framework integrates these derivatives over each bin.
         C_E and C_I : constant baseline drive to the excitatory and inhibitory populations, respectively,
         stim_E and stim_I : binary variable that is 1 when the stimulus is present and 0 otherwise,
 
     Args:
-        state_prev: a dictionary representing the previous state of the system -- not used in this function, but included for compatibility with the EDGAR framework
-        y_prev: dict {'E_prev','I_prev','stim_E','stim_I','dt'} — the previous observation,
-            the stimulus of the bin being predicted and the step size dt (seconds)
-        params: dictionary of model parameters
+        z: dict {'E','I'} — current values of the variables (no hidden variables in this model)
+        u: dict {'stim_E','stim_I'} — the stimulus of the bin
+        params: dictionary of model parameters in natural units
 
-    '''
+    Returns:
+        {'E': dE/dt, 'I': dI/dt} — same keys as z
+    """
     E_max = params['E_max']
     I_max = params['I_max']
     W_EE = params['W_EE']
@@ -41,20 +41,15 @@ def model(state_prev, y_prev, params):
     # tau_alpha = parameters['tau_alpha'] # time constant for alpha function for inhibitory input
     # XI_drive = XI * _alpha_drive(stimuli[:, 1], tau_alpha, h)
 
-    E_prev = y_prev['E_prev']
-    I_prev = y_prev['I_prev']
-    stim_E = y_prev['stim_E']
-    stim_I = y_prev['stim_I']
-    dt = y_prev['dt']
+    E = z['E']
+    I = z['I']
+    stim_E = u['stim_E']
+    stim_I = u['stim_I']
 
-    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev + C_E + XE * stim_E), 0)
-    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev + C_I + XI * stim_I), 0)
-    E = E_prev + dt * E_dot / tau_E
-    I = I_prev + dt * I_dot / tau_I
+    dE = (-E + (E_max - E) * np.maximum(W_EE * E - W_EI * I + C_E + XE * stim_E, 0)) / tau_E
+    dI = (-I + (I_max - I) * np.maximum(W_IE * E - W_II * I + C_I + XI * stim_I, 0)) / tau_I
 
-    # hard code new state as empty state 
-    new_state = {}
-    return new_state, (E, I)
+    return {'E': dE, 'I': dI}
 
 # Positive parameters are fitted in log space
 model.DEFAULT_PARAMS = {
