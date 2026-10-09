@@ -2,8 +2,8 @@
 
 The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``):
     ``model(state, y_prev, params) -> (new_state, mean)``
-    * ``y_prev`` is a **dict** ``{"E_prev","I_prev","stim_E_prev","stim_I_prev"}`` — the previous
-      observation bundled with the previous stimulus.
+    * ``y_prev`` is a **dict** ``{"E_prev","I_prev","stim_E","stim_I","dt"}`` — the previous
+      observation, bundled with the stimulus of the bin being predicted and the step size.
     * ``new_state`` is the hidden carry (an empty dict for the stateless base model; a model
       with a latent ``S`` carries ``{"S": ...}``).
     * ``mean`` is ``(E, I)`` — the predicted next observation.
@@ -611,8 +611,10 @@ def apply_model(model_fn, data, params):
     conditions (params shared across conditions — same cell). Returned dict, shapes
     ``[n, n_stim, ...]``:
 
-    ``y_prev`` carries ``dt`` (bin width in seconds, from ``data["time"]``) alongside the previous
-    E/I and stimulus, so models integrate in physical time.
+    ``y_prev`` carries the previous E/I, the stimulus of the bin being predicted (``stim_E/I[t]``
+    for the step ``t-1 -> t``: a pulse drives the response within its own bin, which matters once
+    bins are as long as the opto response latency), and ``dt`` (bin width in seconds, from
+    ``data["time"]``) so models integrate in physical time.
 
     * ``pred_y_1step``        ``[…, T-1, 2]`` — teacher-forced one-step prediction (data E/I fed in).
     * ``pred_y_rollout``      ``[…, A, K, 2]``— autonomous rollout from A anchors (own E/I fed back),
@@ -645,13 +647,14 @@ def apply_model(model_fn, data, params):
 
         def per_stim(E_c, I_c, sE_c, sI_c):
             # ── Teacher-forced one-step pass (feed the data E/I into y_prev) ──
-            xs = (E_c[:-1], I_c[:-1], sE_c[:-1], sI_c[:-1])
+            # Step t-1 -> t sees E/I at t-1 and the stimulus at t.
+            xs = (E_c[:-1], I_c[:-1], sE_c[1:], sI_c[1:])
 
             def tf_step(state, inp):
-                E_p, I_p, sE_p, sI_p = inp
+                E_p, I_p, sE_t, sI_t = inp
                 y_prev = {
                     "E_prev": E_p, "I_prev": I_p,
-                    "stim_E_prev": sE_p, "stim_I_prev": sI_p, "dt": dt,
+                    "stim_E": sE_t, "stim_I": sI_t, "dt": dt,
                 }
                 new_state, mean = model_fn(state, y_prev, dyn_params)
                 E_n, I_n = mean
@@ -666,10 +669,10 @@ def apply_model(model_fn, data, params):
             # One free-running step (feed own E/I back; §7), shared by both autonomous rollouts.
             def free_step(carry, inp):
                 state, E_p, I_p = carry
-                sE_p, sI_p = inp
+                sE_t, sI_t = inp
                 y_prev = {
                     "E_prev": E_p, "I_prev": I_p,
-                    "stim_E_prev": sE_p, "stim_I_prev": sI_p, "dt": dt,
+                    "stim_E": sE_t, "stim_I": sI_t, "dt": dt,
                 }
                 new_state, mean = model_fn(state, y_prev, dyn_params)
                 E_n, I_n = mean
@@ -681,8 +684,8 @@ def apply_model(model_fn, data, params):
                 I0 = jax.lax.dynamic_slice_in_dim(I_c, a, 1, 0)[0]
                 hid0 = jax.lax.dynamic_slice_in_dim(hid_full, a, 1, 0)[0]  # (nh,)
                 state0 = {k: hid0[i] for i, k in enumerate(hkeys)}
-                sE_win = jax.lax.dynamic_slice_in_dim(sE_c, a, K, 0)   # (K,)
-                sI_win = jax.lax.dynamic_slice_in_dim(sI_c, a, K, 0)
+                sE_win = jax.lax.dynamic_slice_in_dim(sE_c, a + 1, K, 0)   # (K,) stim at a+1..a+K
+                sI_win = jax.lax.dynamic_slice_in_dim(sI_c, a + 1, K, 0)
                 _, pred = jax.lax.scan(free_step, (state0, E0, I0), (sE_win, sI_win))
                 return pred                                            # (K,2)
 
@@ -690,7 +693,7 @@ def apply_model(model_fn, data, params):
 
             # ── Full-length autonomous rollout from t=0 ──
             _, pred_full = jax.lax.scan(
-                free_step, (init_state, E_c[0], I_c[0]), (sE_c[:-1], sI_c[:-1])
+                free_step, (init_state, E_c[0], I_c[0]), (sE_c[1:], sI_c[1:])
             )                                                         # (T-1,2)
 
             return {

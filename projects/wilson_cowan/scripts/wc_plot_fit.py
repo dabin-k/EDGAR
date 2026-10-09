@@ -54,16 +54,16 @@ def _simulate_free(params: dict, stim_E: np.ndarray, stim_I: np.ndarray,
                    E0: float, I0: float):
     """Free-running rollout: carry (E,I), predict next from own output.
 
-    Uses the model's stim-at-(t-1) convention (matching apply_model). Returns
+    Uses the model's stim-at-t convention (step t-1 -> t sees stim[t], matching apply_model). Returns
     E,I of length T with the given initial condition prepended.
     """
-    xs = {"stim_E_prev": jnp.asarray(stim_E[:-1]),
-          "stim_I_prev": jnp.asarray(stim_I[:-1])}
+    xs = {"stim_E": jnp.asarray(stim_E[1:]),
+          "stim_I": jnp.asarray(stim_I[1:])}
 
     def step(carry, s):
         E_prev, I_prev = carry
         y_prev = {"E_prev": E_prev, "I_prev": I_prev,
-                  "stim_E_prev": s["stim_E_prev"], "stim_I_prev": s["stim_I_prev"]}
+                  "stim_E": s["stim_E"], "stim_I": s["stim_I"]}
         _, (E, I) = model_jax({}, y_prev, params)
         return (E, I), (E, I)
 

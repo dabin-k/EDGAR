@@ -66,10 +66,10 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     E_prev = E[:, :-1].reshape(-1)
     E_next = E[:, 1:].reshape(-1)
     dE = E_next - E_prev
-    stim_E_prev = stim_E[:, :-1].reshape(-1)
+    stim_E_t = stim_E[:, 1:].reshape(-1)
 
     # tau_E: select post-stimulus steps with high activity where the system is decaying
-    mask_E_decay = (stim_E_prev == 0) & (E_prev > 0.5 * max_obs_E) & (dE < 0)
+    mask_E_decay = (stim_E_t == 0) & (E_prev > 0.5 * max_obs_E) & (dE < 0)
     ratio_E_est = np.percentile(dE[mask_E_decay] / E_prev[mask_E_decay], 10) / dt #use the minimum 10 percent of E decay, avoids outliers from noise; per second
     tau_E = -1.0 / ratio_E_est
     tau_I = tau_E #just assume the same, hard to extract good value due to low SNR and inhibitory response not really entering decaying mode
@@ -84,7 +84,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         E_prev[mask_E_active],
         -I_prev[mask_E_active],
         np.ones_like(E_prev[mask_E_active]),
-        stim_E_prev[mask_E_active]
+        stim_E_t[mask_E_active]
     ])
     w, _, _, _ = np.linalg.lstsq(X_E, LHS_E, rcond=None)
     W_EE = max(w[0] * tau_E, 0.0)
@@ -98,7 +98,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
     I_next_I = I[:, 1:].reshape(-1)
     dI = I_next_I - I_prev_I
     E_prev_I = E[:, :-1].reshape(-1)
-    stim_I_prev = stim_I[:, :-1].reshape(-1)
+    stim_I_t = stim_I[:, 1:].reshape(-1)
 
     mask_I_active = (I_prev_I > 0.5)
     LHS_I = (dI[mask_I_active] / dt + I_prev_I[mask_I_active] / tau_I) / (I_max - I_prev_I[mask_I_active])
@@ -106,7 +106,7 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         E_prev_I[mask_I_active],
         -I_prev_I[mask_I_active],
         np.ones_like(I_prev_I[mask_I_active]),
-        stim_I_prev[mask_I_active]
+        stim_I_t[mask_I_active]
     ])
     g, _, _, _ = np.linalg.lstsq(X_I, LHS_I, rcond=None)
     W_IE = max(g[0] * tau_I, 0.0)

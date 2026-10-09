@@ -10,7 +10,7 @@ def model(hidden_state, y_prev, params):
     Args
     ----
     hidden_state: a dictionary of additional hidden variables
-    y_prev: tuple of ((E_prev, I_prev), (stim_E_prev, stim_I_prev)) representing the previous state and previous stimuli
+    y_prev: tuple of ((E_prev, I_prev), (stim_E, stim_I)) representing the previous state and the stimuli of the bin being predicted
     params: dictionary of model parameters
 
     '''
@@ -39,14 +39,14 @@ def model(hidden_state, y_prev, params):
 
     E_prev = y_prev['E_prev']
     I_prev = y_prev['I_prev']
-    stim_E_prev = y_prev['stim_E_prev']
-    stim_I_prev = y_prev['stim_I_prev']
+    stim_E = y_prev['stim_E']
+    stim_I = y_prev['stim_I']
 
     S_prev = hidden_state['S']
 
-    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E_prev), 0)
+    E_dot = -E_prev + (E_max - E_prev)* np.maximum((W_EE * E_prev - W_EI * I_prev - W_ES * S_prev + C_E + XE * stim_E), 0)
     E_dot /= tau_E
-    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I_prev), 0)
+    I_dot = -I_prev + (I_max - I_prev)* np.maximum((W_IE * E_prev - W_II * I_prev - W_IS * S_prev + C_I + XI * stim_I), 0)
     I_dot /= tau_I
     E = E_prev + H * E_dot
     I = I_prev + H * I_dot

@@ -338,8 +338,8 @@ def generate_model_data(model_name: str, params: dict, tmax: int, stim_designs: 
         y_prev = {
             'E': Et[t-1],
             'I': It[t-1],
-            'stim_E': stim_E_design[t-1],
-            'stim_I': stim_I_design[t-1]
+            'stim_E': stim_E_design[t],
+            'stim_I': stim_I_design[t]
         }
         state, (E, I) = model(state, y_prev, params)
         Et[t] = E
