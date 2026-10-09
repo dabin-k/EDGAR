@@ -31,9 +31,11 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
 
     Returns:
         Estimated model parameters dictionary containing keys:
-            'tau_E', 'tau_I', 'W_EE', 'W_EI', 'W_IE', 'W_II',
-            'E_max', 'I_max', 'C_E', 'C_I', 'XE', 'XI'
+            'log_tau_E', 'log_tau_I', 'log_W_EE', 'log_W_EI', 'log_W_IE', 'log_W_II',
+            'log_E_max', 'log_I_max', 'C_E', 'C_I', 'log_XE', 'log_XI'
+        Positive parameters are returned as the log of a strictly positive estimate (log_ keys).
     """
+    POS_FLOOR = 0.01   # smallest initial value for log-fitted weights/drives (log(0) = -inf)
     # Ensure arrays are float64 for least-squares numerical stability
     target_y = np.asarray(data["target_y"], dtype=np.float64)  # (C, T, 2)
     stim_E = np.asarray(data["stim_E"], dtype=np.float64)  # (C, T)
@@ -87,10 +89,10 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         stim_E_t[mask_E_active]
     ])
     w, _, _, _ = np.linalg.lstsq(X_E, LHS_E, rcond=None)
-    W_EE = max(w[0] * tau_E, 0.0)
-    W_EI = max(w[1] * tau_E, 0.0)
+    W_EE = max(w[0] * tau_E, POS_FLOOR)
+    W_EI = max(w[1] * tau_E, POS_FLOOR)
     C_E  = max(w[2] * tau_E, 0.0)
-    XE   = max(w[3] * tau_E, 0.0)
+    XE   = max(w[3] * tau_E, POS_FLOOR)
 
     # 4. 4-parameter linear regression for Inhibitory parameters
     # LHS_I = (dI/dt + I_prev/tau_I) / (I_max - I_prev)
@@ -109,22 +111,22 @@ def parameter_estimator(data: Dict[str, np.ndarray]) -> Dict[str, float]:
         stim_I_t[mask_I_active]
     ])
     g, _, _, _ = np.linalg.lstsq(X_I, LHS_I, rcond=None)
-    W_IE = max(g[0] * tau_I, 0.0)
-    W_II = max(g[1] * tau_I, 0.0)
+    W_IE = max(g[0] * tau_I, POS_FLOOR)
+    W_II = max(g[1] * tau_I, POS_FLOOR)
     C_I  = max(g[2] * tau_I, 0.0)
-    XI   = max(g[3] * tau_I, 0.0)
+    XI   = max(g[3] * tau_I, POS_FLOOR)
 
     return {
-        'tau_E': float(tau_E),
-        'tau_I': float(tau_I),
-        'W_EE': float(W_EE),
-        'W_IE': float(W_IE),
-        'W_EI': float(W_EI),
-        'W_II': float(W_II),
-        'E_max': float(E_max),
-        'I_max': float(I_max),
+        'log_tau_E': float(np.log(tau_E)),
+        'log_tau_I': float(np.log(tau_I)),
+        'log_W_EE': float(np.log(W_EE)),
+        'log_W_IE': float(np.log(W_IE)),
+        'log_W_EI': float(np.log(W_EI)),
+        'log_W_II': float(np.log(W_II)),
+        'log_E_max': float(np.log(E_max)),
+        'log_I_max': float(np.log(I_max)),
         'C_E': float(C_E),
         'C_I': float(C_I),
-        'XE': float(XE),
-        'XI': float(XI)
+        'log_XE': float(np.log(XE)),
+        'log_XI': float(np.log(XI))
     }

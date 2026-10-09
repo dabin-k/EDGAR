@@ -8,8 +8,9 @@ The evolved program is the WC transition (see ``seed_programs/wilson_cowan.py``)
       with a latent ``S`` carries ``{"S": ...}``).
     * ``mean`` is ``(E, I)`` — the predicted next observation.
     * ``params`` is a dict of learnable WC params. Hidden-state initial values are declared with
-      the ``s0_`` prefix; ``_split_params_s0`` strips them
-      into the scan carry and hands the rest to ``model``.
+      the ``s0_`` prefix, and parameters that must be positive are fitted in log space under a
+      ``log_`` prefix; ``_split_params`` exponentiates the ``log_`` keys, routes the ``s0_`` keys
+      into the scan carry and hands the rest to ``model`` in natural units.
 
 This module drives that single transition in the modes required by the three training
 objectives — teacher-forced one-step (``A``), autonomous rollout from anchors (``B``), and a full
@@ -296,7 +297,8 @@ def _load_real(
         carries ``target_y`` ``[n, C, T, 2]``, ``stim_E``/``stim_I`` ``[n, C, T]``,
         ``target_y_future`` ``[n, C, A, K, 2]``, ``time`` ``[n, T]``, ``mask`` ``[n, C]`` (1 = real
         trial), ``cond_id`` ``[n, C]`` (the trial's condition-table row, −1 for padding) and
-        ``loss_scale`` ``[n]`` (the mouse's mean per-trial train variance; losses divide by it);
+        ``loss_scale`` ``[n, 2]`` (the mouse's mean per-trial train variance of E and of I; each
+        population's error is divided by its own);
         ``n`` = number of mice on that side, ``C`` = that split's padded trial count.
     """
     if len(paths) < 2:
@@ -370,7 +372,7 @@ def _load_real(
             "time": time,
             "mask": jnp.asarray(real.astype(np.float32)),            # (n, C)
             "cond_id": jnp.asarray(cond_id.astype(np.int32)),        # (n, C)
-            "loss_scale": jnp.asarray([loss_scale[id(u)] for u in units], dtype=jnp.float32),  # (n,)
+            "loss_scale": jnp.asarray(np.stack([loss_scale[id(u)] for u in units]), dtype=jnp.float32),  # (n, 2)
         }
 
     X_disc_train = _build(disc_units, "train")
@@ -427,17 +429,18 @@ def _load_real(
         X_eval,
     )
 
-def _loss_scale(train_y: np.ndarray, warmup_bins: int, name: str) -> float:
-    """One sample's loss scale: the mean over its TRAIN trials of each trial's variance over the
-    scored bins (t >= 1 + warmup), averaged over E and I. ``train_y`` is ``(N, T, 2)`` real trials.
+def _loss_scale(train_y: np.ndarray, warmup_bins: int, name: str) -> np.ndarray:
+    """One sample's loss scale ``(2,)``: per population (E, I), the mean over its TRAIN trials of each
+    trial's variance over the scored bins (t >= 1 + warmup). ``train_y`` is ``(N, T, 2)`` real trials.
 
-    The losses divide by it, so a sample's score is mean(per-trial test MSE) / mean(per-trial train
-    variance): the fraction of variance unexplained. It is one constant per sample, nothing
-    condition- or trial-specific. Raises here, at load time, if it is not finite and positive.
+    The losses divide each population's error by its own scale, so a sample's score is the mean over
+    E and I of mean(per-trial test MSE) / mean(per-trial train variance): the fraction of variance
+    unexplained. It is one constant per sample and population, nothing condition- or trial-specific.
+    Raises here, at load time, if either population is not finite and positive.
     """
-    scale = float(np.asarray(train_y)[:, 1 + warmup_bins:, :].var(axis=1).mean())
-    if not np.isfinite(scale) or scale <= 0:
-        raise ValueError(f"loss_scale for {name} is {scale}; need finite > 0 train-trial variance")
+    scale = np.asarray(train_y)[:, 1 + warmup_bins:, :].var(axis=1).mean(axis=0)
+    if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+        raise ValueError(f"loss_scale for {name} is {scale}; need finite > 0 train-trial variance per channel")
     return scale
 
 
@@ -535,7 +538,7 @@ def _load_synthetic(
             "stim_I": sI,
             "target_y_future": target_y_future,
             "time": time,
-            "loss_scale": jnp.asarray(loss_scale, dtype=jnp.float32),   # (n,)
+            "loss_scale": jnp.asarray(np.stack(loss_scale), dtype=jnp.float32),   # (n, 2)
         }
 
     X_disc_train = _build(train_data_split, disc_idx, train_stim)
@@ -580,16 +583,28 @@ def _load_synthetic(
 
 
 
-def _split_params_s0(params: dict) -> tuple[dict, dict]:
-    """Strip ``s0_``-prefixed keys → initial hidden-state dict; rest is dyn params.
+def _split_params(params: dict) -> tuple[dict, dict]:
+    """Map fitted params to the model's natural units → ``(initial hidden state, dyn params)``.
 
-    Only strips keys of the form ``s0_<name>`` with ``<name>`` non-empty. The initial values are
-    ordinary GD parameters (per sample); stripping them here routes them into the scan carry
-    instead of the model's ``params``.
+    1. ``log_<name>`` → ``<name> = exp(value)``. Parameters that must be positive are fitted in
+       log space (GD moves the log, so steps are relative and the sign can never flip); the model
+       always reads ``<name>`` in natural units.
+    2. ``s0_<name>`` → initial hidden state ``<name>``: an ordinary GD parameter (per sample),
+       routed into the scan carry instead of the model's ``params``. ``log_s0_<name>`` gives a
+       positive initial state.
+
+    Only prefixes followed by a non-empty name are stripped. Raises if a ``log_<name>`` and a
+    plain ``<name>`` would both map to the same key.
     """
+    natural = {}
+    for k, v in params.items():
+        name, val = (k.removeprefix("log_"), jnp.exp(v)) if k.startswith("log_") and len(k) > 4 else (k, v)
+        if name in natural:
+            raise ValueError(f"params define {name!r} twice (plain and log_)")
+        natural[name] = val
     init_state = {}
     dyn_params = {}
-    for k, v in params.items():
+    for k, v in natural.items():
         if k.startswith("s0_") and len(k) > 3:
             init_state[k.removeprefix("s0_")] = v
         else:
@@ -642,7 +657,7 @@ def apply_model(model_fn, data, params):
     anchor_starts, K = _rollout_anchors(T)
 
     def per_sample(E_s, I_s, sE_s, sI_s, p):
-        init_state, dyn_params = _split_params_s0(p)
+        init_state, dyn_params = _split_params(p)
         hkeys = sorted(init_state.keys())
 
         def per_stim(E_c, I_c, sE_c, sI_c):
@@ -712,7 +727,7 @@ def loss_fn(model_output, data):
 
     Returns ``(n,)``. The engine wraps this in ``jnp.mean(loss_fn(...))``; each objective returns
     per-sample losses (see ``losses/``). All are MSE-based — no NLL / observation-noise term — and,
-    on real data, divided by the mouse's mean per-trial train variance (``loss_scale``). The
+    each population (E, I) divided by its own mean per-trial train variance (``loss_scale``). The
     selection is read from the ``EDGAR_WC_OBJECTIVE`` env var that ``load_data`` republishes from
     config.
     """

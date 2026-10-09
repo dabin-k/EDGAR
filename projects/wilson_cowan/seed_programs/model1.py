@@ -56,19 +56,20 @@ def model(state_prev, y_prev, params):
     new_state = {}
     return new_state, (E, I)
 
+# Positive parameters are fitted in log space
 model.DEFAULT_PARAMS = {
-    "tau_E": 0.06,   # time constants in seconds
-    "tau_I": 0.12,
-    "W_EE": 0.01,
-    "W_EI": 0.01,
-    "W_IE": 0.01,
-    "W_II": 0.01,
-    "E_max": 20.0,
-    "I_max": 20.0,
+    "log_tau_E": np.log(0.06),   # time constants in seconds
+    "log_tau_I": np.log(0.12),
+    "log_W_EE": np.log(0.01),
+    "log_W_EI": np.log(0.01),
+    "log_W_IE": np.log(0.01),
+    "log_W_II": np.log(0.01),
+    "log_E_max": np.log(20.0),
+    "log_I_max": np.log(20.0),
     # With E = I = 1 the W terms cancel, so the fixed point is E_max * C / (1 + C) ~ 1: the
     # baseline-normalised data level.
     "C_E": 0.05,
     "C_I": 0.05,
-    "XE": 3.0,
-    "XI": 1.0,
+    "log_XE": np.log(3.0),
+    "log_XI": np.log(1.0),
 }

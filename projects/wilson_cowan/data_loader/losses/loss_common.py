@@ -38,13 +38,27 @@ def per_sample_masked_mse(pred, target, mask=None):
     return jnp.sum(diff * m, axis=tuple(range(1, diff.ndim))) / (jnp.sum(mask, axis=1) * per_row)
 
 
-def per_sample_loss(pred, target, data):
-    """The objectives' per-sample loss ``(n,)``: masked MSE over real trials, divided by the
-    sample's ``loss_scale``.
+def per_population_masked_mse(pred, target, mask=None):
+    """Masked MSE kept per population (last axis, = (E, I)) → ``(n, 2)``; otherwise as
+    ``per_sample_masked_mse``."""
+    diff = (pred - target) ** 2
+    axes = tuple(range(1, diff.ndim - 1))
+    if mask is None:
+        return jnp.mean(diff, axis=axes)
+    m = mask.reshape(mask.shape + (1,) * (diff.ndim - mask.ndim))
+    per_row = diff[0, 0, ..., 0].size
+    return jnp.sum(diff * m, axis=axes) / (jnp.sum(mask, axis=1)[:, None] * per_row)
 
-    ``loss_scale`` is the sample's mean per-trial variance over its TRAIN trials, carried on both
-    the train and test dicts (``load_data._loss_scale``, which validates it), so the loss is
-    mean(per-trial MSE) / mean(per-trial train variance): the fraction of variance unexplained
-    (0 = perfect, 1 = no better than each trial's own mean).
+
+def per_sample_loss(pred, target, data):
+    """The objectives' per-sample loss ``(n,)``: each population's masked MSE over real trials,
+    divided by that population's ``loss_scale``, averaged over E and I.
+
+    ``loss_scale`` ``(n, 2)`` is the sample's mean per-trial variance over its TRAIN trials, per
+    channel, carried on both the train and test dicts (``load_data._loss_scale``, which validates
+    it). The loss is therefore the mean over E and I of each population's fraction of variance
+    unexplained (0 = perfect, 1 = no better than each trial's own mean). Normalising per population
+    keeps the higher-variance population (I) from dominating the fit.
     """
-    return per_sample_masked_mse(pred, target, data.get("mask")) / data["loss_scale"]
+    fvu = per_population_masked_mse(pred, target, data.get("mask")) / data["loss_scale"]
+    return jnp.mean(fvu, axis=-1)
