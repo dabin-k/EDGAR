@@ -53,7 +53,7 @@ project_params:
   chop_post_ms: 400.0
   # Loss not computed during warmup steps
   warmup_steps_ms: 100.0
-  bin_ms: 1               # bin width; multiple of the files' 1 ms bins (rollout_k / anchor_stride / T are in bins)
+  bin_ms: 10              # bin width; multiple of the files' 1 ms bins (rollout_k / anchor_stride / T are in bins)
   contrast: 0             # keep conditions with this screen contrast (0 = paper's blank-screen paradigm)
   # Individual trials (no averaging) are the n_stim axis, padded per split with a mask.
   # Train/test split within each mouse-sample:
