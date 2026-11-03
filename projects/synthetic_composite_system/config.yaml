@@ -15,9 +15,12 @@ llms:
   # default_provider: google (Gemini) or anthropic (Claude). Sets the default model
   # per role; override individual roles below to mix or pick specific models.
   default_provider: google
-  # model_llm: gemini-2.5-flash
-  # param_est_llm: gemini-2.5-flash
-  # jax_model_translator_llm: gemini-2.5-flash-lite
+  model_llm: gemini-3.1-pro-preview
+  param_est_llm: gemini-3.1-pro-preview
+  jax_model_translator_llm: gemini-2.5-flash-lite
+  model_thinking: medium
+  param_est_thinking: low
+  max_tokens: 15000
   # Default list minus 'lstsq': parameter estimators may use one small linear
   # least-squares solve (see prompts.yaml and the seed estimators).
   swear_words: ['scipy.optimize', 'optimize.minimize', 'curve_fit', 'sklearn']
