@@ -3,11 +3,12 @@ io:
   save_path: program_databases
 
 evolution:
-  n_generations: 12
-  n_islands: 8
-  batch_size: 6
+  n_generations: 5
+  n_islands: 4
+  batch_size: 4
   critical_population_size: 12
   n_migrants: 2
+  topology: [1, 2, 3, 0]
 
 llms:
   num_parents: 2
@@ -17,6 +18,17 @@ llms:
   # model_llm: gemini-2.5-flash
   # param_est_llm: gemini-2.5-flash
   # jax_model_translator_llm: gemini-2.5-flash-lite
+  # Default list minus 'lstsq': parameter estimators may use one small linear
+  # least-squares solve (see prompts.yaml and the seed estimators).
+  swear_words: ['scipy.optimize', 'optimize.minimize', 'curve_fit', 'sklearn']
 
 scoring:
-  param_penalty_weight: 0.01
+  # ~10% of the test-loss gap between the two seed models (0.0026) per parameter.
+  param_penalty_weight: 0.00025
+  gradient_descent:
+    # Adam moves each parameter ~learning_rate per step, so max_iter * learning_rate
+    # must cover the distance K_N travels from its initial guess (see
+    # scripts/check_param_recovery.py: 7500 steps recovers the true model from both a
+    # default and a median-based initialisation).
+    max_iter: 7500
+    learning_rate: 0.01

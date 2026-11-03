@@ -1,8 +1,10 @@
 import numpy as np
 
 def model(data: dict, params: dict, components: dict) -> np.ndarray:
-    """
+    r"""
     Multiplicative model combining light and nitrogen sub-components.
+    Equation:
+        $$f = a_{\mathrm{light,nitrogen}} \cdot g_{\mathrm{light}}(L, K_L) \cdot g_{\mathrm{nitrogen}}(N, K_N) + \mathrm{bias}$$
 
     Args:
         data: Dict with "L" (light) and "N" (nitrogen), each of shape (n_trials,).

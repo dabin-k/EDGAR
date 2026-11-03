@@ -1,0 +1,84 @@
+# Prompt overrides for synthetic_composite_system (deep-merged over
+# projects/prompt_defaults.yaml). Templates are filled with str.format, so avoid
+# literal curly braces (e.g. LaTeX \frac{..}{..}) in the text below.
+#
+# The sub-component equations below mirror data_loader/sub_components.py; keep
+# them in sync if the sub-components change.
+
+model:
+  base: |
+    You are an AI scientist. Below are {num_parents} models of plant growth rate, sorted from worst to best.
+
+    Each sample is one plant. At every time point we record the light level L (between 0 and 1), the nitrogen level N (between 1 and 100) and the plant's instantaneous growth rate. Every parameter is fitted separately for each plant.
+
+    The plant's response to each input is already known and is provided as a fixed sub-component function:
+    * g_light(L, K_L) = L / (K_L + L), the saturating response to light, with half-saturation constant K_L.
+    * g_nitrogen(N, K_N) = N / (K_N + N), the saturating response to nitrogen, with half-saturation constant K_N.
+    Both return values between 0 and 1.
+
+    Your task is to discover how these sub-components combine to determine the growth rate, i.e. the function f in growth_rate = f(g_light(L, K_L), g_nitrogen(N, K_N)), and to create a new model that is better than all the models below.
+
+    *Analyze* the progression of the models, *generalize* the improvements, and *create* a new model that is better than *all* previous models.
+  code_guidelines: |
+    **Code Generation Guidelines:**
+    * Import any packages you use.
+    * Model signature must be `def model(data, params, components):`
+      - `data` is a dict for a single plant: data["L"] and data["N"] are arrays of shape (n_trials,). Do NOT use data["growth_rate"] (it is the target you are predicting).
+      - `params` is a dict of named scalars for that plant (e.g. params["K_L"], params["K_N"]).
+      - `components` is a dict of the fixed sub-component functions: call them as components["g_light"](L, K_L) and components["g_nitrogen"](N, K_N).
+    * The model must return the predicted growth rate, an array of shape (n_trials,).
+    * Always obtain the sub-component outputs by calling the functions in `components`. Do NOT re-implement, redefine or modify g_light or g_nitrogen inside the model. You are free to choose how their outputs are combined and transformed.
+    * Keep the half-saturation constants (K_L, K_N) positive, e.g. by taking their absolute value before passing them to the sub-components.
+    * Ensure all free parameters (values in `params`) are numeric, not strings or functions.
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument (e.g. `n_bins = int(np.sqrt(len(x)))`). numpy float scalars raise `TypeError: 'numpy.float32' object cannot be interpreted as an integer` in these contexts.
+    * Ensure all string values in function call arguments are properly JSON-escaped
+    * You must also provide `default_params`: a dict of sensible initial values for every key in `params`. Keys must exactly match those used inside the model. Values must be floats.
+  docstring_guidelines: |
+    **Docstring Guidelines:**
+    * Use a descriptive name for this model, not a version number.
+    * Briefly describe what the model computes.
+    * Always include an "Equation:" section that writes out the full model as a single LaTeX display equation wrapped in double dollar signs, e.g. $$f = a \cdot g_{{\mathrm{{light}}}}(L, K_L) + b$$. Write the sub-components as g_{{\mathrm{{light}}}}(L, K_L) and g_{{\mathrm{{nitrogen}}}}(N, K_N), and use \mathrm{{...}} for multi-letter names and subscripts.
+    * Make the docstring a raw string (r""" ... """) so the LaTeX backslashes are preserved.
+  image_analysis_instructions: |
+    **Image Analysis Instructions:**
+
+    Attached are parity plots of predicted vs observed growth rate for two randomly chosen plants (one plant per row). Each point is one time point. The faint dotted diagonal is y = x: points on it are predicted perfectly, points above it are over-predicted and points below it are under-predicted. Each model is drawn with a different marker shape (see the legend). The left column colours the points by the light level L and the right column colours the same points by the nitrogen level N.
+
+    Analyse the plots and identify systematic weaknesses of the models:
+    **Where the models fail:** Which points lie furthest from the diagonal? Do the over-predicted or under-predicted points share a colour, i.e. a particular range of L, of N, or a combination of both?
+    **Model comparisons:** Where does the better model improve on the worse one, and which feature of its combination rule is responsible?
+
+    Use this analysis to choose a better way of combining the sub-components in the new model.
+
+parameter_estimator:
+  code_guidelines: |
+    **Code Generation Guidelines:**
+    * Import any packages you use.
+    * Do not include any text other than the code.
+    * Function signature must be `def parameter_estimator(data):`, where `data` is the single-plant data dict: data["L"], data["N"] and data["growth_rate"], each a numpy array of shape (n_trials,).
+    * The sub-component functions are NOT available here. If you need them, compute them inline: g_light = L / (K_L + L) and g_nitrogen = N / (K_N + N).
+    * Return a parameter dict with the same keys expected by the model.
+    * Your response **must** be less than {max_lines} lines (including imports). If it is longer, it will be immediately rejected.
+    * The estimate must be cheap to compute: it is only a starting point for gradient descent. Prefer simple statistics (e.g. medians, ranges) and at most a single small linear least-squares solve. Do not use grid searches or iterative fitting, and do not use complex fitting functions like {swear_words}.
+    * Do not call the model function in your parameter_estimator code, as you will not have access to it!
+    * Cast to `int()` when using a numeric value as an array size, slice index, or `range()` argument (e.g. `n_bins = int(np.sqrt(len(x)))`). numpy float scalars raise `TypeError: 'numpy.float32' object cannot be interpreted as an integer` in these contexts.
+    * Ensure all string values in function call arguments are properly JSON-escaped
+    * It is VERY IMPORTANT that the returned params dictionary has keys that exactly match the keys expected by the model, and that all values are floats. If the keys do not match, or if any value is not a float, your parameter_estimator will be rejected.
+
+jax_translator_model:
+  base: |
+    Translate the following model function to JAX-compatible code.
+
+    The model signature is `def model(data, params, components):` and it must be preserved exactly, including the `components` argument.
+
+    `components` is a dict of fixed sub-component functions that are already JAX-compatible. Keep every call such as components["g_light"](L, K_L) and components["g_nitrogen"](N, K_N) exactly as it is: do NOT inline, re-implement or redefine these functions.
+
+    Ensure that keys of data and params dicts are preserved.
+
+    Ensure that the input and output behavior of the function is preserved.
+
+    Include all necessary imports (jax, jax.numpy as jnp).
+
+    Ensure compatibility with jax.jit, jax.grad, and jax.vmap.
+
+    Do not include any text other than the code.
