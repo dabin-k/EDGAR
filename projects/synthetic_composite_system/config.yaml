@@ -9,6 +9,7 @@ evolution:
   critical_population_size: 12
   n_migrants: 2
   topology: [1, 2, 3, 0]
+  dedup_loss_tol: 0.0001
 
 llms:
   num_parents: 2
