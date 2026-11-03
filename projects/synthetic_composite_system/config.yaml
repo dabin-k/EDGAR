@@ -1,5 +1,5 @@
 io:
-  data_path: /path/to/data.npy
+  data_path: "" # synthetic data 
   save_path: program_databases
 
 evolution:

@@ -1,26 +1,35 @@
 import numpy as np
 
-
-def model(data, params):
-    """Evaluates the model for a single sample given data and parameters.
-
-    This function represents the core mathematical or algorithmic model.
-    It takes a single sample of data and a set of parameters, and
-    produces predictions.
+def model(data: dict, params: dict, components: dict) -> np.ndarray:
+    """
+    Multiplicative model combining light and nitrogen sub-components.
 
     Args:
-        data (dict): A dictionary containing data for one sample,
-                     e.g., `data['stimulus']` with shape `(n_trials,)`.
-        params (dict): A dictionary of model parameters, with keys
-                       matching those defined in `model.DEFAULT_PARAMS`.
+        data: Dict with "L" (light) and "N" (nitrogen), each of shape (n_trials,).
+        params: Dict of scalar per-plant parameters "K_L", "K_N", "light_nitrogen_coef", and "bias".
+        components: Dict of fixed sub-component functions,
+            `components["g_light"](L, K_L)` and `components["g_nitrogen"](N, K_N)`.
 
     Returns:
-        np.ndarray: The model's predictions for the given sample,
-                    typically with shape `(n_trials,)`.
+        Predicted growth rate, shape (n_trials,).
     """
-    raise NotImplementedError
+    L = data["L"]
+    N = data["N"]
+
+    K_L = params["K_L"]
+    K_N = params["K_N"]
+    a = params["light_nitrogen_coef"]
+    b = params["bias"]
+
+    g_light = components["g_light"]
+    g_nitrogen = components["g_nitrogen"]
+
+    return a * g_light(L, K_L) * g_nitrogen(N, K_N) + b
 
 
 model.DEFAULT_PARAMS = {
-    # "param_name": initial_value,
+    "K_L": 1.0,
+    "K_N": 1.0,
+    "light_nitrogen_coef": 1.0,
+    "bias": 0.0,
 }

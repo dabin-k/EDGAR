@@ -2,19 +2,33 @@ import numpy as np
 
 
 def parameter_estimator(data):
-    """Estimates model parameters for a single sample.
+    """Cheap initial guess for the multiplicative model for a single plant.
 
-    This function takes a single sample of data and attempts to estimate
-    the optimal parameters for the `model` function. This is often used
-    to provide good initial parameter guesses for gradient descent optimization.
+    K_L and K_N are set to the median of L and N (a typical half-saturation
+    scale); the linear coefficients are then a single least-squares solve.
 
     Args:
-        data (dict): A dictionary containing data for one sample,
-                     e.g., `data['stimulus']` and `data['response']`,
-                     each with shape `(n_trials,)`.
+        data (dict): Data for one plant with "L", "N" and "growth_rate", each of
+            shape (n_trials,).
 
     Returns:
-        dict: A dictionary of estimated parameters, with keys matching
-              those defined in `model.DEFAULT_PARAMS`.
+        dict: Estimated "K_L", "K_N", "light_nitrogen_coef" and "bias".
     """
-    raise NotImplementedError
+    L = np.asarray(data["L"])
+    N = np.asarray(data["N"])
+    y = np.asarray(data["growth_rate"])
+
+    K_L = np.median(L)
+    K_N = np.median(N)
+
+    light = L / (K_L + L)
+    nitrogen = N / (K_N + N)
+    A = np.column_stack([light * nitrogen, np.ones_like(y)])
+    a, b = np.linalg.lstsq(A, y, rcond=None)[0]
+
+    return {
+        "K_L": float(K_L),
+        "K_N": float(K_N),
+        "light_nitrogen_coef": float(a),
+        "bias": float(b),
+    }
